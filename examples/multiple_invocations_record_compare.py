@@ -5,8 +5,8 @@ from __future__ import annotations
 import torch
 
 from torch_cudagraph_debug.tensor_debug import (
-    CudaGraphTensorProbe,
-    TensorRecord,
+    TensorProbe,
+    RecordTensor,
 )
 
 
@@ -16,9 +16,9 @@ def main() -> None:
 
     x = torch.arange(4, device="cuda", dtype=torch.float32)
     expected = [torch.arange(4, dtype=torch.float32) + offset for offset in (1, 2, 3)]
-    probe = CudaGraphTensorProbe(
+    probe = TensorProbe(
         "repeated.hidden",
-        actions=[TensorRecord()],
+        actions=[RecordTensor()],
     )
 
     graph = torch.cuda.CUDAGraph()
@@ -32,12 +32,12 @@ def main() -> None:
     for replay_index in range(1, 3):
         graph.replay()
         torch.cuda.synchronize()
-        for snapshot in probe.records():
+        for snapshot in probe.snapshots():
             snapshots_by_replay.append(
                 (replay_index, snapshot.invocation_index, snapshot.tensor.clone())
             )
 
-    for snapshot in probe.records():
+    for snapshot in probe.snapshots():
         print(
             f"replay={snapshot.replay_index} "
             f"invocation={snapshot.invocation_index} "

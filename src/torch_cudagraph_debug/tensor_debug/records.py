@@ -7,6 +7,16 @@ from dataclasses import dataclass
 import torch
 
 
+@dataclass(frozen=True)
+class TensorProbeStatus:
+    """Latest comparison status for a tensor probe."""
+
+    ok: bool
+    message: str
+    replay_index: int
+    invocation_index: int
+
+
 @dataclass(frozen=True, eq=False)
 class TensorSnapshot:
     """A CPU tensor snapshot recorded from CUDA Graph replay."""

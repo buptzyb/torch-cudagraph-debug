@@ -15,14 +15,16 @@ StepSelector = int | Callable[[TensorSnapshot], int]
 class TensorBoardWriter(Protocol):
     """Minimal TensorBoard writer protocol used by the exporter helper."""
 
-    def add_scalar(self, tag: str, scalar_value: object, global_step: int) -> object:
-        ...
+    def add_scalar(
+        self, tag: str, scalar_value: object, global_step: int
+    ) -> object: ...
 
-    def add_histogram(self, tag: str, values: torch.Tensor, global_step: int) -> object:
-        ...
+    def add_histogram(
+        self, tag: str, values: torch.Tensor, global_step: int
+    ) -> object: ...
 
 
-def export_records_to_tensorboard(
+def export_snapshots_to_tensorboard(
     writer: TensorBoardWriter,
     records: Iterable[TensorSnapshot],
     *,

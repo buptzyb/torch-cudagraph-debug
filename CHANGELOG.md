@@ -1,46 +1,46 @@
 # Changelog
 
-## v0.1.0 - 2026-05-12
-
-First public 0.1.0 release of `torch-cudagraph-debug`.
+## v0.2.0 - 2026-06-28
 
 ### Added
 
-- `CudaGraphTensorProbe`, a CUDA graph tensor probe that returns its input tensor
-  unchanged while capturing debug-side device-to-host copies and host callbacks.
-- `TensorPrint` for compact native CPU-side printing from replay snapshots.
-- `TensorRecord` for callback-free latest CPU snapshots per logical probe slot,
-  exposed as `TensorSnapshot` objects in Python.
-- Per-invocation pinned host staging for all actions, so callback-backed probes
-  do not reuse one shared host buffer across logical slots.
-- `TensorCompare` for replay-time comparison against per-invocation CPU tensor
-  or NumPy ground truth lists, with sticky mismatch reporting via
-  `probe.assert_ok()`.
-- `invocation_index` on recorded snapshots and compare status so callers can
-  distinguish repeated calls of the same probe within one replay.
-- Single-capture probe ownership: one probe may be called multiple times inside
-  one capture, slots may have different tensor metadata, and another graph
-  capture must use a new probe.
-- `CudaGraphTensorProbe.attach_grad()` for activation, output, and parameter
-  gradient probing through PyTorch autograd hooks.
-- `mode="capture"` as the default warmup-transparent mode and `mode="always"`
-  as an explicit eager/debug escape hatch.
-- `non_contiguous="copy"` for opt-in debug-only contiguous copies of
-  non-contiguous inputs.
-- `torch_cudagraph_debug.tensor_debug.postprocess.export_records_to_tensorboard()`
-  for scalar and optional histogram summaries from recorded snapshots.
-- Examples for basic tensor debugging, record/compare workflows, module-internal
-  hidden tensor probes, gradient probe patterns, Python-side replay snapshot
-  collection, and TensorBoard export.
+- `memory_debug`, a Python-only CUDA allocator analysis domain built around
+  `MemoryRecorder`, immutable `MemoryRun` and `MemoryPoint` objects, and
+  explicit point ownership.
+- Timeline, same-run two-point, independent-run two-point, and four-point phase
+  comparison modes with allocator-wide `all`, `default`, and `private`
+  totals.
+- Automatic discovery of every `segment_pool_id` with pool and raw
+  `(pool, stream)` state, absolute values, signed deltas, and same-run
+  lifecycle observations.
+- Conservative cross-run matching with automatic default-pool pairing,
+  explicit one-to-one private-pool mappings, and visible unmatched pools.
+- Optional live-allocation stack and marker-delimited allocator-event
+  attribution with configurable warning or error policies.
+- Allocation cohort lifetime analysis with address-reuse generation splitting,
+  size histograms, event-backed birth and release stacks, transient
+  generations, live-byte peaks, and snapshot-inferred confidence.
+- Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
+  summary and rank-paired phase analysis without summing memory across GPUs.
+- Canonical gzip JSON run bundles with atomic writes, exact manifest fields,
+  lazy snapshot loading, strict JSON validation, and path traversal protection.
+- Manifest-only default timelines and un-attributed cross-run comparisons;
+  attributed analyses stream each raw point once and retain bounded compact
+  indexes.
+- Result-owned text, nested JSON, flattened CSV, and standalone HTML reports.
+  `include_unchanged=False` consistently filters text, HTML, and CSV while
+  JSON remains complete.
+- The `tcgd-memory` CLI with lifetime, timeline, two-run, phase, and
+  multi-rank group commands.
+- Public experimental allocator helpers under `memory_debug.advanced` using
+  one `Mapping[GroupKey, MemoryStats]` state representation.
+- `TensorProbe` with `PrintTensor`, `RecordTensor`, and `CompareTensor`
+  actions, immutable `TensorProbeStatus`, and typed tensor snapshots.
+- Capture-only and always-active tensor probing, gradient hook handles,
+  invocation-indexed expected values, sticky comparison status, and explicit
+  non-contiguous copy mode.
+- TensorBoard export through `export_snapshots_to_tensorboard`.
 
-### Compatibility Notes
+## v0.1.0 - 2026-05-12
 
-- Linux CUDA environments only.
-- Source builds only; prebuilt wheels are intentionally not provided for v0.1.
-- Build against the CUDA-enabled PyTorch installation in the target runtime with
-  `pip install --no-build-isolation`.
-- Source-tree imports and all-disabled probes can run without the native
-  extension, but enabled probes require a native extension built against
-  CUDA-enabled PyTorch.
-- Probe nodes are inline graph dependencies and can introduce large GPU bubbles;
-  they are intended for correctness debugging, not performance measurement.
+Initial tensor-debug release for Linux CUDA source builds.

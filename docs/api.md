@@ -1,268 +1,130 @@
 # torch-cudagraph-debug API Reference
 
-This document describes the public `tensor_debug` API. The package is designed
-for probes inserted into code that is later captured by `torch.cuda.CUDAGraph`.
+This reference describes the public 0.2 API.
 
-## Import Path
+## Package Root
+
+```python
+from torch_cudagraph_debug import (
+    CudaGraphDebugError,
+    NativeExtensionUnavailableError,
+    __version__,
+)
+```
+
+The package root contains only version and common errors. Import each debugging
+domain explicitly.
+
+## Tensor Debug
+
+### Stable Imports
 
 ```python
 from torch_cudagraph_debug.tensor_debug import (
-    CudaGraphTensorProbe,
-    TensorPrint,
-    TensorRecord,
-    TensorCompare,
+    CompareTensor,
+    PrintTensor,
+    RecordTensor,
+    TensorDebugError,
+    TensorMismatchError,
+    TensorProbe,
+    TensorProbeStatus,
     TensorSnapshot,
-    TensorCompareMismatchError,
 )
-from torch_cudagraph_debug.tensor_debug.postprocess import export_records_to_tensorboard
 ```
 
-## CudaGraphTensorProbe
+### TensorProbe
 
 ```python
-CudaGraphTensorProbe(
+TensorProbe(
     name: str,
-    actions: Sequence[TensorPrint | TensorRecord | TensorCompare],
+    actions: Sequence[PrintTensor | RecordTensor | CompareTensor],
     *,
     non_contiguous: Literal["error", "copy"] = "error",
-    mode: Literal["capture", "always"] = "capture",
+    when: Literal["capture", "always"] = "capture",
 )
 ```
 
-`CudaGraphTensorProbe` is a transparent tensor operator: `probe(tensor)` returns
-the same tensor object it received. When debug work is active, the native
-extension enqueues a D2H copy into per-invocation pinned host staging memory for
-non-empty tensors. A host callback is captured only when an action needs one:
-`TensorPrint` or `TensorCompare`. `TensorRecord` alone is callback-free.
+`name` and `actions` must be nonempty. Disabled actions are filtered before
+native probe creation. If every action has `enabled=False`, the probe is a
+pure no-op and does not load the native extension.
 
-Arguments:
+`probe(tensor)` returns the exact input tensor object. In
+`when="capture"`, calls outside CUDA stream capture perform no validation,
+allocation, copy, callback, print, record, or compare work. In
+`when="always"`, eager calls execute debug work too.
 
-- `name`: non-empty probe name used in print output, records, and compare errors.
-- `actions`: one or more action objects. Disabled actions are filtered before
-  native probe creation.
-- `non_contiguous`: probe-wide handling for non-contiguous inputs.
-- `mode`: controls whether eager calls execute debug work.
+The non-contiguous policy is probe-wide because all actions on one probe inspect
+the same source tensor:
 
-### Execution Modes
+- `"error"`: reject a non-contiguous tensor when debug work is active.
+- `"copy"`: create and retain an internal contiguous CUDA copy for the debug
+  path while returning the original tensor.
 
-`mode="capture"` is the default and should be used for model code that runs both
-warmup and CUDA Graph capture:
+A probe is owned by the first CUDA graph capture session that uses it. Multiple
+calls in that capture create logical slots in invocation order. Reusing the
+probe in another capture is an error.
 
-```python
-probe = CudaGraphTensorProbe("mid", [TensorRecord()])
-y = probe(y)
-```
-
-In this mode, eager and warmup calls are no-ops. They do not validate the input
-tensor, allocate pinned memory, enqueue copies, launch callbacks, print, record,
-or compare. If the same call runs while the current CUDA stream is
-being captured, the probe installs debug graph nodes.
-
-`mode="always"` makes eager calls execute debug work too:
-
-```python
-probe = CudaGraphTensorProbe("mid", [TensorRecord()], mode="always")
-```
-
-Use `always` only when eager side effects are intentional:
-
-- testing probe behavior without writing a CUDA graph;
-- recording eager and graph values through the same API;
-- debugging non-graph CUDA stream code;
-- covering native enqueue behavior in tests.
-
-It is not the default because eager execution can print during warmup, populate
-record buffers before graph replay, or set sticky compare failures
-before the graph being debugged has run.
-
-### Non-Contiguous Inputs
-
-`non_contiguous="error"` is the default. When debug work is active, a
-non-contiguous input raises with guidance to opt into copy mode.
-
-`non_contiguous="copy"` inserts an internal debug-only contiguous CUDA copy
-before the D2H copy and still returns the original tensor. The internal tensor is
-kept alive by the captured probe context so graph replay never uses a
-reused graph-pool pointer. This costs roughly:
-
-```text
-tensor.numel() * tensor.element_size()
-```
-
-extra CUDA graph-pool memory for each captured non-contiguous probe site.
-
-### Shape and Invocation Contract
-
-A `CudaGraphTensorProbe` is a single-capture object. All active calls to the
-same probe must happen in the same CUDA graph capture session. Different
-invocations inside that capture may observe different tensor shapes, dtypes, and
-sizes.
-
-If the same probe instance is called multiple times in one graph capture, the
-native code assigns logical slot `invocation_index` values in capture order.
-The probe is bound to the first CUDA graph capture session that uses it. Reusing
-the same probe in another graph capture, including recapturing the same Python
-code, is an error. Create a new probe for each graph capture.
-
-Each logical invocation slot owns a pinned host staging buffer sized for the
-largest tensor observed at that slot. This keeps callback-backed actions from
-reading data overwritten by another invocation, including when the same graph
-capture uses side streams. Pinned host memory is roughly:
-
-```text
-sum(max_nbytes_per_invocation_slot)
-```
-
-For callback-backed actions, `replay_index` is counted independently for each
-logical slot. In the common case where one graph contains every slot and is
-replayed as a unit, callback replay counts look like graph replay numbers:
-
-```text
-replay_index:     1  1  1  2  2  2
-invocation_index: 0  1  2  0  1  2
-```
-
-`TensorCompare` uses `expected[invocation_index]` for each logical slot. For
-custom comparison logic or a replay-by-replay time series, record snapshots with
-`TensorRecord` and clone them in Python after each replay.
-
-Keep the probe alive until the graph that captured it is done replaying.
-
-### Methods
+#### Methods
 
 ```python
 probe(tensor: torch.Tensor) -> torch.Tensor
-```
-
-Returns `tensor` unchanged. In `mode="capture"`, eager calls are no-ops and
-capture calls install debug graph nodes. In `mode="always"`, eager calls enqueue
-debug work on the current CUDA stream.
-
-```python
-probe.attach_grad(
+probe.snapshots() -> list[TensorSnapshot]
+probe.clear_snapshots() -> None
+probe.status() -> TensorProbeStatus
+probe.assert_ok() -> None
+probe.watch_grad(
     tensor: torch.Tensor,
     *,
     strict: bool = False,
-    return_handle: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, RemovableHandle | None]
-```
-
-Registers a PyTorch autograd hook that probes `tensor`'s backward gradient and
-returns `tensor` unchanged. The hook calls `probe(grad)` for its side effect and
-then explicitly returns the original `grad`, so it is not a gradient transform.
-
-If `tensor.requires_grad` is false, the default behavior is a no-op. Pass
-`strict=True` to raise instead. With `return_handle=True`, the method returns
-`(tensor, handle)` for tensors that require grad, or `(tensor, None)` for no-op
-attachments.
-
-```python
-probe.records() -> list[TensorSnapshot]
-```
-
-Returns the latest CPU snapshot for each logical probe slot, ordered by
-`invocation_index`. Call `torch.cuda.synchronize()` first if graph replay or
-eager stream work may still be pending. `TensorRecord` snapshots have
-`replay_index == 0` because the callback-free path does not count graph replays.
-Record slots are allocated when debug work is active and are zero-initialized
-when first allocated. CUDA graph capture records the D2H node but does not run
-it, so reading records after capture and before the first replay returns
-zero-initialized or previous slot contents rather than graph tensor values.
-Call `graph.replay()` and `torch.cuda.synchronize()` before interpreting
-records.
-
-```python
-probe.clear_records() -> None
-```
-
-Zeroes retained latest-record host buffers without dropping the captured slots.
-The next graph replay writes fresh values into the same pinned buffers.
-
-```python
-probe.status() -> dict[str, object]
-```
-
-Returns compare state:
-
-```python
-{"ok": bool, "message": str, "replay_index": int, "invocation_index": int}
-```
-
-Compare failures are sticky until the probe is closed.
-
-```python
-probe.assert_ok() -> None
-```
-
-Raises `TensorCompareMismatchError` if any compare action has failed.
-
-```python
+) -> torch.utils.hooks.RemovableHandle | None
 probe.close() -> None
 ```
 
-Releases native resources. Only call this after every CUDA graph that captured
-the probe can never replay again.
+`snapshots()` exposes latest `RecordTensor` slots as CPU tensors. Call it
+only after graph replay and synchronization. Capture installs copy nodes but
+does not execute them.
 
-## Actions
+`clear_snapshots()` zeroes retained host storage. It does not remove graph
+nodes or release the probe.
 
-### TensorPrint
+`status()` returns:
 
 ```python
-TensorPrint(
+@dataclass(frozen=True)
+class TensorProbeStatus:
+    ok: bool
+    message: str
+    replay_index: int
+    invocation_index: int
+```
+
+`assert_ok()` raises `TensorMismatchError` when the sticky compare status is
+not OK.
+
+`watch_grad()` registers an autograd hook. The hook probes the gradient for its
+side effect and returns the original gradient. The method returns a removable
+hook handle. If `tensor.requires_grad` is false, it returns `None`; with
+`strict=True`, it raises `RuntimeError`.
+
+`close()` releases native resources. Do not close a probe while a graph that
+captured it may still replay.
+
+### Actions
+
+```python
+PrintTensor(
     max_items: int = 16,
     every: int = 1,
     summary: bool = True,
     enabled: bool = True,
 )
-```
 
-Prints a compact tensor summary from the native host callback.
-
-- `max_items`: maximum number of values to include.
-- `every`: print only when `replay_index % every == 0`.
-- `summary`: include summary statistics when supported by the dtype.
-- `enabled`: disable this action without changing surrounding config.
-
-Example:
-
-```python
-probe = CudaGraphTensorProbe(
-    "activation",
-    [TensorPrint(max_items=8, every=10)],
-)
-```
-
-### TensorRecord
-
-```python
-TensorRecord(
+RecordTensor(
     enabled: bool = True,
 )
-```
 
-Stores the latest CPU snapshot for each logical probe slot.
-
-- `enabled`: disable this action without changing surrounding config.
-
-Example:
-
-```python
-probe = CudaGraphTensorProbe("activation", [TensorRecord()])
-
-g.replay()
-torch.cuda.synchronize()
-latest = probe.records()[0].tensor
-```
-
-`TensorRecord` exposes the retained per-invocation pinned host slots as latest
-CPU snapshots. If it is the only action, no host callback is captured and
-`replay_index` is reported as `0`.
-
-### TensorCompare
-
-```python
-TensorCompare(
-    expected: Sequence[torch.Tensor | numpy.ndarray],
+CompareTensor(
+    expected: torch.Tensor | numpy.ndarray | Sequence[torch.Tensor | numpy.ndarray],
     rtol: float = 1e-5,
     atol: float = 1e-8,
     equal_nan: bool = False,
@@ -270,72 +132,45 @@ TensorCompare(
 )
 ```
 
-Compares replay values against CPU or NumPy ground truth from the host callback.
+`PrintTensor` prints from a native CUDA host callback. `RecordTensor` stores
+latest host snapshots without requiring a host callback when used alone.
 
-- `expected`: non-empty sequence of CPU tensors or NumPy arrays. `expected[i]`
-  is used for `invocation_index == i`. Wrap a single expected tensor as
-  `TensorCompare([expected])`. A missing item for an observed invocation is an
-  error; extra items are ignored.
-- `rtol`, `atol`, `equal_nan`: tolerance options.
-- `enabled`: disable this action without validating `expected`.
+`CompareTensor.expected` values must be on CPU and match the captured source's
+shape and dtype. A single tensor or array is normalized to a one-item expected
+sequence and therefore applies only to invocation 0. It is never broadcast.
+For a probe called multiple times in one capture, pass one expected value per
+invocation in capture-call order.
 
-Example:
+A compare mismatch is sticky until the probe is destroyed. The first mismatch
+records the replay and invocation indices.
+
+### TensorSnapshot
 
 ```python
-expected = torch.full((4,), 3.0, device="cpu")
-probe = CudaGraphTensorProbe(
-    "mid",
-    [TensorCompare([expected], rtol=1e-5, atol=1e-8)],
+@dataclass(frozen=True, eq=False)
+class TensorSnapshot:
+    probe_name: str
+    replay_index: int
+    tensor: torch.Tensor
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    device: str
+    invocation_index: int
+```
+
+The tensor is a CPU view of retained latest-record storage. Clone it when a
+replay-by-replay time series must survive later replays.
+
+### TensorBoard Export
+
+```python
+from torch_cudagraph_debug.tensor_debug.postprocess import (
+    export_snapshots_to_tensorboard,
 )
-```
 
-After replay:
-
-```python
-torch.cuda.synchronize()
-probe.assert_ok()
-```
-
-## TensorSnapshot
-
-`probe.records()` returns `TensorSnapshot` objects with:
-
-- `probe_name`: probe name;
-- `replay_index`: callback-observed replay count for this logical slot, or `0`
-  for callback-free `TensorRecord` snapshots;
-- `invocation_index`: logical slot index for this probe;
-- `shape`: recorded tensor shape;
-- `dtype`: recorded tensor dtype;
-- `device`: original CUDA device string;
-- `tensor`: CPU tensor containing the recorded bytes.
-
-## Python-Side Time Series
-
-Custom Python actions are intentionally not supported inside CUDA host
-callbacks. Use `TensorRecord`, synchronize after each replay, and clone the CPU
-snapshots before the next replay overwrites the latest-record slots:
-
-```python
-probe = CudaGraphTensorProbe("hidden", [TensorRecord()])
-snapshots_by_replay: list[tuple[int, int, torch.Tensor]] = []
-
-for replay_index in range(1, 5):
-    graph.replay()
-    torch.cuda.synchronize()
-    for snapshot in probe.records():
-        snapshots_by_replay.append(
-            (replay_index, snapshot.invocation_index, snapshot.tensor.clone())
-        )
-```
-
-## TensorBoard Export Helper
-
-```python
-from torch_cudagraph_debug.tensor_debug.postprocess import export_records_to_tensorboard
-
-export_records_to_tensorboard(
+export_snapshots_to_tensorboard(
     writer,
-    records,
+    snapshots,
     *,
     tag_prefix: str = "",
     step: int | Callable[[TensorSnapshot], int] | None = None,
@@ -344,336 +179,481 @@ export_records_to_tensorboard(
 ) -> None
 ```
 
-Exports `TensorSnapshot` records to a TensorBoard-compatible writer. The helper
-does not import TensorBoard and does not add a package dependency; pass an
-existing `SummaryWriter` or compatible object.
+The helper accepts an existing TensorBoard-compatible writer and does not import
+TensorBoard itself. The caller owns synchronization and writer lifecycle.
 
-Default scalar tags are:
+## Memory Debug
 
-- `numel`
-- `mean`
-- `std`
-- `min`
-- `max`
-- `l2_norm`
+### Stable Imports
 
-The default TensorBoard step is `snapshot.replay_index`. Pass an integer `step`
-to force one global step for all records, or pass a callable to map each
-snapshot to a step. Empty tensors emit only `numel=0`. Histograms are disabled
-by default because they can be expensive for large tensors.
+```python
+from torch_cudagraph_debug.memory_debug import (
+    AllocationLifetimeReport,
+    AttributionOptions,
+    MemoryBundleError,
+    MemoryComparison,
+    MemoryDebugError,
+    MemoryHistoryError,
+    MemoryOwnershipError,
+    MemoryGroupSummary,
+    MemoryPoint,
+    MemoryRange,
+    MemoryRecorder,
+    MemoryRun,
+    MemoryRunGroup,
+    MemoryTimeline,
+    GroupPhaseComparison,
+    PhaseComparison,
+    compare_group_phases,
+    compare_phases,
+    compare_points,
+)
+```
 
-The helper intentionally does not clear records, flush or close the writer, save
-raw tensors, or catch writer errors. Raw large tensors should be saved
-separately, for example with `torch.save(snapshot.tensor, path)`.
+The facade is intentionally limited to these 19 names. Raw snapshot helpers are
+in `memory_debug.advanced` and are experimental.
 
-## Multi-Action and Performance Behavior
+### MemoryRecorder
 
-One active probe invocation captures one D2H copy for non-empty tensors. It
-captures one host callback only if any action needs callback-side work.
-`TensorRecord` alone is callback-free; zero-element tensors still capture the
-callback if one is needed but skip the D2H copy. Multiple callback actions on
-the same invocation do not create multiple callbacks:
+```python
+MemoryRecorder(
+    *,
+    name: str = "run",
+    bundle_dir: str | pathlib.Path | None = None,
+    rank: int | None = None,
+    synchronize: bool = True,
+    group_id: str | None = None,
+    world_size: int | None = None,
+    run_metadata: Mapping[str, JSONValue] | None = None,
+)
+```
+
+The recorder always collects `torch.cuda.memory._snapshot()`. It does not
+accept pool handles, `include_traces`, or allocator-history configuration.
+When `rank=None`, a numeric `RANK` environment variable is used if present.
+`world_size=None` similarly checks `WORLD_SIZE`; initialized
+`torch.distributed` is the fallback for both. When both values are known, rank
+must be in `[0, world_size)`.
+
+`group_id` identifies per-rank bundles from one distributed execution.
+`run_metadata` is application-owned JSON metadata for source revision,
+scenario, command, or other reproducibility fields. The recorder also captures
+package/Python/platform/PyTorch/CUDA provenance automatically. Initialized GPU
+properties are added only after a real snapshot, so recorder construction does
+not initialize CUDA for metadata collection.
+
+#### mark
+
+```python
+recorder.mark(
+    label: str,
+    *,
+    metadata: Mapping[str, JSONValue] | None = None,
+) -> MemoryPoint
+```
+
+Labels must be nonempty and unique. Outside CUDA capture, `mark()` synchronizes
+by default. During current-stream capture it skips synchronization and snapshots
+immediately.
+
+The recorder temporarily sets a PyTorch allocator metadata marker around the
+snapshot when those private APIs are available. This marker delimits same-run
+event windows. Marker failures become point warnings.
+
+Snapshot and metadata values must be JSON-compatible: null, string, bool,
+finite number, list/tuple, or a mapping with string keys. Validation errors
+include the path to the unsupported value.
+
+#### lifecycle
+
+```python
+recorder.snapshot_run() -> MemoryRun
+recorder.finish() -> MemoryRun
+recorder.result -> MemoryRun
+```
+
+`snapshot_run()` returns an immutable incomplete view without stopping
+collection. `finish()` is idempotent, makes later `mark()` calls invalid,
+writes a complete manifest, and returns an immutable run. `result` is
+available only after finish.
+
+As a context manager, the recorder calls `finish()` on exit and does not
+suppress exceptions.
+
+For tests only, `MemoryRecorder._from_snapshot_provider(...)` injects synthetic
+snapshots without exposing a provider in the public constructor.
+
+### MemoryPoint
+
+A point exposes `run_id`, `index`, `label`, `timestamp`, immutable
+metadata, compact `groups: Mapping[GroupKey, MemoryStats]`, and warnings. Pool
+and scope mappings are cached derivations of that state.
+
+```python
+point.groups
+point.pools
+point.totals  # all/default/private MemoryStats
+point.raw_snapshot() -> Mapping | Sequence
+point.descriptor() -> dict
+```
+
+For persisted runs, `raw_snapshot()` lazily reads and caches the point's gzip
+JSON payload.
+
+### MemoryRun
+
+```python
+MemoryRun.load(bundle_dir, *, cache_snapshots=True) -> MemoryRun
+run.point(label_or_index_or_point) -> MemoryPoint
+run[label_or_index] -> MemoryPoint
+run.between(before, after) -> MemoryRange
+run.compare(before, after, *, attribution=None) -> MemoryComparison
+run.timeline(*, attribution=None) -> MemoryTimeline
+run.lifetimes(
+    at=None,
+    *,
+    born_between=None,
+    through=None,
+    attribution=None,
+) \
+    -> AllocationLifetimeReport
+```
+
+`MemoryRun` also carries `rank`, `group_id`, `world_size`, immutable automatic
+`provenance`, and immutable user `run_metadata`.
+
+A point passed to `point()`, `between()`, or `compare()` must carry the
+same `run_id` and correspond to a point in that run. Otherwise
+`MemoryOwnershipError` is raised. `after` must have a larger index than
+`before`.
+
+Same-run comparison can use allocator addresses to report lifecycle
+observations:
+
+- new and removed segment bytes;
+- bytes that became active;
+- bytes released back to inactive storage.
+
+These observations are snapshot-to-snapshot address comparisons, not historical
+allocator events.
+
+### AttributionOptions
+
+```python
+AttributionOptions(
+    stacks: bool = False,
+    events: bool = False,
+    lifetimes: bool = False,
+    on_missing: Literal["warn", "error"] = "warn",
+    stack_depth: int = 2,
+    limit: int = 20,
+)
+```
+
+The application, not the recorder, controls
+`torch.cuda.memory._record_memory_history()`.
+
+- No history: state and lifecycle work; allocation stacks and events are
+  generally unavailable.
+- `enabled="state", context="state", stacks="python"`: live block allocation
+  stacks are available.
+- `enabled="all", context="all", stacks="python"`: live block stacks and
+  historical `device_traces` events are available.
+
+`stacks=True` groups active bytes by pool and allocation call stack, with a
+separate by-stream detail. Blocks without frames remain in `<unattributed>`.
+Coverage is reported for both points.
+
+`events=True` aggregates same-run events by pool, stream, action, and event
+call stack. Events begin after the earlier point's marker and end at the later
+snapshot endpoint. An event's reported pool ID is preferred; otherwise address
+ranges are used and unresolved events remain in `pool[unknown]`.
+
+`lifetimes=True` embeds a top-cohort lifetime summary in same-run comparisons
+and timelines. In a phase comparison it applies independently to the baseline
+and candidate growth ranges. Cross-run lifetime requests are rejected.
+
+For snapshots containing traces from multiple CUDA devices, event windows are
+built independently for every device that owns an endpoint segment or has a
+trace entry in the interval. This preserves event-only transient allocations
+on devices with no endpoint segment. Markers from one device cannot satisfy
+another device's boundary.
+
+Missing requested history adds a warning or raises `MemoryHistoryError`
+according to `on_missing`.
+
+### Allocation Cohort Lifetimes
+
+```python
+run.lifetimes(
+    at: str | int | MemoryPoint | None = None,
+    *,
+    born_between: tuple[
+        str | int | MemoryPoint,
+        str | int | MemoryPoint,
+    ] | None = None,
+    through: str | int | MemoryPoint | None = None,
+    attribution: AttributionOptions | None = None,
+) -> AllocationLifetimeReport
+```
+
+With `at` set, the report starts there and retains only allocation instances
+active at that anchor. With `at=None`, it scans from the first point and keeps
+all cohorts observed through `through` or the final point. The end point must
+not precede the start point and must belong to the same run.
+
+`born_between=(start, end)` instead selects generations allocated in the
+half-open marker range `(start, end]`; it is mutually exclusive with `at`.
+With complete allocator events, a generation that is allocated and freed
+entirely between snapshots remains in the report. `peak_live_bytes` captures
+its event-derived peak even when every point state is zero. With events
+disabled or incomplete, visible snapshot births remain available with
+`snapshot_inferred` confidence and a warning that transient allocations may be
+missing.
+
+An allocation instance is tracked by device, block address, size, requested
+size, pool, and stream. A matching `free_requested` followed by `alloc` at the
+same address splits the old and new generations. Event size matching accepts
+either the snapshot's allocator-rounded block size or its requested size
+because PyTorch traces may report the latter.
+
+Instances are grouped into cohorts by device, pool, and allocation stack. Each
+cohort retains point-by-
+point active/requested bytes, block counts, stream IDs, a unique-instance size
+histogram, allocation births, release stacks, and point/event peaks.
+
+Release evidence is explicit:
+
+- `event_exact` means a matching `free_requested` event exists in the marker-
+  delimited interval;
+- `snapshot_inferred` means an observed block disappeared without exact event
+  evidence;
+- `still_active_bytes` counts observed instances active at the end point.
+
+The application must enable full allocator history before the allocations of
+interest to obtain exact release timing and free call stacks. With events
+disabled or unavailable, snapshot-inferred results remain usable. Snapshot-
+only matching cannot detect a free-and-reallocate cycle that reuses the same
+address and shape entirely between two points.
+
+Calling `run.lifetimes()` without explicit options defaults to stack depth 4,
+event attribution, warning on missing history, and the top 20 cohorts. Use
+`AttributionOptions(events=False, ...)` for snapshot-only analysis. Cohorts are
+ranked by bytes born for `born_between`, by bytes active at an anchor, or by
+peak-to-minimum impact when there is no selection.
+
+This API reports allocator-block evidence. It does not recover Python tensor
+names, object identity, dtype, shape, or higher-level ownership unless those
+details are inferable from the recorded call stacks and allocation sizes.
+
+### Timeline
+
+`run.timeline()` reports absolute state and a delta for every observed pool
+and `(pool, stream)` group at every point. The first point is relative to zero.
+If a pool disappears, the current state is zero and its negative delta remains
+visible. Unchanged rows are retained by default.
+
+The default timeline is manifest-only and does not read raw snapshots;
+`timeline.adjacent` is empty. Requesting stack or event attribution streams each
+point once and stores attributed same-run comparisons in `timeline.adjacent`.
+
+With `lifetimes=True`, one full-run cohort report is attached as
+`timeline.allocation_lifetimes`. Adjacent comparisons do not repeat the same
+lifetime scan.
+
+### Cross-Run Comparison
+
+```python
+compare_points(
+    before: MemoryPoint,
+    after: MemoryPoint,
+    *,
+    pool_mapping: Mapping[PoolId, PoolId] | None = None,
+    attribution: AttributionOptions | None = None,
+) -> MemoryComparison
+```
+
+The points must have different `run_id` values. Without `stacks=True`, the
+comparison uses compact manifest state and never reads raw snapshots. Cross-run
+matching is conservative:
+
+1. Default `(0,0)` pools match automatically when present in both runs.
+2. Private pools match only through a one-to-one `pool_mapping`.
+3. Identical raw private IDs are still unmatched without that mapping.
+4. Streams are never matched across runs; all pool/stream rows are before-only
+   or after-only.
+5. Address lifecycle is disabled.
+6. `events=True` is rejected.
+7. `lifetimes=True` is rejected.
+8. Stack deltas are computed only for matched pools.
+
+Every comparison separately exposes `all`, `default`, and `private` totals.
+They include unmatched private pools and therefore remain complete even when
+pool-level cross-run identity is intentionally unavailable.
+
+### Phase Comparison
+
+```python
+compare_phases(
+    baseline: MemoryRange,
+    candidate: MemoryRange,
+    *,
+    pool_mapping: Mapping[PoolId, PoolId] | None = None,
+    attribution: AttributionOptions | None = None,
+) -> PhaseComparison
+```
+
+The result contains `baseline_growth`, `candidate_growth`, `start_delta`,
+`end_delta`, a decomposition row for each matched pool and metric, and a
+`total_decomposition` for each `all`/`default`/`private` scope. Every row
+verifies:
 
 ```text
-CUDA tensor
-  -> D2H copy
-  -> optional host callback
-       -> callback action 0
-       -> callback action 1
-       -> callback action 2
+end_delta = start_delta + candidate_growth - baseline_growth
 ```
 
-The callback runs callback actions in the order passed to `CudaGraphTensorProbe`.
-Disabled actions are filtered in Python before native probe creation. If all
-actions are disabled, the probe is a pure no-op: it does not require a native
-probe handle, `probe(tensor)` returns `tensor`, `records()` returns `[]`, and
-`status()` is ok.
+Event attribution applies to the two same-run growth comparisons. Start/end
+cross-run comparisons never compare events.
+Lifetime attribution follows the same rule: each growth range owns its cohort
+report, while start/end cross-run comparisons do not.
 
-Staging memory is private per logical invocation slot. `TensorRecord` exposes
-those slots through `records()`. Callback-only probes use the same slot storage
-internally but keep `records()` empty unless a `TensorRecord` action is present.
-
-The D2H copy and any host callback are graph dependencies. Returning the
-original tensor avoids changing Python dataflow, but it does not make the debug
-nodes independent of the captured CUDA stream. Later graph work waits for these
-debug nodes to finish, so traces with probes can show large GPU bubbles,
-especially when callback actions are enabled. Large tensors probed at many
-invocation sites can also retain substantial pinned host memory. Use probes for
-correctness debugging, and remove or gate them before performance measurement.
-
-## Examples
-
-### Print Only
+### Multi-Rank Run Groups
 
 ```python
-probe = CudaGraphTensorProbe("mlp.out", [TensorPrint(max_items=16)])
+MemoryRunGroup.load(group_dir, *, cache_snapshots=False) -> MemoryRunGroup
+MemoryRunGroup.from_runs(runs) -> MemoryRunGroup
+group[rank] -> MemoryRun
+group.summary() -> MemoryGroupSummary
 
-with torch.cuda.graph(g):
-    y = probe(y)
+compare_group_phases(
+    baseline: MemoryRunGroup,
+    candidate: MemoryRunGroup,
+    *,
+    baseline_start: str | int,
+    baseline_end: str | int,
+    candidate_start: str | int,
+    candidate_end: str | int,
+    attribution: AttributionOptions | None = None,
+) -> GroupPhaseComparison
 ```
 
-### Record and Compare
+`load()` reads direct `*.tcgd-memory` child directories. A group requires
+non-null unique ranks, one run name, one ordered point-label sequence, and no
+conflicting non-null group IDs or world sizes. Declared-but-missing ranks,
+missing identity fields, incomplete bundles, runtime provenance differences,
+and user metadata differences are warnings. The default does not retain
+decompressed raw snapshots across ranks or points; set
+`cache_snapshots=True` only for workloads that repeatedly inspect the same
+raw payloads.
+
+`MemoryGroupSummary` emits per-rank point/scope states plus min, max, spread,
+and worst rank. `GroupPhaseComparison` pairs common ranks and aggregates the
+per-rank four-point total equations. Neither API sums GPU memory across ranks.
+
+### Result Objects
+
+`MemoryComparison`, `MemoryTimeline`, `PhaseComparison`,
+`AllocationLifetimeReport`, `MemoryGroupSummary`, and
+`GroupPhaseComparison` own rendering:
 
 ```python
-expected = torch.full((4,), 3.0, device="cpu")
-probe = CudaGraphTensorProbe(
-    "mid",
-    [
-        TensorRecord(),
-        TensorCompare([expected], rtol=1e-5, atol=1e-8),
-    ],
-)
-
-with torch.cuda.graph(g):
-    mid = probe(x + 2)
-
-g.replay()
-torch.cuda.synchronize()
-
-snapshots = probe.records()
-probe.assert_ok()
+result.to_text(include_unchanged=True) -> str
+result.to_dict() -> dict
+result.to_html(include_unchanged=True) -> str
+result.write(output_dir, include_unchanged=True) -> dict[str, Path]
 ```
 
-### Repeated Probe Calls
+`include_unchanged=False` filters zero-change rows from text, HTML, and CSV.
+`to_dict()` and `report.json` always retain complete data. Timeline and phase
+objects aggregate warnings from their component comparisons at the top level.
+
+Comparison data uses nested absolute and delta state:
+
+```json
+{
+  "before": {"allocated_bytes": 1024},
+  "after": {"allocated_bytes": 2048},
+  "delta": {"allocated_bytes": 1024}
+}
+```
+
+CSV flattens these as `before_allocated_bytes`,
+`after_allocated_bytes`, and `delta_allocated_bytes`.
+
+Every `write()` creates `report.txt`, `report.json`, and `report.html`.
+Pool-oriented results also create `totals.csv`, `pools.csv`, and
+`pool_streams.csv`, with optional `allocation_stacks.csv`, `events.csv`,
+`phase.csv`, and `phase_totals.csv`.
+
+`AllocationLifetimeReport`, and pool-oriented results that embed one, create
+`cohorts.csv`, `cohort_points.csv`, and `size_histograms.csv`. They add
+`birth_stacks.csv` or `release_stacks.csv` when those observations exist.
+Lifetime JSON keeps point states, histograms, birth/release confidence,
+point/event peaks, and exact/inferred/still-active totals nested under each
+cohort.
+
+Group summaries create `rank_points.csv` and `point_summary.csv`. Group phase
+reports create `rank_phase.csv` and `phase_summary.csv`.
+
+### Bundle Format
+
+The bundle schema is `torch-cudagraph-debug/memory-run`. A bundle has one
+plain JSON manifest and `snapshots/NNNN.json.gz` files. Writes use a temporary
+file followed by atomic replacement. Snapshot paths are validated to remain
+inside the bundle.
+
+Manifest, point, and group objects have canonical required fields. Group rows
+store only the seven base `MemoryStats` fields; inactive and fragmentation
+values are derived after loading. Missing or unknown fields are rejected.
+
+Loading reads only manifest summaries and never executes pickle. A bundle has
+one writer; distributed users create one bundle per rank.
+
+### CLI
+
+```text
+tcgd-memory lifetimes BUNDLE \
+  [--at POINT | --born-between START END] [--through POINT] \
+  [--no-events] --output DIR
+tcgd-memory timeline BUNDLE --output DIR
+tcgd-memory compare BUNDLE --before POINT --after POINT --output DIR
+tcgd-memory compare-runs BEFORE_BUNDLE AFTER_BUNDLE \
+  --before POINT --after POINT [--pool-map A=B] --output DIR
+tcgd-memory compare-phases BASELINE_BUNDLE CANDIDATE_BUNDLE \
+  --baseline-start POINT --baseline-end POINT \
+  --candidate-start POINT --candidate-end POINT \
+  [--pool-map A=B] --output DIR
+tcgd-memory summarize-group GROUP_DIR --output DIR
+tcgd-memory compare-group-phases BASELINE_GROUP CANDIDATE_GROUP \
+  --baseline-start POINT --baseline-end POINT \
+  --candidate-start POINT --candidate-end POINT --output DIR
+```
+
+Shared options are `--stacks`, `--events`, `--lifetimes`,
+`--on-missing {warn,error}`, `--stack-depth`, `--limit`, and
+`--only-changed`. The dedicated `lifetimes` command always groups by
+allocation stack, enables events by default, and uses stack depth 4;
+`--no-events` requests snapshot-only inference.
+Cross-run event and lifetime requests are rejected. Pool IDs use comma-
+separated components, for example `--pool-map 0,1=0,4`.
+
+## Experimental Advanced API
 
 ```python
-expected = [
-    torch.full((4,), 1.0, device="cpu"),
-    torch.full((4,), 2.0, device="cpu"),
-    torch.full((4,), 3.0, device="cpu"),
-]
-probe = CudaGraphTensorProbe(
-    "layer.hidden",
-    [TensorRecord()],
-)
-
-with torch.cuda.graph(g):
-    h0 = probe(x + 1)
-    h1 = probe(x + 2)
-    h2 = probe(x + 3)
-
-snapshots_by_replay = []
-for replay_index in range(1, 3):
-    g.replay()
-    torch.cuda.synchronize()
-    for snapshot in probe.records():
-        snapshots_by_replay.append(
-            (replay_index, snapshot.invocation_index, snapshot.tensor.clone())
-        )
-
-for snapshot in probe.records():
-    print(snapshot.replay_index, snapshot.invocation_index, snapshot.tensor)
-    torch.testing.assert_close(snapshot.tensor, expected[snapshot.invocation_index])
+from torch_cudagraph_debug.memory_debug import advanced
 ```
 
-For a complete runnable version, see
-[`examples/multiple_invocations_record_compare.py`](../examples/multiple_invocations_record_compare.py).
+The module exposes raw normalization, `MemoryStats` state aggregation, stack
+grouping, event-window, and byte-formatting helpers. `summarize_snapshot()` and
+`summarize_segments()` return `Mapping[GroupKey, MemoryStats]`. These helpers
+may change in a minor release; the stable facade follows semantic versioning.
 
-### Warmup-Transparent Default
+## Errors
 
-```python
-probe = CudaGraphTensorProbe("mid", [TensorRecord()])
-
-# Eager warmup: no records, no compare, no prints.
-for _ in range(3):
-    y = probe(model_step(x))
-
-with torch.cuda.graph(g):
-    y = probe(model_step(static_x))
-```
-
-### Intentional Eager Debug
-
-```python
-probe = CudaGraphTensorProbe(
-    "eager.mid",
-    [TensorRecord()],
-    mode="always",
-)
-
-y = probe(x)
-torch.cuda.synchronize()
-print(probe.records()[0].tensor)
-```
-
-### Non-Contiguous Copy
-
-```python
-view = x.t()
-expected = view.detach().cpu().contiguous()
-probe = CudaGraphTensorProbe(
-    "view",
-    [TensorRecord(), TensorCompare([expected], rtol=0.0, atol=0.0)],
-    non_contiguous="copy",
-)
-
-with torch.cuda.graph(g):
-    y = probe(view)
-```
-
-### Gradient Hooks
-
-Probe an activation's forward value with `probe(tensor)` and its backward
-gradient with `probe.attach_grad(tensor)`:
-
-```python
-hidden = value_probe(hidden)
-hidden = activation_grad_probe.attach_grad(hidden)
-```
-
-For a parameter gradient hook, use side-effect style so the code does not look
-like it replaces module state:
-
-```python
-weight_grad_probe.attach_grad(module.weight)
-```
-
-This hook observes the gradient when autograd produces it. That is not
-necessarily the same observation point as the final optimizer-facing `.grad`
-buffer. To inspect the final buffer, probe it after `backward()`:
-
-```python
-loss.backward()
-if module.weight.grad is not None:
-    final_weight_grad_probe(module.weight.grad)
-```
-
-Long-lived hooks can be removed with the optional PyTorch hook handle:
-
-```python
-_, handle = weight_grad_probe.attach_grad(module.weight, return_handle=True)
-handle.remove()
-```
-
-For a complete example covering forward activation values, activation gradients,
-parameter gradient hooks, and final `.grad` buffers, see
-[`examples/grad_probe_patterns.py`](../examples/grad_probe_patterns.py).
-
-### Internal Hidden Tensor in a Module
-
-For a complete module-level example, see
-[`examples/transformer_block_probe.py`](../examples/transformer_block_probe.py).
-It shows a block-shaped `torch.nn.Module` that owns a probe as a module field,
-inserts it into an internal hidden tensor in `forward()`, controls print/record
-and compare actions from a config object, relies on warmup-transparent default
-behavior, and reads latest records after graph replay.
-
-### TensorBoard Summaries
-
-For a complete TensorBoard example, see
-[`examples/tensorboard_export_records.py`](../examples/tensorboard_export_records.py).
-It shows both the convenience helper:
-
-```python
-export_records_to_tensorboard(
-    writer,
-    records,
-    tag_prefix="helper/",
-    write_histograms=True,
-)
-```
-
-and direct `SummaryWriter` calls for custom metrics:
-
-```python
-for snapshot in records:
-    tensor = snapshot.tensor.float()
-    step = snapshot.replay_index
-    writer.add_scalar("manual/abs_max", tensor.abs().max().item(), step)
-```
-
-TensorBoard writes should happen after `torch.cuda.synchronize()`, never inside
-the CUDA host callback.
-
-### Custom Python Consumers
-
-For custom processing, read `TensorRecord` snapshots after synchronization:
-
-```python
-probe = CudaGraphTensorProbe("mid", [TensorRecord()])
-
-with torch.cuda.graph(g):
-    y = probe(y)
-
-g.replay()
-torch.cuda.synchronize()
-for snapshot in probe.records():
-    my_custom_action(snapshot.tensor)
-```
-
-Python callbacks are not run from CUDA host callbacks.
-
-## Troubleshooting
-
-### Creating a probe raises `NativeExtensionUnavailableError`
-
-The native extension is CUDA-only and source-built against the installed PyTorch.
-Install with build isolation disabled after installing CUDA-enabled PyTorch:
-
-```bash
-pip install --no-build-isolation .
-```
-
-An all-disabled probe does not load the native extension.
-
-### `records()` is empty
-
-Common causes:
-
-- the probe has not been captured yet;
-- replay is asynchronous and `torch.cuda.synchronize()` has not run;
-- every record action is disabled;
-- the call happened during eager warmup in default `mode="capture"`;
-- `TensorRecord` was not included in the probe actions.
-
-For a replay-indexed time series, clone `TensorRecord` snapshots after each
-replay.
-
-### `records()` returns zero values before replay
-
-That is expected for newly allocated record slots. CUDA graph capture records
-the D2H node but does not execute it. Fresh slots are zero-initialized to avoid
-uninitialized host memory, and the first replay overwrites them with real graph
-tensor values. Run `graph.replay()` and `torch.cuda.synchronize()` before
-interpreting record tensors.
-
-### `assert_ok()` does not fail during eager warmup
-
-That is expected in default `mode="capture"`. Eager calls are transparent no-ops.
-Use `mode="always"` only if eager compare side effects are intentional.
-
-### Non-contiguous input does not fail during warmup
-
-That is expected in default `mode="capture"`. The contiguity policy is checked
-when debug work is active: during capture or in `mode="always"`.
-
-### `TensorCompare` reports shape or dtype mismatch
-
-Each expected CPU tensor or NumPy array must have the same shape and dtype as
-the tensor observed at the corresponding `invocation_index`. `TensorCompare`
-copies expected bytes into native storage when the probe is created.
-
-### Probe reused in another capture
-
-One probe can be captured by only one CUDA graph capture session. Multiple
-active calls inside that capture are supported and become logical slots, but a
-second capture with the same probe raises immediately. If you need to recapture
-or inspect another graph, create a new probe.
-
-### Profiling shows a large bubble before `wait for host callable`
-
-That is expected for inline probes. The host callback is captured on the same
-dependency chain as the D2H copy, so later graph work cannot continue until the
-callback returns. Use the trace only to confirm probe behavior, not to evaluate
-model performance.
-
-### Values are stale or missing
-
-CUDA graph replay and eager stream work are asynchronous. Synchronize before
-reading records or asserting compare state:
-
-```python
-g.replay()
-torch.cuda.synchronize()
-probe.assert_ok()
-```
+- `CudaGraphDebugError`: package-wide base.
+- `TensorDebugError`: tensor domain base.
+- `TensorMismatchError`: sticky tensor compare mismatch.
+- `MemoryDebugError`: memory domain base.
+- `MemoryHistoryError`: requested history unavailable or incomplete.
+- `MemoryBundleError`: malformed, unsupported, or unreadable bundle.
+- `MemoryOwnershipError`: point used with a run that does not own it.

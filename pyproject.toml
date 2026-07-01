@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torch-cudagraph-debug"
-version = "0.1.0"
-description = "CUDA Graph runtime tensor debugging utilities for PyTorch"
+version = "0.2.0"
+description = "CUDA Graph tensor and allocator memory debugging for PyTorch"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,7 +15,7 @@ dependencies = [
 authors = [{ name = "torch-cudagraph-debug contributors" }]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-keywords = ["cuda", "cuda-graphs", "debugging", "pytorch", "tensor"]
+keywords = ["cuda", "cuda-graphs", "debugging", "memory", "pytorch", "tensor"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -34,6 +34,9 @@ classifiers = [
 Homepage = "https://github.com/buptzyb/torch-cudagraph-debug"
 Source = "https://github.com/buptzyb/torch-cudagraph-debug"
 Issues = "https://github.com/buptzyb/torch-cudagraph-debug/issues"
+
+[project.scripts]
+tcgd-memory = "torch_cudagraph_debug.memory_debug.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import torch
 
-from torch_cudagraph_debug.tensor_debug import CudaGraphTensorProbe, TensorRecord
+from torch_cudagraph_debug.tensor_debug import TensorProbe, RecordTensor
 
 
 class DebugMLP(torch.nn.Module):
     def __init__(
         self,
         *,
-        activation_value_probe: CudaGraphTensorProbe,
-        activation_grad_probe: CudaGraphTensorProbe,
+        activation_value_probe: TensorProbe,
+        activation_grad_probe: TensorProbe,
     ) -> None:
         super().__init__()
         self.fc1 = torch.nn.Linear(4, 3, bias=False)
@@ -25,7 +25,7 @@ class DebugMLP(torch.nn.Module):
         hidden = self.activation_value_probe(hidden)
 
         # Pattern 2: probe the activation gradient when backward reaches hidden.
-        hidden = self.activation_grad_probe.attach_grad(hidden)
+        self.activation_grad_probe.watch_grad(hidden)
 
         return self.fc2(torch.relu(hidden)).sum()
 
@@ -38,21 +38,21 @@ def main() -> None:
     device = torch.device("cuda")
     static_x = torch.randn(2, 4, device=device)
 
-    activation_value_probe = CudaGraphTensorProbe(
+    activation_value_probe = TensorProbe(
         "activation.value",
-        [TensorRecord()],
+        [RecordTensor()],
     )
-    activation_grad_probe = CudaGraphTensorProbe(
+    activation_grad_probe = TensorProbe(
         "activation.grad",
-        [TensorRecord()],
+        [RecordTensor()],
     )
-    weight_grad_probe = CudaGraphTensorProbe(
+    weight_grad_probe = TensorProbe(
         "fc1.weight.grad.hook",
-        [TensorRecord()],
+        [RecordTensor()],
     )
-    final_weight_grad_probe = CudaGraphTensorProbe(
+    final_weight_grad_probe = TensorProbe(
         "fc1.weight.grad.final",
-        [TensorRecord()],
+        [RecordTensor()],
     )
 
     model = DebugMLP(
@@ -61,7 +61,7 @@ def main() -> None:
     ).to(device)
 
     # Pattern 3: probe a parameter gradient when autograd produces it.
-    weight_grad_probe.attach_grad(model.fc1.weight)
+    weight_grad_probe.watch_grad(model.fc1.weight)
 
     capture_stream = torch.cuda.Stream()
     capture_stream.wait_stream(torch.cuda.current_stream())
@@ -74,10 +74,10 @@ def main() -> None:
     torch.cuda.current_stream().wait_stream(capture_stream)
     torch.cuda.synchronize()
 
-    assert activation_value_probe.records() == []
-    assert activation_grad_probe.records() == []
-    assert weight_grad_probe.records() == []
-    assert final_weight_grad_probe.records() == []
+    assert activation_value_probe.snapshots() == []
+    assert activation_grad_probe.snapshots() == []
+    assert weight_grad_probe.snapshots() == []
+    assert final_weight_grad_probe.snapshots() == []
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.stream(capture_stream):
@@ -103,7 +103,7 @@ def main() -> None:
         final_weight_grad_probe,
     ]
     for probe in probes:
-        records = probe.records()
+        records = probe.snapshots()
         assert records, f"{probe.name} did not record any graph replay snapshots"
         last = records[-1]
         print(f"{last.probe_name}: replay={last.replay_index} shape={last.shape}")

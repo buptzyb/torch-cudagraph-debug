@@ -1,23 +1,21 @@
 """Tensor value debugging helpers for CUDA Graph replay."""
 
 from .actions import (
-    NonContiguousPolicy,
-    TensorCompare,
-    TensorPrint,
-    TensorRecord,
+    CompareTensor,
+    PrintTensor,
+    RecordTensor,
 )
-from .errors import TensorCompareMismatchError, TensorDebugError
-from .probe import CudaGraphTensorProbe, ProbeMode
-from .records import TensorSnapshot
+from .errors import TensorMismatchError, TensorDebugError
+from .probe import TensorProbe
+from .records import TensorProbeStatus, TensorSnapshot
 
 __all__ = [
-    "CudaGraphTensorProbe",
-    "TensorPrint",
-    "TensorRecord",
-    "TensorCompare",
+    "TensorProbe",
+    "PrintTensor",
+    "RecordTensor",
+    "CompareTensor",
     "TensorSnapshot",
+    "TensorProbeStatus",
     "TensorDebugError",
-    "TensorCompareMismatchError",
-    "NonContiguousPolicy",
-    "ProbeMode",
+    "TensorMismatchError",
 ]

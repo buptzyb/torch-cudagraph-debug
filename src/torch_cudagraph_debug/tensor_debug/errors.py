@@ -7,5 +7,5 @@ class TensorDebugError(CudaGraphDebugError):
     """Base error for tensor debug probes."""
 
 
-class TensorCompareMismatchError(TensorDebugError, AssertionError):
+class TensorMismatchError(TensorDebugError, AssertionError):
     """Raised when a tensor comparison action reported a mismatch."""

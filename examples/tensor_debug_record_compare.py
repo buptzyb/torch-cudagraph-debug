@@ -1,9 +1,9 @@
 import torch
 
 from torch_cudagraph_debug.tensor_debug import (
-    CudaGraphTensorProbe,
-    TensorCompare,
-    TensorRecord,
+    TensorProbe,
+    CompareTensor,
+    RecordTensor,
 )
 
 
@@ -13,11 +13,11 @@ def main() -> None:
 
     x = torch.ones(4, device="cuda")
     expected = torch.full((4,), 3.0, device="cpu")
-    probe = CudaGraphTensorProbe(
+    probe = TensorProbe(
         "mid",
         actions=[
-            TensorRecord(),
-            TensorCompare([expected], rtol=1e-5, atol=1e-8),
+            RecordTensor(),
+            CompareTensor([expected], rtol=1e-5, atol=1e-8),
         ],
     )
 
@@ -29,7 +29,7 @@ def main() -> None:
     torch.cuda.synchronize()
 
     probe.assert_ok()
-    snapshots = probe.records()
+    snapshots = probe.snapshots()
     assert len(snapshots) == 1
     assert snapshots[0].replay_index == 0
     assert torch.equal(snapshots[0].tensor, expected)

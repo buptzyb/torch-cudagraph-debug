@@ -1,6 +1,6 @@
 import torch
 
-from torch_cudagraph_debug.tensor_debug import CudaGraphTensorProbe, TensorPrint
+from torch_cudagraph_debug.tensor_debug import TensorProbe, PrintTensor
 
 
 def main() -> None:
@@ -8,7 +8,7 @@ def main() -> None:
         raise RuntimeError("This example requires CUDA.")
 
     x = torch.ones(8, device="cuda")
-    probe = CudaGraphTensorProbe("mid", actions=[TensorPrint(max_items=8)])
+    probe = TensorProbe("mid", actions=[PrintTensor(max_items=8)])
 
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):

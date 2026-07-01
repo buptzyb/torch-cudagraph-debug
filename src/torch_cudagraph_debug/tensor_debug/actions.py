@@ -18,7 +18,7 @@ def validate_non_contiguous_policy(policy: str) -> NonContiguousPolicy:
 
 
 @dataclass(frozen=True)
-class TensorPrint:
+class PrintTensor:
     """Print a compact tensor summary from a CUDA Graph host callback."""
 
     max_items: int = 16
@@ -43,7 +43,7 @@ class TensorPrint:
 
 
 @dataclass(frozen=True)
-class TensorRecord:
+class RecordTensor:
     """Record the latest replay snapshot without a CUDA host callback."""
 
     enabled: bool = True
@@ -56,7 +56,7 @@ class TensorRecord:
 
 
 @dataclass(frozen=True)
-class TensorCompare:
+class CompareTensor:
     """Compare replay snapshots with per-invocation CPU or NumPy ground truth."""
 
     expected: Any
@@ -76,19 +76,17 @@ class TensorCompare:
         import torch
 
         expected_items = self.expected
-        if isinstance(expected_items, torch.Tensor) or isinstance(expected_items, np.ndarray):
-            raise TypeError(
-                "TensorCompare expected must be a sequence of CPU tensors or NumPy arrays; "
-                "wrap a single expected tensor as TensorCompare([expected])"
-            )
-        if isinstance(expected_items, (str, bytes)) or not isinstance(
+        if isinstance(expected_items, (torch.Tensor, np.ndarray)):
+            expected_items = [expected_items]
+        elif isinstance(expected_items, (str, bytes)) or not isinstance(
             expected_items, Sequence
         ):
             raise TypeError(
-                "TensorCompare expected must be a sequence of CPU tensors or NumPy arrays"
+                "CompareTensor expected must be a CPU tensor, NumPy array, or a "
+                "sequence of them"
             )
         if len(expected_items) == 0:
-            raise ValueError("TensorCompare expected sequence must be non-empty")
+            raise ValueError("CompareTensor expected sequence must be non-empty")
 
         expected_tensors: list[torch.Tensor] = []
         for index, expected in enumerate(expected_items):
@@ -96,11 +94,11 @@ class TensorCompare:
                 expected = torch.from_numpy(expected)
             if not isinstance(expected, torch.Tensor):
                 raise TypeError(
-                    f"TensorCompare expected[{index}] must be a CPU torch.Tensor "
+                    f"CompareTensor expected[{index}] must be a CPU torch.Tensor "
                     "or NumPy array"
                 )
             if expected.device.type != "cpu":
-                raise ValueError(f"TensorCompare expected[{index}] must be on CPU")
+                raise ValueError(f"CompareTensor expected[{index}] must be on CPU")
             expected_tensors.append(expected.detach().contiguous())
 
         return {

@@ -5,10 +5,10 @@ from dataclasses import dataclass
 import torch
 
 from torch_cudagraph_debug.tensor_debug import (
-    CudaGraphTensorProbe,
-    TensorCompare,
-    TensorPrint,
-    TensorRecord,
+    TensorProbe,
+    CompareTensor,
+    PrintTensor,
+    RecordTensor,
 )
 
 
@@ -39,19 +39,19 @@ class FeedForwardBlock(torch.nn.Module):
         if expected is None:
             expected = torch.empty(0)
 
-        self.hidden_probe = CudaGraphTensorProbe(
+        self.hidden_probe = TensorProbe(
             f"block.{layer_index}.hidden_after_fc1",
             actions=[
-                TensorPrint(max_items=8, every=1, enabled=probe_config.print_hidden),
-                TensorRecord(enabled=probe_config.record_hidden),
-                TensorCompare(
+                PrintTensor(max_items=8, every=1, enabled=probe_config.print_hidden),
+                RecordTensor(enabled=probe_config.record_hidden),
+                CompareTensor(
                     [expected],
                     rtol=1e-5,
                     atol=1e-6,
                     enabled=probe_config.compare_hidden,
                 ),
             ],
-            mode="capture",
+            when="capture",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -92,12 +92,14 @@ def main() -> None:
         for _ in range(3):
             warmup_block(static_input)
     torch.cuda.synchronize()
-    assert warmup_block.hidden_probe.records() == []
+    assert warmup_block.hidden_probe.snapshots() == []
 
     with torch.no_grad():
-        expected_hidden = torch.nn.functional.gelu(
-            warmup_block.fc1(warmup_block.norm(static_input))
-        ).detach().cpu()
+        expected_hidden = (
+            torch.nn.functional.gelu(warmup_block.fc1(warmup_block.norm(static_input)))
+            .detach()
+            .cpu()
+        )
 
     probe_config = HiddenProbeConfig(expected_hidden=expected_hidden)
     block = FeedForwardBlock(
@@ -113,7 +115,7 @@ def main() -> None:
         for _ in range(3):
             block(static_input)
     torch.cuda.synchronize()
-    assert block.hidden_probe.records() == []
+    assert block.hidden_probe.snapshots() == []
 
     graph = torch.cuda.CUDAGraph()
     with torch.no_grad(), torch.cuda.graph(graph):
@@ -124,7 +126,7 @@ def main() -> None:
     torch.cuda.synchronize()
 
     block.hidden_probe.assert_ok()
-    records = block.hidden_probe.records()
+    records = block.hidden_probe.snapshots()
     assert len(records) == 1
     assert torch.allclose(records[0].tensor, expected_hidden, rtol=1e-5, atol=1e-6)
     assert output is not None

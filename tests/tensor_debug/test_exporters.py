@@ -4,7 +4,9 @@ import pytest
 import torch
 
 from torch_cudagraph_debug.tensor_debug import TensorSnapshot
-from torch_cudagraph_debug.tensor_debug.postprocess import export_records_to_tensorboard
+from torch_cudagraph_debug.tensor_debug.postprocess import (
+    export_snapshots_to_tensorboard,
+)
 
 
 class FakeWriter:
@@ -33,7 +35,7 @@ def test_export_records_writes_default_scalars_with_replay_step() -> None:
         tensor=torch.tensor([1.0, 2.0, 3.0]),
     )
 
-    export_records_to_tensorboard(writer, [snapshot], tag_prefix="debug/")
+    export_snapshots_to_tensorboard(writer, [snapshot], tag_prefix="debug/")
 
     assert {step for _, _, step in writer.scalars} == {7}
     assert scalar_value(writer, "debug/mid/numel") == 3
@@ -54,8 +56,8 @@ def test_export_records_supports_fixed_and_callable_steps() -> None:
         tensor=torch.tensor([1, 2, 3], dtype=torch.int32),
     )
 
-    export_records_to_tensorboard(fixed_writer, [snapshot], step=123)
-    export_records_to_tensorboard(
+    export_snapshots_to_tensorboard(fixed_writer, [snapshot], step=123)
+    export_snapshots_to_tensorboard(
         callable_writer,
         [snapshot],
         step=lambda item: item.replay_index + 1000,
@@ -73,7 +75,7 @@ def test_export_records_writes_histograms_only_when_enabled() -> None:
         tensor=torch.tensor([[True, False], [True, True]]),
     )
 
-    export_records_to_tensorboard(writer, [snapshot], write_histograms=True)
+    export_snapshots_to_tensorboard(writer, [snapshot], write_histograms=True)
 
     assert len(writer.histograms) == 1
     tag, values, step = writer.histograms[0]
@@ -91,7 +93,7 @@ def test_export_records_can_disable_scalars() -> None:
         tensor=torch.tensor([1.0, 2.0]),
     )
 
-    export_records_to_tensorboard(
+    export_snapshots_to_tensorboard(
         writer,
         [snapshot],
         write_scalars=False,
@@ -110,7 +112,7 @@ def test_export_records_empty_tensor_writes_only_numel() -> None:
         tensor=torch.empty(0),
     )
 
-    export_records_to_tensorboard(writer, [snapshot], write_histograms=True)
+    export_snapshots_to_tensorboard(writer, [snapshot], write_histograms=True)
 
     assert writer.scalars == [("empty/numel", 0, 3)]
     assert writer.histograms == []

@@ -6,11 +6,13 @@ from pathlib import Path
 import torch
 
 from torch_cudagraph_debug.tensor_debug import (
-    CudaGraphTensorProbe,
-    TensorRecord,
+    TensorProbe,
+    RecordTensor,
     TensorSnapshot,
 )
-from torch_cudagraph_debug.tensor_debug.postprocess import export_records_to_tensorboard
+from torch_cudagraph_debug.tensor_debug.postprocess import (
+    export_snapshots_to_tensorboard,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,9 +47,9 @@ def main() -> None:
     writer = create_writer(args.logdir)
 
     x = torch.arange(8, device="cuda", dtype=torch.float32)
-    probe = CudaGraphTensorProbe(
+    probe = TensorProbe(
         "example.activation",
-        [TensorRecord()],
+        [RecordTensor()],
     )
 
     graph = torch.cuda.CUDAGraph()
@@ -58,7 +60,7 @@ def main() -> None:
     for replay_index in range(1, 5):
         graph.replay()
         torch.cuda.synchronize()
-        for snapshot in probe.records():
+        for snapshot in probe.snapshots():
             records.append(
                 TensorSnapshot(
                     probe_name=snapshot.probe_name,
@@ -71,7 +73,7 @@ def main() -> None:
                 )
             )
 
-    export_records_to_tensorboard(
+    export_snapshots_to_tensorboard(
         writer,
         records,
         tag_prefix="helper/",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Literal, overload
+from typing import Any, Literal
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -12,27 +12,27 @@ from torch_cudagraph_debug import _native
 
 from .actions import (
     NonContiguousPolicy,
-    TensorCompare,
-    TensorPrint,
-    TensorRecord,
+    CompareTensor,
+    PrintTensor,
+    RecordTensor,
     validate_non_contiguous_policy,
 )
-from .errors import TensorCompareMismatchError
-from .records import TensorSnapshot
+from .errors import TensorMismatchError
+from .records import TensorProbeStatus, TensorSnapshot
 
-TensorAction = TensorPrint | TensorRecord | TensorCompare
-ProbeMode = Literal["capture", "always"]
+TensorAction = PrintTensor | RecordTensor | CompareTensor
+ProbeWhen = Literal["capture", "always"]
 
 
-def validate_probe_mode(mode: str) -> ProbeMode:
+def validate_probe_when(when: str) -> ProbeWhen:
     """Validate when a probe should enqueue debug work."""
 
-    if mode not in {"capture", "always"}:
-        raise ValueError('mode must be either "capture" or "always"')
-    return mode  # type: ignore[return-value]
+    if when not in {"capture", "always"}:
+        raise ValueError('when must be either "capture" or "always"')
+    return when  # type: ignore[return-value]
 
 
-class CudaGraphTensorProbe:
+class TensorProbe:
     """Transparent tensor probe that injects CUDA Graph debug side effects."""
 
     def __init__(
@@ -41,7 +41,7 @@ class CudaGraphTensorProbe:
         actions: Sequence[TensorAction],
         *,
         non_contiguous: NonContiguousPolicy = "error",
-        mode: ProbeMode = "capture",
+        when: ProbeWhen = "capture",
     ):
         if not name:
             raise ValueError("name must be non-empty")
@@ -52,7 +52,7 @@ class CudaGraphTensorProbe:
         self._closed = False
         self._actions = tuple(actions)
         self.non_contiguous = validate_non_contiguous_policy(non_contiguous)
-        self.mode = validate_probe_mode(mode)
+        self.when = validate_probe_when(when)
         self._enabled_actions = tuple(
             action for action in self._actions if bool(action.enabled)
         )
@@ -60,7 +60,7 @@ class CudaGraphTensorProbe:
             action_specs = [action._to_native() for action in self._enabled_actions]
             native = _native.require_native()
             self._handle: Any | None = native.create_tensor_debug_probe(
-                name, action_specs, self.non_contiguous, self.mode
+                name, action_specs, self.non_contiguous, self.when
             )
         else:
             self._handle = None
@@ -73,42 +73,21 @@ class CudaGraphTensorProbe:
             return tensor
         return self._handle.enqueue(tensor)
 
-    @overload
-    def attach_grad(
+    def watch_grad(
         self,
         tensor: torch.Tensor,
         *,
         strict: bool = False,
-        return_handle: Literal[False] = False,
-    ) -> torch.Tensor: ...
-
-    @overload
-    def attach_grad(
-        self,
-        tensor: torch.Tensor,
-        *,
-        strict: bool = False,
-        return_handle: Literal[True],
-    ) -> tuple[torch.Tensor, RemovableHandle | None]: ...
-
-    def attach_grad(
-        self,
-        tensor: torch.Tensor,
-        *,
-        strict: bool = False,
-        return_handle: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, RemovableHandle | None]:
-        """Register an autograd hook that probes ``tensor``'s backward gradient."""
+    ) -> RemovableHandle | None:
+        """Register an autograd hook that probes the tensor's backward gradient."""
 
         self._ensure_open()
         if not tensor.requires_grad:
             if strict:
                 raise RuntimeError(
-                    "cannot attach grad probe to a tensor that does not require grad"
+                    "cannot watch gradients for a tensor that does not require grad"
                 )
-            if return_handle:
-                return tensor, None
-            return tensor
+            return None
 
         def hook(grad: torch.Tensor | None) -> torch.Tensor | None:
             if grad is None:
@@ -116,21 +95,18 @@ class CudaGraphTensorProbe:
             self(grad)
             return grad
 
-        handle = tensor.register_hook(hook)
-        if return_handle:
-            return tensor, handle
-        return tensor
+        return tensor.register_hook(hook)
 
-    def records(self) -> list[TensorSnapshot]:
+    def snapshots(self) -> list[TensorSnapshot]:
         """Return latest CPU tensor snapshots ordered by logical slot."""
 
         self._ensure_open()
         if self._handle is None:
             return []
-        records: list[TensorSnapshot] = []
+        snapshots: list[TensorSnapshot] = []
         for item in self._handle.records():
             tensor = item["tensor"]
-            records.append(
+            snapshots.append(
                 TensorSnapshot(
                     probe_name=str(item["probe_name"]),
                     replay_index=int(item["replay_index"]),
@@ -141,9 +117,9 @@ class CudaGraphTensorProbe:
                     invocation_index=int(item.get("invocation_index", 0)),
                 )
             )
-        return records
+        return snapshots
 
-    def clear_records(self) -> None:
+    def clear_snapshots(self) -> None:
         """Clear latest record buffers by zeroing their retained host storage."""
 
         self._ensure_open()
@@ -151,21 +127,26 @@ class CudaGraphTensorProbe:
             return
         self._handle.clear_records()
 
-    def status(self) -> dict[str, Any]:
+    def status(self) -> TensorProbeStatus:
         """Return native comparison status."""
 
         self._ensure_open()
         if self._handle is None:
-            return {"ok": True, "message": "", "replay_index": 0, "invocation_index": -1}
-        return dict(self._handle.status())
+            return TensorProbeStatus(True, "", 0, -1)
+        status = self._handle.status()
+        return TensorProbeStatus(
+            ok=bool(status.get("ok", False)),
+            message=str(status.get("message", "")),
+            replay_index=int(status.get("replay_index", 0)),
+            invocation_index=int(status.get("invocation_index", -1)),
+        )
 
     def assert_ok(self) -> None:
         """Raise if any comparison action has reported a mismatch."""
 
         status = self.status()
-        if not bool(status.get("ok", False)):
-            message = str(status.get("message", "tensor comparison failed"))
-            raise TensorCompareMismatchError(message)
+        if not status.ok:
+            raise TensorMismatchError(status.message or "tensor comparison failed")
 
     def close(self) -> None:
         """Release native resources.
@@ -180,9 +161,9 @@ class CudaGraphTensorProbe:
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RuntimeError(f"CudaGraphTensorProbe({self.name!r}) is closed")
+            raise RuntimeError(f"TensorProbe({self.name!r}) is closed")
 
-    def __enter__(self) -> "CudaGraphTensorProbe":
+    def __enter__(self) -> "TensorProbe":
         self._ensure_open()
         return self
 
