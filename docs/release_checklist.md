@@ -6,10 +6,13 @@
   intended tag.
 - Confirm package URLs, Apache-2.0 license metadata, README install command, and
   changelog are current.
-- Confirm the API reference and architecture spec describe the exact stable
-  facades and serialized formats.
-- Confirm tensor lifecycle, single-capture ownership, invocation indexing,
-  callback overhead, and non-contiguous copy cost are documented.
+- Confirm the API reference describes the exact supported public facades and
+  serialized formats shipped in this repository.
+- Confirm the root README stays limited to concise quick starts and links to
+  the dedicated Tensor Debug and Memory Debug guides.
+- Confirm tensor lifecycle, single-capture ownership, unified replay and
+  invocation indexing, device matching, callback overhead, and non-contiguous
+  copy cost are documented.
 - Confirm memory ownership, history policy, cross-run matching, JSON bundle
   format, and one-bundle-per-rank rule are documented.
 
@@ -18,26 +21,35 @@
 ```bash
 python -m py_compile $(find src tests examples -name '*.py')
 bash -n examples/memory_debug/cli_workflows.sh
-ruff check src tests examples
-pytest -q
+python -m ruff check src tests examples
+python -m pytest -q
 python -m build --sdist --no-isolation
-twine check dist/*
+python -m twine check dist/*
 git diff --check
 ```
 
-Inspect the sdist and confirm it contains package sources, C++ sources, tests,
-examples, and public docs, with no runtime output or cache directories.
+Inspect the sdist and confirm it contains package sources, C++ and CUDA
+sources (including `replay_counter.cu`), tests, examples, and public docs, with
+no runtime output or cache directories.
 
 ## GPU Gate
 
-Install from source in the target CUDA-enabled PyTorch container:
+Source builds require CUDA-enabled PyTorch, a compatible CUDA development
+toolkit, and a C++17 compiler. Start in the source checkout and keep the same
+shell for the complete GPU gate:
 
 ```bash
-pip install --no-build-isolation --no-deps .
+TCGD_REPO_ROOT="$(pwd)"
+TCGD_RUN_ROOT="$(mktemp -d /tmp/tcgd-gpu-gate.XXXXXX)"
+
+python -m pip install --upgrade "setuptools>=77.0.3" wheel
+python -m pip install --no-build-isolation --no-deps .
+cd "${TCGD_RUN_ROOT}"
+TCGD_TEST_INSTALLED=1 python -m pytest -q "${TCGD_REPO_ROOT}/tests"
 ```
 
-Run tests outside the source checkout so imports resolve to the installed
-package and compiled native extension.
+The `cd` ensures tests and examples import the installed package and compiled
+native extension rather than source-tree artifacts.
 
 Tensor coverage must include:
 
@@ -48,7 +60,12 @@ Tensor coverage must include:
 - supported dense dtypes and zero-element tensors;
 - default non-contiguous rejection and explicit copy mode;
 - single-capture ownership rejection;
-- callback and side-stream staging behavior.
+- callback and side-stream staging behavior;
+- 1-based replay advancement, one shared index across repeated invocations,
+  queued replay visibility, and retained snapshot indices;
+- callback-free query-time counter transfer, callback-counter staging reuse,
+  bool/stream/device query synchronization, print cadence, exact compare
+  failure indices, explicit device selection, and device mismatch errors.
 
 Memory coverage must include:
 
@@ -61,35 +78,36 @@ Memory coverage must include:
 - replay-stable state;
 - gzip JSON persistence and `MemoryRun.load()` round trip.
 
-Run every stable single-GPU example from an installed package:
+Run every supported single-GPU example from the installed package:
 
 ```bash
-EXAMPLE_ROOT="$(mktemp -d /tmp/tcgd-examples.XXXXXX)"
+EXAMPLE_ROOT="${TCGD_RUN_ROOT}/examples"
+mkdir -p "${EXAMPLE_ROOT}"
 
-python examples/tensor_debug/quickstart.py
-python examples/tensor_debug/record_and_compare.py
-python examples/tensor_debug/multiple_invocations.py
-python examples/tensor_debug/gradient_probes.py
-python examples/tensor_debug/probe_modes.py
-python examples/tensor_debug/module_integration.py
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/quickstart.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/record_and_compare.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/multiple_invocations.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/gradient_probes.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe_modes.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/module_integration.py"
 
-python examples/memory_debug/quickstart.py
-python examples/memory_debug/timeline_and_reports.py \
+python "${TCGD_REPO_ROOT}/examples/memory_debug/quickstart.py"
+python "${TCGD_REPO_ROOT}/examples/memory_debug/timeline_and_reports.py" \
   --output-dir "${EXAMPLE_ROOT}/timeline"
-python examples/memory_debug/attribution_modes.py \
+python "${TCGD_REPO_ROOT}/examples/memory_debug/attribution_modes.py" \
   --output-dir "${EXAMPLE_ROOT}/attribution"
-python examples/memory_debug/allocation_lifetimes.py \
+python "${TCGD_REPO_ROOT}/examples/memory_debug/allocation_lifetimes.py" \
   --output-dir "${EXAMPLE_ROOT}/lifetimes"
-python examples/memory_debug/compare_runs_and_phases.py \
+python "${TCGD_REPO_ROOT}/examples/memory_debug/compare_runs_and_phases.py" \
   --output-dir "${EXAMPLE_ROOT}/runs"
-bash examples/memory_debug/cli_workflows.sh \
+bash "${TCGD_REPO_ROOT}/examples/memory_debug/cli_workflows.sh" \
   single "${EXAMPLE_ROOT}/cli-single"
 ```
 
 With the optional TensorBoard dependency installed, also run:
 
 ```bash
-python examples/integrations/tensorboard_export.py \
+python "${TCGD_REPO_ROOT}/examples/integrations/tensorboard_export.py" \
   --logdir "${EXAMPLE_ROOT}/tensorboard"
 ```
 
@@ -97,10 +115,11 @@ On a node with at least two GPUs, cover rank-local groups and the remaining CLI
 commands:
 
 ```bash
-torchrun --standalone --nproc-per-node=2 \
-  examples/memory_debug/distributed_groups.py \
+python -m torch.distributed.run --standalone --nproc-per-node=2 \
+  "${TCGD_REPO_ROOT}/examples/memory_debug/distributed_groups.py" \
   --output-dir "${EXAMPLE_ROOT}/groups"
-NPROC_PER_NODE=2 bash examples/memory_debug/cli_workflows.sh \
+NPROC_PER_NODE=2 bash \
+  "${TCGD_REPO_ROOT}/examples/memory_debug/cli_workflows.sh" \
   distributed "${EXAMPLE_ROOT}/cli-distributed"
 ```
 
@@ -111,7 +130,7 @@ environment and repeat the GPU gate:
 
 ```bash
 REF=<commit-or-branch>
-pip install --no-build-isolation \
+python -m pip install --no-build-isolation \
   "git+https://github.com/buptzyb/torch-cudagraph-debug.git@${REF}"
 ```
 
@@ -127,7 +146,7 @@ git push origin v0.2.0
 Verify installation from the tag in a clean CUDA-enabled environment:
 
 ```bash
-pip install --no-build-isolation \
+python -m pip install --no-build-isolation \
   "git+https://github.com/buptzyb/torch-cudagraph-debug.git@v0.2.0"
 ```
 

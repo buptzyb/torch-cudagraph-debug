@@ -34,13 +34,14 @@ def main() -> None:
             third = probe(static_x + 3)
             output = first + second + third
 
+        replay_stream = torch.cuda.current_stream()
         for _ in range(2):
             graph.replay()
-        torch.cuda.synchronize()
 
-        probe.assert_ok()
-        snapshots = probe.snapshots()
+        probe.assert_ok(synchronize=replay_stream)
+        snapshots = probe.snapshots(synchronize=False)
         assert len(snapshots) == 3
+        assert [snapshot.replay_index for snapshot in snapshots] == [2, 2, 2]
         for snapshot in snapshots:
             expected_tensor = expected[snapshot.invocation_index]
             torch.testing.assert_close(

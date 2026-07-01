@@ -6,7 +6,6 @@ Run with: python examples/integrations/tensorboard_export.py --logdir /tmp/tcgd-
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -41,17 +40,12 @@ def main() -> None:
             output = probe(static_x * 2)
 
         records: list[TensorSnapshot] = []
-        for replay_index in range(1, 4):
+        replay_stream = torch.cuda.current_stream()
+        for _ in range(3):
             graph.replay()
-            torch.cuda.synchronize()
-            records.extend(
-                replace(
-                    snapshot,
-                    replay_index=replay_index,
-                    tensor=snapshot.tensor.clone(),
-                )
-                for snapshot in probe.snapshots()
-            )
+            # Each query waits for the replay stream and returns an independent
+            # CPU snapshot with the probe's current graph replay index.
+            records.extend(probe.snapshots(synchronize=replay_stream))
 
         export_snapshots_to_tensorboard(
             writer,
@@ -60,7 +54,7 @@ def main() -> None:
             write_histograms=True,
         )
         writer.flush()
-        assert len(records) == 3
+        assert [snapshot.replay_index for snapshot in records] == [1, 2, 3]
         assert output is not None
         print(f"TensorBoard logs: {args.logdir.resolve()}")
     finally:

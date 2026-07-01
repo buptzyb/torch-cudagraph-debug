@@ -2,6 +2,7 @@
 
 #include "common/cuda_utils.h"
 #include "tensor_debug/compare.h"
+#include "tensor_debug/replay_counter.h"
 #include "tensor_debug/tensor_format.h"
 
 #include <ATen/cuda/CUDAContext.h>
@@ -63,13 +64,23 @@ ProbeContext::ProbeContext(
     uint64_t id,
     std::string name,
     std::vector<ActionConfig> actions,
+    torch::Tensor replay_index,
     NonContiguousPolicy non_contiguous,
     ProbeMode mode)
     : id_(id),
       name_(std::move(name)),
       actions_(std::move(actions)),
+      replay_index_(std::move(replay_index)),
       non_contiguous_(non_contiguous),
       mode_(mode) {
+    if (!replay_index_.defined() || !replay_index_.is_cuda() ||
+        replay_index_.scalar_type() != at::kLong || replay_index_.numel() != 1 ||
+        !replay_index_.is_contiguous()) {
+        throw std::runtime_error(
+            "tensor debug replay_index must be a contiguous CUDA int64 scalar");
+    }
+    replay_index_device_ = replay_index_.get_device();
+
     for (const ActionConfig& action : actions_) {
         if (action.kind == ActionConfig::Kind::Record && action.record.enabled) {
             has_latest_record_actions_ = true;
@@ -79,10 +90,26 @@ ProbeContext::ProbeContext(
             has_callback_actions_ = true;
         }
     }
+
+    c10::cuda::CUDAGuard device_guard(replay_index_.device());
+    try {
+        CaptureModeGuard capture_mode_guard(cudaStreamCaptureModeRelaxed);
+        if (has_callback_actions_) {
+            TCGD_CUDA_CHECK(cudaMallocHost(
+                reinterpret_cast<void**>(&replay_index_staging_),
+                sizeof(*replay_index_staging_)));
+            *replay_index_staging_ = 0;
+            TCGD_CUDA_CHECK(cudaEventCreateWithFlags(
+                &replay_index_ready_event_, cudaEventDisableTiming));
+        }
+    } catch (...) {
+        release_resources_noexcept();
+        throw;
+    }
 }
 
 ProbeContext::~ProbeContext() {
-    release_pinned_noexcept();
+    release_resources_noexcept();
 }
 
 torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
@@ -113,9 +140,24 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
     torch::Tensor source = source_tensor_for_enqueue(tensor);
     const size_t nbytes = static_cast<size_t>(tensor_nbytes(tensor));
 
-    InvocationSlot& slot = ensure_invocation_slot(tensor, nbytes, invocation_index);
+    InvocationSlot& slot =
+        ensure_invocation_slot(tensor, nbytes, invocation_index, is_capturing);
     if (!tensor.is_contiguous()) {
         slot.source_owners.push_back(source);
+    }
+
+    if (is_capturing && invocation_index == 0) {
+        launch_increment_replay_counter(
+            replay_index_.data_ptr<int64_t>(), stream);
+        if (has_callback_actions_) {
+            TCGD_CUDA_CHECK(cudaMemcpyAsync(
+                replay_index_staging_,
+                replay_index_.data_ptr<int64_t>(),
+                sizeof(*replay_index_staging_),
+                cudaMemcpyDeviceToHost,
+                stream));
+            TCGD_CUDA_CHECK(cudaEventRecord(replay_index_ready_event_, stream));
+        }
     }
 
     if (nbytes > 0) {
@@ -127,14 +169,36 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
             stream));
     }
     if (has_callback_actions_) {
-        CallbackPayload* payload =
-            add_payload(tensor, source, slot.staging, nbytes, invocation_index);
+        if (is_capturing && invocation_index > 0) {
+            TCGD_CUDA_CHECK(cudaStreamWaitEvent(
+                stream, replay_index_ready_event_, 0));
+        }
+        CallbackPayload* payload = add_payload(
+            tensor,
+            source,
+            slot.staging,
+            nbytes,
+            invocation_index,
+            is_capturing);
         TCGD_CUDA_CHECK(cudaLaunchHostFunc(stream, &ProbeContext::host_callback, payload));
     }
     return tensor;
 }
 
-pybind11::list ProbeContext::records() {
+pybind11::list ProbeContext::records(std::optional<uint64_t> replay_index) {
+    uint64_t resolved_replay_index = 0;
+    if (replay_index.has_value()) {
+        resolved_replay_index = *replay_index;
+    } else if (replay_index_staging_ != nullptr) {
+        const int64_t staged_replay_index = *replay_index_staging_;
+        resolved_replay_index = staged_replay_index > 0
+            ? static_cast<uint64_t>(staged_replay_index)
+            : 0;
+    } else {
+        throw std::runtime_error(
+            "records requires replay_index when callback counter staging is unavailable");
+    }
+
     std::vector<TensorSnapshotRecord> ordered;
     {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -144,6 +208,7 @@ pybind11::list ProbeContext::records() {
                 continue;
             }
             TensorSnapshotRecord snapshot = slot.snapshot;
+            snapshot.replay_index = snapshot.captured ? resolved_replay_index : 0;
             snapshot.bytes.clear();
             snapshot.bytes.resize(snapshot.nbytes);
             if (snapshot.nbytes > 0 && slot.staging != nullptr) {
@@ -195,28 +260,32 @@ void ProbeContext::close() {
         closed_ = true;
     }
 
-    release_pinned_noexcept();
+    release_resources_noexcept();
     payloads_.clear();
     invocation_slots_.clear();
+    replay_index_ = torch::Tensor();
     unregister_context(id_);
 }
 
 void ProbeContext::on_callback(const CallbackPayload& payload) noexcept {
     try {
         uint64_t replay_index = 0;
-        uint64_t invocation_index = payload.invocation_index;
-        {
+        uint64_t schedule_index = 0;
+        const uint64_t invocation_index = payload.invocation_index;
+        if (payload.captured && replay_index_staging_ != nullptr) {
+            const int64_t captured_replay_index = *replay_index_staging_;
+            replay_index = captured_replay_index > 0
+                ? static_cast<uint64_t>(captured_replay_index)
+                : 0;
+            schedule_index = replay_index;
+        } else {
             std::lock_guard<std::mutex> guard(mutex_);
-            const size_t index = static_cast<size_t>(invocation_index);
-            if (invocation_callback_counts_.size() <= index) {
-                invocation_callback_counts_.resize(index + 1, 0);
-            }
-            replay_index = ++invocation_callback_counts_[index];
+            schedule_index = ++eager_callback_count_;
         }
 
         for (const ActionConfig& action : actions_) {
             if (action.kind == ActionConfig::Kind::Print && action.print.enabled) {
-                if (replay_index % static_cast<uint64_t>(action.print.every) == 0) {
+                if (schedule_index % static_cast<uint64_t>(action.print.every) == 0) {
                     const std::string formatted = format_tensor_bytes(
                         payload.staging,
                         payload.numel,
@@ -292,6 +361,13 @@ void ProbeContext::validate_tensor(const torch::Tensor& tensor) const {
     }
     if (!tensor.is_cuda()) {
         throw std::runtime_error("tensor debug probe input must be a CUDA tensor");
+    }
+    if (tensor.get_device() != replay_index_device_) {
+        std::ostringstream oss;
+        oss << "tensor debug probe " << name_ << " was created on cuda:"
+            << replay_index_device_ << " but received a tensor on cuda:"
+            << static_cast<int>(tensor.get_device());
+        throw std::runtime_error(oss.str());
     }
     if (!tensor.is_contiguous() && non_contiguous_ == NonContiguousPolicy::Error) {
         throw std::runtime_error(
@@ -382,7 +458,8 @@ torch::Tensor ProbeContext::source_tensor_for_enqueue(const torch::Tensor& tenso
 InvocationSlot& ProbeContext::ensure_invocation_slot(
     const torch::Tensor& tensor,
     size_t nbytes,
-    uint64_t invocation_index) {
+    uint64_t invocation_index,
+    bool is_capturing) {
     const size_t index = static_cast<size_t>(invocation_index);
     if (invocation_slots_.size() <= index) {
         invocation_slots_.resize(index + 1);
@@ -413,6 +490,7 @@ InvocationSlot& ProbeContext::ensure_invocation_slot(
         slot.snapshot.device = tensor.device().str();
         slot.snapshot.nbytes = nbytes;
         slot.snapshot.valid = true;
+        slot.snapshot.captured = is_capturing;
         slot.snapshot.bytes.clear();
     }
     return slot;
@@ -423,7 +501,8 @@ CallbackPayload* ProbeContext::add_payload(
     const torch::Tensor& source,
     void* staging,
     size_t nbytes,
-    uint64_t invocation_index) {
+    uint64_t invocation_index,
+    bool is_capturing) {
     auto payload = std::make_unique<CallbackPayload>();
     payload->owner = this;
     payload->staging = staging;
@@ -433,6 +512,7 @@ CallbackPayload* ProbeContext::add_payload(
     payload->dtype = tensor.scalar_type();
     payload->device = tensor.device().str();
     payload->numel = tensor.numel();
+    payload->captured = is_capturing;
     if (!tensor.is_contiguous()) {
         payload->source_owner = source;
     }
@@ -456,7 +536,15 @@ void ProbeContext::set_failure(
     failure_message_ = message;
 }
 
-void ProbeContext::release_pinned_noexcept() {
+void ProbeContext::release_resources_noexcept() {
+    if (replay_index_ready_event_ != nullptr) {
+        cudaEventDestroy(replay_index_ready_event_);
+        replay_index_ready_event_ = nullptr;
+    }
+    if (replay_index_staging_ != nullptr) {
+        cudaFreeHost(replay_index_staging_);
+        replay_index_staging_ = nullptr;
+    }
     for (void* ptr : retired_staging_) {
         if (ptr != nullptr) {
             cudaFreeHost(ptr);
@@ -481,11 +569,17 @@ void CUDART_CB ProbeContext::host_callback(void* user_data) {
 std::shared_ptr<ProbeContext> make_probe_context(
     std::string name,
     std::vector<ActionConfig> actions,
+    torch::Tensor replay_index,
     NonContiguousPolicy non_contiguous,
     ProbeMode mode) {
     const uint64_t id = next_context_id.fetch_add(1);
     auto context = std::make_shared<ProbeContext>(
-        id, std::move(name), std::move(actions), non_contiguous, mode);
+        id,
+        std::move(name),
+        std::move(actions),
+        std::move(replay_index),
+        non_contiguous,
+        mode);
     {
         std::lock_guard<std::mutex> guard(registry_mutex);
         registry.emplace(id, context);

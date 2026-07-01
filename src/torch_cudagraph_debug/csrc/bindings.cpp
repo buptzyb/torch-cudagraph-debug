@@ -127,6 +127,7 @@ ProbeMode parse_probe_mode(const std::string& mode) {
 std::shared_ptr<ProbeContext> create_tensor_debug_probe(
     const std::string& name,
     py::list action_specs,
+    torch::Tensor replay_index,
     const std::string& non_contiguous,
     const std::string& mode) {
     if (name.empty()) {
@@ -135,6 +136,7 @@ std::shared_ptr<ProbeContext> create_tensor_debug_probe(
     return make_probe_context(
         name,
         parse_actions(action_specs),
+        std::move(replay_index),
         parse_non_contiguous_policy(non_contiguous),
         parse_probe_mode(mode));
 }
@@ -148,7 +150,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         std::shared_ptr<torch_cudagraph_debug::tensor_debug::ProbeContext>>(
         m, "TensorDebugProbeHandle")
         .def("enqueue", &torch_cudagraph_debug::tensor_debug::ProbeContext::enqueue)
-        .def("records", &torch_cudagraph_debug::tensor_debug::ProbeContext::records)
+        .def(
+            "records",
+            &torch_cudagraph_debug::tensor_debug::ProbeContext::records,
+            py::arg("replay_index") = py::none())
         .def("clear_records", &torch_cudagraph_debug::tensor_debug::ProbeContext::clear_records)
         .def("status", &torch_cudagraph_debug::tensor_debug::ProbeContext::status)
         .def("close", &torch_cudagraph_debug::tensor_debug::ProbeContext::close);
@@ -158,6 +163,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &torch_cudagraph_debug::tensor_debug::create_tensor_debug_probe,
         py::arg("name"),
         py::arg("actions"),
+        py::arg("replay_index"),
         py::arg("non_contiguous") = "error",
         py::arg("mode") = "capture");
 }

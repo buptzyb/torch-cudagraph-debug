@@ -1,5 +1,8 @@
 # Tensor Debug Examples
 
+Read the [Tensor Debug guide](../../docs/tensor_debug.md) for probe semantics
+and lifecycle details.
+
 Start with `quickstart.py`, then follow the order in the parent
 [examples index](../README.md). These scripts use the compiled native extension
 and require Linux, CUDA, and a CUDA-enabled PyTorch build.
@@ -9,8 +12,11 @@ The examples deliberately keep the following lifecycle visible:
 1. Create a `TensorProbe` before graph capture.
 2. Eager warmup is a transparent no-op with the default `when="capture"`.
 3. Capture and replay the graph.
-4. Synchronize before reading snapshots or status.
-5. Keep the probe alive while the graph may replay, then call `close()`.
+4. Pass the replay stream to the first snapshot or status query, then use
+   `synchronize=False` for additional queries covered by that wait.
+5. Observe that all invocation slots from one replay share one 1-based replay
+   index.
+6. Keep the probe alive while the graph may replay, then call `close()`.
 
 `record_and_compare.py` catches one intentional `TensorMismatchError` and still
 exits successfully. `probe_modes.py` similarly catches the expected default

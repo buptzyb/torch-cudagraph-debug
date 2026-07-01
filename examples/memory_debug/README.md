@@ -1,5 +1,8 @@
 # Memory Debug Examples
 
+Read the [Memory Debug guide](../../docs/memory_debug.md) for collection,
+history, attribution, and report semantics.
+
 The memory examples separate collection from offline analysis. `MemoryRecorder`
 collects labeled allocator snapshots; immutable runs and result objects perform
 comparison, timeline, lifetime, phase, and multi-rank analysis.

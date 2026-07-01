@@ -4,13 +4,14 @@ Thanks for improving `torch-cudagraph-debug`.
 
 ## Development Setup
 
-Install a CUDA-enabled PyTorch build first, then install this package from the
-source checkout:
+Install a CUDA-enabled PyTorch build, a compatible CUDA development toolkit,
+and a C++17 compiler first. Source installation builds the native tensor
+extension for the whole package. Then install from the source checkout:
 
 ```bash
-python -m pip install --upgrade pip
+python -m pip install --upgrade pip "setuptools>=77.0.3" wheel
+python -m pip install pytest build twine ruff
 python -m pip install --no-build-isolation -e .
-python -m pip install pytest build twine
 ```
 
 CPU-only environments can run Python-level tests. CUDA graph behavior requires a
@@ -22,8 +23,9 @@ Run local checks before opening a pull request:
 
 ```bash
 python -m py_compile $(find src tests examples -name '*.py')
+python -m ruff check src tests examples
 python -m pytest -q tests
-python -m build --sdist
+python -m build --sdist --no-isolation
 python -m twine check dist/*
 ```
 

@@ -39,9 +39,14 @@
 - Capture-only and always-active tensor probing, gradient hook handles,
   invocation-indexed expected values, sticky comparison status, and explicit
   non-contiguous copy mode.
+- A per-probe CUDA `int64` replay counter shared by record, print, compare, and
+  status results, with 1-based graph replay indices, explicit device selection,
+  bool/stream/device query synchronization, query-time transfer for
+  callback-free recording, and callback-counter staging reuse.
 - TensorBoard export through `export_snapshots_to_tensorboard`.
 - Categorized, runnable Tensor Debug, Memory Debug, CLI, distributed, and
   TensorBoard examples with quickstarts and complete synthetic workflows.
+- Concise root quick starts with dedicated Tensor Debug and Memory Debug guides.
 
 ## v0.1.0 - 2026-05-12
 

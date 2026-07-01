@@ -46,24 +46,27 @@ def main() -> None:
     )
     try:
         assert capture_only(non_contiguous) is non_contiguous
-        torch.cuda.synchronize()
-        assert capture_only.snapshots() == []
+        assert capture_only.snapshots(
+            synchronize=torch.cuda.current_stream()
+        ) == []
         print("capture-only probe: eager call was a transparent no-op")
 
         assert eager(base) is base
-        torch.cuda.synchronize()
-        eager.assert_ok()
-        assert len(eager.snapshots()) == 1
+        eager.assert_ok(synchronize=torch.cuda.current_stream())
+        assert len(eager.snapshots(synchronize=False)) == 1
         print("always probe: eager call produced one snapshot")
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             copied_output = copying(non_contiguous)
+        replay_stream = torch.cuda.current_stream()
         graph.replay()
-        torch.cuda.synchronize()
-        copying.assert_ok()
+        copying.assert_ok(synchronize=replay_stream)
         assert copied_output is non_contiguous
-        assert torch.equal(copying.snapshots()[0].tensor, expected_view)
+        assert torch.equal(
+            copying.snapshots(synchronize=False)[0].tensor,
+            expected_view,
+        )
         print("copy policy: non-contiguous graph input was recorded")
 
         try:

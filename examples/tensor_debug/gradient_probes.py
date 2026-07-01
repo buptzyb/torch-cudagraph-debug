@@ -63,9 +63,13 @@ def main() -> None:
                 loss = model(static_x)
                 loss.backward()
         del loss
-        torch.cuda.current_stream().wait_stream(capture_stream)
-        torch.cuda.synchronize()
-        assert all(probe.snapshots() == [] for probe in probes.values())
+        current_stream = torch.cuda.current_stream()
+        current_stream.wait_stream(capture_stream)
+        current_stream.synchronize()
+        assert all(
+            probe.snapshots(synchronize=False) == []
+            for probe in probes.values()
+        )
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.stream(capture_stream):
@@ -79,11 +83,12 @@ def main() -> None:
                 probes["fc1.weight.grad.final"](grad)
         torch.cuda.current_stream().wait_stream(capture_stream)
 
+        replay_stream = torch.cuda.current_stream()
         graph.replay()
-        torch.cuda.synchronize()
+        replay_stream.synchronize()
 
         for probe in probes.values():
-            snapshots = probe.snapshots()
+            snapshots = probe.snapshots(synchronize=False)
             assert snapshots, f"{probe.name} did not record a replay value"
             snapshot = snapshots[-1]
             print(

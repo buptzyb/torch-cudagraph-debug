@@ -35,26 +35,26 @@ def main() -> None:
             matching_probe(static_x + 2)
             mismatching_probe(static_x + 2)
 
+        replay_stream = torch.cuda.current_stream()
         graph.replay()
-        torch.cuda.synchronize()
 
-        matching_probe.assert_ok()
-        snapshots = matching_probe.snapshots()
+        matching_probe.assert_ok(synchronize=replay_stream)
+        snapshots = matching_probe.snapshots(synchronize=False)
         assert len(snapshots) == 1
         assert torch.equal(snapshots[0].tensor, expected)
         print(f"matching snapshot: {snapshots[0].tensor.tolist()}")
 
-        status = mismatching_probe.status()
+        status = mismatching_probe.status(synchronize=False)
         assert not status.ok
         try:
-            mismatching_probe.assert_ok()
+            mismatching_probe.assert_ok(synchronize=False)
         except TensorMismatchError as exc:
             print(f"expected mismatch: {exc}")
         else:
             raise AssertionError("the mismatching probe should fail")
 
-        matching_probe.clear_snapshots()
-        cleared = matching_probe.snapshots()
+        matching_probe.clear_snapshots(synchronize=False)
+        cleared = matching_probe.snapshots(synchronize=False)
         assert len(cleared) == 1
         assert torch.equal(cleared[0].tensor, torch.zeros_like(expected))
         print("cleared snapshot storage: retained slot now contains zeros")

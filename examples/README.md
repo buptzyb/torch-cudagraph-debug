@@ -12,15 +12,15 @@ checkout. The commands below use `/tmp` for that reason.
 
 | Order | Example | Main capability | Requirement |
 |---:|---|---|---|
-| 1 | [Tensor quickstart](tensor_debug/quickstart.py) | `PrintTensor`, capture, replay, synchronization | 1 GPU |
+| 1 | [Tensor quickstart](tensor_debug/quickstart.py) | `RecordTensor`, sequential hidden states, stream-scoped query | 1 GPU |
 | 2 | [Record and compare](tensor_debug/record_and_compare.py) | snapshots, typed status, successful and failed comparisons | 1 GPU |
 | 3 | [Multiple invocations](tensor_debug/multiple_invocations.py) | one probe with ordered capture slots | 1 GPU |
 | 4 | [Gradient probes](tensor_debug/gradient_probes.py) | activation and parameter gradient hooks | 1 GPU |
 | 5 | [Probe modes](tensor_debug/probe_modes.py) | capture-only, always-active, non-contiguous error/copy | 1 GPU |
 | 6 | [Module integration](tensor_debug/module_integration.py) | configurable probe inside `torch.nn.Module` | 1 GPU |
 
-Read [Tensor Debug examples](tensor_debug/README.md) for lifecycle rules and
-expected output.
+Read the [Tensor Debug guide](../docs/tensor_debug.md) for concepts and
+[Tensor Debug examples](tensor_debug/README.md) for expected output.
 
 ## Memory Debug Learning Path
 
@@ -34,7 +34,8 @@ expected output.
 | 6 | [Distributed groups](memory_debug/distributed_groups.py) | rank-local bundles, group summary, group phase | 2+ GPUs |
 | 7 | [CLI workflows](memory_debug/cli_workflows.sh) | all seven `tcgd-memory` commands | 1 or 2+ GPUs |
 
-Read [Memory Debug examples](memory_debug/README.md) before enabling allocator
+Read the [Memory Debug guide](../docs/memory_debug.md) for concepts and
+[Memory Debug examples](memory_debug/README.md) before enabling allocator
 history in a long-running process.
 
 ## Integrations
@@ -79,4 +80,4 @@ both group summary commands and group phase comparison.
 
 The experimental `memory_debug.advanced` module intentionally has no release
 example. Its low-level parsers are documented in `docs/api.md`; the examples
-above teach the stable API and CLI.
+above teach the supported public API and CLI.

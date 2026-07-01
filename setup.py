@@ -32,6 +32,7 @@ def get_extensions():
     sources = [
         csrc / "bindings.cpp",
         csrc / "tensor_debug" / "probe_context.cpp",
+        csrc / "tensor_debug" / "replay_counter.cu",
         csrc / "tensor_debug" / "tensor_format.cpp",
         csrc / "tensor_debug" / "compare.cpp",
     ]

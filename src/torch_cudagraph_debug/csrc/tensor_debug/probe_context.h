@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,7 @@ struct TensorSnapshotRecord {
     std::vector<uint8_t> bytes;
     size_t nbytes = 0;
     bool valid = false;
+    bool captured = false;
 };
 
 struct InvocationSlot {
@@ -78,6 +80,7 @@ struct CallbackPayload {
     at::ScalarType dtype = at::kFloat;
     std::string device;
     int64_t numel = 0;
+    bool captured = false;
     torch::Tensor source_owner;
 };
 
@@ -87,6 +90,7 @@ class ProbeContext {
         uint64_t id,
         std::string name,
         std::vector<ActionConfig> actions,
+        torch::Tensor replay_index,
         NonContiguousPolicy non_contiguous,
         ProbeMode mode);
     ~ProbeContext();
@@ -95,7 +99,7 @@ class ProbeContext {
     ProbeContext& operator=(const ProbeContext&) = delete;
 
     torch::Tensor enqueue(const torch::Tensor& tensor);
-    pybind11::list records();
+    pybind11::list records(std::optional<uint64_t> replay_index);
     void clear_records();
     pybind11::dict status();
     void close();
@@ -115,24 +119,30 @@ class ProbeContext {
     InvocationSlot& ensure_invocation_slot(
         const torch::Tensor& tensor,
         size_t nbytes,
-        uint64_t invocation_index);
+        uint64_t invocation_index,
+        bool is_capturing);
     CallbackPayload* add_payload(
         const torch::Tensor& tensor,
         const torch::Tensor& source,
         void* staging,
         size_t nbytes,
-        uint64_t invocation_index);
+        uint64_t invocation_index,
+        bool is_capturing);
     void set_failure(
         uint64_t replay_index,
         int64_t invocation_index,
         const std::string& message);
-    void release_pinned_noexcept();
+    void release_resources_noexcept();
 
     static void CUDART_CB host_callback(void* user_data);
 
     uint64_t id_;
     std::string name_;
     std::vector<ActionConfig> actions_;
+    torch::Tensor replay_index_;
+    int replay_index_device_ = -1;
+    int64_t* replay_index_staging_ = nullptr;
+    cudaEvent_t replay_index_ready_event_ = nullptr;
     NonContiguousPolicy non_contiguous_;
     ProbeMode mode_;
     bool has_latest_record_actions_ = false;
@@ -148,8 +158,7 @@ class ProbeContext {
     bool captured_once_ = false;
     uint64_t captured_capture_id_ = 0;
     uint64_t next_invocation_index_ = 0;
-
-    std::vector<uint64_t> invocation_callback_counts_;
+    uint64_t eager_callback_count_ = 0;
 
     bool compare_failed_ = false;
     uint64_t failure_replay_index_ = 0;
@@ -160,6 +169,7 @@ class ProbeContext {
 std::shared_ptr<ProbeContext> make_probe_context(
     std::string name,
     std::vector<ActionConfig> actions,
+    torch::Tensor replay_index,
     NonContiguousPolicy non_contiguous,
     ProbeMode mode);
 

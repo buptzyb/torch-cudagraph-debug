@@ -8,11 +8,21 @@ from torch_cudagraph_debug.tensor_debug import (
     TensorProbe,
     CompareTensor,
     TensorMismatchError,
+    PrintTensor,
     RecordTensor,
 )
 
 
 pytestmark = pytest.mark.gpu
+
+
+def replay_index_value(probe: TensorProbe) -> int:
+    replay_index = probe.replay_index
+    assert replay_index is not None
+    assert replay_index.dtype == torch.int64
+    assert replay_index.shape == ()
+    assert replay_index.is_cuda
+    return int(replay_index.item())
 
 
 def test_compare_inside_cuda_graph() -> None:
@@ -36,6 +46,7 @@ def test_compare_inside_cuda_graph() -> None:
 
     probe.assert_ok()
     assert probe.snapshots() == []
+    assert replay_index_value(probe) == 3
     assert y is not None
     probe.close()
 
@@ -116,7 +127,7 @@ def test_non_contiguous_copy_inside_cuda_graph() -> None:
     probe.assert_ok()
     records = probe.snapshots()
     assert len(records) == 1
-    assert records[0].replay_index == 0
+    assert records[0].replay_index == 1
     assert records[0].invocation_index == 0
     assert records[0].shape == tuple(view.shape)
     assert records[0].device.startswith("cuda")
@@ -139,12 +150,17 @@ def test_record_slot_is_zero_before_first_replay() -> None:
     torch.cuda.synchronize()
     records = probe.snapshots()
     assert len(records) == 1
+    assert records[0].replay_index == 0
     assert records[0].shape == tuple(x.shape)
     assert torch.equal(records[0].tensor, torch.zeros_like(expected))
+    assert replay_index_value(probe) == 0
 
     g.replay()
     torch.cuda.synchronize()
-    assert torch.equal(probe.snapshots()[0].tensor, expected)
+    replayed = probe.snapshots()[0]
+    assert replayed.replay_index == 1
+    assert torch.equal(replayed.tensor, expected)
+    assert replay_index_value(probe) == 1
     probe.close()
 
 
@@ -297,6 +313,8 @@ def test_multiple_probes_in_one_cuda_graph() -> None:
     probe_b.assert_ok()
     assert torch.equal(probe_a.snapshots()[0].tensor, expected_a)
     assert torch.equal(probe_b.snapshots()[0].tensor, expected_b)
+    assert replay_index_value(probe_a) == 1
+    assert replay_index_value(probe_b) == 1
     probe_a.close()
     probe_b.close()
 
@@ -323,7 +341,7 @@ def test_one_probe_multiple_invocations_records_and_offline_compares() -> None:
 
     records = probe.snapshots()
     assert len(records) == 3
-    assert [record.replay_index for record in records] == [0, 0, 0]
+    assert [record.replay_index for record in records] == [1, 1, 1]
     assert [record.invocation_index for record in records] == [0, 1, 2]
     assert all(
         torch.equal(record.tensor, expected[record.invocation_index])
@@ -434,7 +452,10 @@ def test_callback_only_side_stream_invocations_use_private_staging() -> None:
     ]
     probe = TensorProbe(
         "side-stream-compare",
-        actions=[CompareTensor(expected, rtol=0.0, atol=0.0)],
+        actions=[
+            RecordTensor(),
+            CompareTensor(expected, rtol=0.0, atol=0.0),
+        ],
     )
     side_stream = torch.cuda.Stream()
 
@@ -451,7 +472,9 @@ def test_callback_only_side_stream_invocations_use_private_staging() -> None:
     torch.cuda.synchronize()
 
     probe.assert_ok()
-    assert probe.snapshots() == []
+    records = probe.snapshots()
+    assert [record.replay_index for record in records] == [1, 1]
+    assert [record.invocation_index for record in records] == [0, 1]
     assert side_value is not None and main_value is not None
     probe.close()
 
@@ -492,6 +515,9 @@ def test_always_mode_eager_calls_do_not_claim_capture_ownership() -> None:
 
     assert probe(x) is x
     torch.cuda.synchronize()
+    eager_record = probe.snapshots()[0]
+    assert eager_record.replay_index == 0
+    assert replay_index_value(probe) == 0
 
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
@@ -503,7 +529,9 @@ def test_always_mode_eager_calls_do_not_claim_capture_ownership() -> None:
 
     records = probe.snapshots()
     assert len(records) == 2
+    assert [record.replay_index for record in records] == [1, 1]
     assert [record.invocation_index for record in records] == [0, 1]
+    assert replay_index_value(probe) == 1
     assert torch.equal(records[0].tensor, expected[0])
     assert torch.equal(records[1].tensor, expected[1])
     probe.close()
@@ -686,3 +714,162 @@ def test_grad_probes_inside_cuda_graph_backward() -> None:
     model.activation_grad_probe.close()
     weight_grad_probe.close()
     final_grad_probe.close()
+
+
+def test_record_replay_index_advances_and_old_snapshots_stay_stable() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    x = torch.zeros(4, device="cuda", dtype=torch.float32)
+    probe = TensorProbe("record-replay-index", actions=[RecordTensor()])
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        probe(x)
+
+    x.fill_(1)
+    g.replay()
+    first = probe.snapshots()[0]
+
+    x.fill_(2)
+    g.replay()
+    second = probe.snapshots(
+        synchronize=torch.device("cuda", torch.cuda.current_device())
+    )[0]
+
+    assert first.replay_index == 1
+    assert second.replay_index == 2
+    assert torch.equal(first.tensor, torch.ones(4))
+    assert torch.equal(second.tensor, torch.full((4,), 2.0))
+    assert replay_index_value(probe) == 2
+
+    exposed = probe.replay_index
+    assert exposed is not None
+    exposed.add_(100)
+    assert replay_index_value(probe) == 2
+    probe.close()
+
+
+def test_snapshots_can_synchronize_non_default_replay_stream() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    x = torch.zeros(4, device="cuda", dtype=torch.float32)
+    probe = TensorProbe("stream-synchronize", actions=[RecordTensor()])
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        probe(x)
+
+    replay_stream = torch.cuda.Stream()
+    with torch.cuda.stream(replay_stream):
+        x.fill_(3)
+        g.replay()
+
+    snapshot = probe.snapshots(synchronize=replay_stream)[0]
+    assert snapshot.replay_index == 1
+    assert torch.equal(snapshot.tensor, torch.full((4,), 3.0))
+    probe.close()
+
+
+def test_queued_replays_report_latest_replay_index() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    x = torch.arange(4, device="cuda", dtype=torch.float32)
+    probe = TensorProbe("queued-replays", actions=[RecordTensor()])
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        probe(x)
+
+    for _ in range(3):
+        g.replay()
+    torch.cuda.synchronize()
+
+    snapshot = probe.snapshots()[0]
+    assert snapshot.replay_index == 3
+    assert replay_index_value(probe) == 3
+    probe.close()
+
+
+def test_record_and_compare_share_first_mismatch_replay_index() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    x = torch.ones(4, device="cuda")
+    probe = TensorProbe(
+        "record-compare-index",
+        actions=[
+            RecordTensor(),
+            CompareTensor(torch.ones(4), rtol=0.0, atol=0.0),
+        ],
+    )
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        probe(x)
+
+    replay_stream = torch.cuda.current_stream()
+    g.replay()
+    probe.assert_ok(synchronize=replay_stream)
+    assert probe.snapshots(synchronize=False)[0].replay_index == 1
+
+    x.fill_(2)
+    g.replay()
+
+    status = probe.status(synchronize=replay_stream)
+    assert status.ok is False
+    assert status.replay_index == 2
+    assert status.invocation_index == 0
+    assert probe.snapshots(synchronize=False)[0].replay_index == 2
+    assert replay_index_value(probe) == 2
+    probe.close()
+
+
+def test_print_every_uses_graph_replay_index(capfd: pytest.CaptureFixture[str]) -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    x = torch.arange(4, device="cuda", dtype=torch.float32)
+    probe = TensorProbe(
+        "print-every",
+        actions=[PrintTensor(max_items=1, every=2, summary=False)],
+    )
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        probe(x)
+
+    for _ in range(3):
+        g.replay()
+    torch.cuda.synchronize()
+
+    lines = [
+        line
+        for line in capfd.readouterr().err.splitlines()
+        if "torch-cudagraph-debug:print-every" in line
+    ]
+    assert len(lines) == 1
+    assert "replay=2 invocation=0" in lines[0]
+    assert replay_index_value(probe) == 3
+    probe.close()
+
+
+def test_probe_device_must_match_active_tensor_device() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires at least two CUDA devices")
+
+    probe = TensorProbe(
+        "device-mismatch",
+        actions=[RecordTensor()],
+        when="always",
+        device="cuda:0",
+    )
+    x = torch.ones(1, device="cuda:1")
+
+    with pytest.raises(RuntimeError, match="created on cuda:0.*cuda:1"):
+        probe(x)
+    probe.close()

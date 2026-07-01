@@ -60,18 +60,19 @@ def main() -> None:
     try:
         with torch.no_grad():
             block(static_input)
-        torch.cuda.synchronize()
-        assert probe.snapshots() == []
+        assert probe.snapshots(
+            synchronize=torch.cuda.current_stream()
+        ) == []
 
         graph = torch.cuda.CUDAGraph()
         with torch.no_grad(), torch.cuda.graph(graph):
             output = block(static_input)
 
+        replay_stream = torch.cuda.current_stream()
         graph.replay()
-        torch.cuda.synchronize()
 
-        probe.assert_ok()
-        snapshots = probe.snapshots()
+        probe.assert_ok(synchronize=replay_stream)
+        snapshots = probe.snapshots(synchronize=False)
         assert len(snapshots) == 1
         torch.testing.assert_close(
             snapshots[0].tensor,

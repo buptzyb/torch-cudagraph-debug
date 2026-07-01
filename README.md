@@ -1,544 +1,231 @@
 # torch-cudagraph-debug
 
-`torch-cudagraph-debug` provides focused debugging tools for PyTorch CUDA
-Graphs:
+Focused debugging tools for PyTorch CUDA Graphs:
 
-- `tensor_debug` inserts native tensor print, record, and comparison probes
-  into graph capture.
-- `memory_debug` records private CUDA allocator snapshots at explicit points
-  and analyzes default and graph-private memory pools.
+- `tensor_debug` inserts native tensor print, record, and comparison probes.
+- `memory_debug` records allocator snapshots and analyzes default and
+  non-default pools, including CUDA Graph private pools.
 
-The package targets Linux, CUDA-enabled PyTorch 2.6+, and source builds against
-the PyTorch installation in the target environment.
+The package targets Linux, Python 3.10+, and CUDA-enabled PyTorch 2.6+. Source
+builds use the PyTorch and CUDA toolchain in the target environment.
 
 ## Install
 
-Install CUDA-enabled PyTorch first, then build this package without build
-isolation:
+Source installation currently builds the native tensor extension for the whole
+package. Install CUDA-enabled PyTorch, a compatible CUDA development toolkit,
+and a C++17 compiler first. Because the extension builds against the installed
+PyTorch, prepare the declared build backend and then build without isolation:
 
 ```bash
-pip install --no-build-isolation .
+python -m pip install --upgrade "setuptools>=77.0.3" wheel
+python -m pip install --no-build-isolation .
 ```
 
-For the repository version:
+To install the repository version:
 
 ```bash
-pip install --no-build-isolation \
+python -m pip install --no-build-isolation \
   "git+https://github.com/buptzyb/torch-cudagraph-debug.git@main"
 ```
 
-Enabled tensor probes require the native extension. Memory debugging is
-Python-only.
+Tensor probes require the compiled native extension at runtime. Memory debugging
+is implemented in Python, but there is currently no memory-only source
+installation mode.
 
-## Tensor Debug
+## Tensor Quick Start
 
-Import tensor APIs from their domain module:
-
-```python
-from torch_cudagraph_debug.tensor_debug import (
-    CompareTensor,
-    PrintTensor,
-    RecordTensor,
-    TensorProbe,
-)
-```
-
-A probe returns the exact input tensor object while adding debug work during
-capture:
+Insert a probe at intermediate tensors inside a captured dataflow. This example
+uses the recommended `RecordTensor` action to inspect two hidden states without
+changing the graph's output:
 
 ```python
 import torch
 
-static_x = torch.ones(4, device="cuda")
-expected = torch.full((4,), 3.0, device="cpu")
-probe = TensorProbe(
-    "mid",
-    [
-        PrintTensor(max_items=8),
-        RecordTensor(),
-        CompareTensor(expected),
-    ],
-)
+from torch_cudagraph_debug.tensor_debug import RecordTensor, TensorProbe
+
+static_x = torch.arange(8, device="cuda", dtype=torch.float32)
+probe = TensorProbe("hidden", [RecordTensor()])
 
 graph = torch.cuda.CUDAGraph()
 with torch.cuda.graph(graph):
-    mid = probe(static_x + 2)
+    # Each probe call records one intermediate tensor in this dataflow.
+    first_hidden = probe(static_x * 2)
+    second_hidden = probe(torch.relu(first_hidden - 5))
+    output = second_hidden.square()
 
+replay_stream = torch.cuda.current_stream()
 graph.replay()
-torch.cuda.synchronize()
 
-for snapshot in probe.snapshots():
-    print(snapshot.invocation_index, snapshot.tensor)
-
-probe.assert_ok()
+# The query waits only for the stream that launched this replay.
+# Snapshots are ordered by their capture-time invocation.
+for snapshot in probe.snapshots(synchronize=replay_stream):
+    print(
+        f"replay={snapshot.replay_index} "
+        f"invocation={snapshot.invocation_index}: {snapshot.tensor}"
+    )
 probe.close()
 ```
 
-The default `when="capture"` makes eager warmup calls transparent no-ops.
-Use `when="always"` only when eager debug side effects are intentional.
+Output:
 
-`CompareTensor` accepts either one CPU tensor/NumPy array or a sequence. A
-single value corresponds only to invocation 0; it is not broadcast when the
-same probe is called more than once in one capture. For repeated calls, pass
-expected values in invocation order:
-
-```python
-probe = TensorProbe(
-    "layers.hidden",
-    [CompareTensor([expected_layer0, expected_layer1])],
-)
+```text
+replay=1 invocation=0: tensor([ 0.,  2.,  4.,  6.,  8., 10., 12., 14.])
+replay=1 invocation=1: tensor([0., 0., 0., 1., 3., 5., 7., 9.])
 ```
 
-Each capture-time call owns a logical slot with its own pinned staging storage.
-One probe may have many slots in one graph, but it may not be reused by a
-different capture session.
+`RecordTensor` is the recommended starting point: query the latest replay
+snapshot in Python without a CUDA host callback. Pass the replay stream to
+`snapshots()` to avoid a device-wide synchronization. The probe returns its
+input unchanged, so it does not alter the model's dataflow.
+It still enqueues a device-to-host copy into pinned staging memory for every
+captured invocation, so keep probes limited to tensors needed for debugging.
 
-### Gradient Probes
+The graph above captures one sequential dataflow while the same probe observes
+two intermediate tensors. Each probe call creates one invocation slot, and
+`snapshots()` returns the latest value for every slot in invocation order. The
+probe's GPU counter advances once per graph replay, so every slot from the same
+replay reports the same 1-based `replay_index`. Query methods use a safe
+device-wide synchronization by default; pass the replay stream for the
+recommended stream-scoped behavior, or `synchronize=False` after arranging
+ordering yourself.
 
-`watch_grad()` registers a normal PyTorch autograd hook and returns its
-`RemovableHandle`, or `None` when the tensor does not require gradients and
-`strict=False`:
+Other actions are available when needed. Both unavoidably add CUDA host-callback
+overhead and can create a GPU bubble, so use them only at targeted probe sites:
 
-```python
-activation_grad_probe.watch_grad(hidden)
-handle = weight_grad_probe.watch_grad(module.weight, strict=True)
+- `PrintTensor` prints replay values immediately from a native host callback.
+- `CompareTensor` checks replay values against expected CPU tensors.
 
-# Later, after the hook is no longer needed:
-handle.remove()
-```
+Multiple actions can be combined on one probe.
 
-The hook calls the probe for its side effect and returns the original gradient.
-It does not replace the tensor or transform gradients.
+Continue with the [Tensor Debug guide](docs/tensor_debug.md), the
+[example learning path](examples/tensor_debug/README.md), or the
+[API reference](docs/api.md#tensor-debug).
 
-### Non-Contiguous Inputs
+## Memory Quick Start
 
-The default `non_contiguous="error"` avoids hidden graph-pool allocations.
-`non_contiguous="copy"` explicitly permits a debug-only contiguous CUDA copy:
-
-```python
-probe = TensorProbe(
-    "view",
-    [RecordTensor()],
-    non_contiguous="copy",
-)
-```
-
-The copy consumes graph-pool memory, approximately one tensor payload per
-captured probe site.
-
-### TensorBoard
-
-TensorBoard integration stays outside CUDA host callbacks:
-
-```python
-from torch_cudagraph_debug.tensor_debug.postprocess import (
-    export_snapshots_to_tensorboard,
-)
-
-graph.replay()
-torch.cuda.synchronize()
-export_snapshots_to_tensorboard(writer, probe.snapshots())
-```
-
-## Memory Debug
-
-Import the stable memory API from `memory_debug`:
-
-```python
-from torch_cudagraph_debug.memory_debug import (
-    AttributionOptions,
-    MemoryRecorder,
-    MemoryRun,
-    MemoryRunGroup,
-    compare_group_phases,
-    compare_phases,
-    compare_points,
-)
-```
-
-The recorder always calls `torch.cuda.memory._snapshot()`. It discovers every
-pool present in the snapshot; users do not pass pool handles. `pool[0,0]` is
-the default allocator pool, and other `segment_pool_id` values are private
-pools such as CUDA Graph pools.
-
-### Record A Run
+Record points around CUDA Graph capture, then compare allocator state to see
+graph-private pool growth. This lightweight workflow does not require PyTorch
+allocator history:
 
 ```python
 import torch
 
-recorder = MemoryRecorder(
-    name="capture",
-    rank=0,
-    group_id="job-20260630",
-    world_size=4,
-    run_metadata={
-        "source_revision": "abc123",
-        "scenario": "cuda-graph",
-    },
-    bundle_dir="rank0.tcgd-memory",
-)
+from torch_cudagraph_debug.memory_debug import MemoryRecorder
+
+recorder = MemoryRecorder(name="graph-capture")
 recorder.mark("before_capture")
 
-pool = torch.cuda.graph_pool_handle()
 graph = torch.cuda.CUDAGraph()
-with torch.cuda.graph(graph, pool=pool):
-    tmp_a = torch.empty((4096, 4096), device="cuda")
-    recorder.mark("during_capture")
-    tmp_b = torch.empty((2048, 4096), device="cuda")
+with torch.cuda.graph(graph):
+    # This allocation belongs to the graph's private pool.
+    graph_state = torch.empty(
+        16 * 1024 * 1024,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    graph_state.fill_(1)
 
 recorder.mark("after_capture")
-graph.replay()
-recorder.mark("after_replay")
+
 run = recorder.finish()
-```
-
-The manifest records rank/group identity, user `run_metadata`, and automatic
-runtime provenance such as package, Python, PyTorch, CUDA, and initialized GPU
-properties. Device provenance is collected only after a real allocator
-snapshot; creating a recorder does not initialize CUDA for metadata alone.
-
-`mark()` synchronizes by default outside capture. During CUDA stream capture,
-it skips synchronization because synchronization is capture-illegal, then
-takes the allocator snapshot immediately.
-
-`MemoryRecorder` only collects data. `finish()` returns an immutable
-`MemoryRun`; analysis belongs to the run and result objects:
-
-```python
-comparison = run.compare("before_capture", "after_capture")
-print(comparison.to_text())
-
-timeline = run.timeline()
-timeline.write("reports/timeline")
-```
-
-The context-manager form finishes automatically:
-
-```python
-with MemoryRecorder(name="capture") as recorder:
-    recorder.mark("start")
-    # workload
-    recorder.mark("end")
-
-run = recorder.result
-```
-
-### Allocator History Is Application-Owned
-
-The recorder never calls `torch.cuda.memory._record_memory_history()`. Pool,
-stream, segment, block, and fragmentation state works without history.
-Attribution requires the application to enable the corresponding history before
-the allocations of interest:
-
-```python
-torch.cuda.memory._record_memory_history(
-    enabled="state",
-    context="state",
-    stacks="python",
-    clear_history=True,
-)
-```
-
-Use `enabled="all", context="all"` when historical allocator events are also
-needed. Then request attribution explicitly:
-
-```python
-options = AttributionOptions(
-    stacks=True,
-    events=True,
-    on_missing="warn",
-    stack_depth=2,
-    limit=20,
-)
-comparison = run.compare("start", "end", attribution=options)
-```
-
-`on_missing="warn"` preserves state results and adds warnings.
-`on_missing="error"` raises `MemoryHistoryError`.
-
-A block's `frames` are the allocation call stack for memory still active in a
-snapshot. Entries under `device_traces` are historical allocator events, and
-their `frames` are event call stacks. These are separate data sources.
-
-### Analysis Modes
-
-The basic operations remain timeline and two-point comparison:
-
-```python
-run = MemoryRun.load("rank0.tcgd-memory")
-
-timeline = run.timeline()
 growth = run.compare("before_capture", "after_capture")
-phase_range = run.between("before_capture", "after_capture")
+print(growth.to_text(include_unchanged=False))
 ```
 
-The default timeline is manifest-only: it computes absolute state and deltas
-without decompressing raw snapshots, and `timeline.adjacent` is empty. Passing
-`AttributionOptions(stacks=True)` or `events=True` streams one raw snapshot per
-point and attaches attributed adjacent comparisons.
-
-Every point and comparison also exposes allocator-wide `all`, `default`, and
-`private` totals. These totals include unmatched private pools, so a cross-run
-headline does not silently become a default-pool-only number. Pool and
-pool/stream rows remain available for drill-down.
-
-Allocation cohort lifetimes are an optional same-run drill-down, not a
-replacement for those modes. To answer "what was live here, and when did it
-go away?", anchor the analysis at the point of interest:
-
-```python
-lifetimes = run.lifetimes(
-    "before_capture",
-    through="after_replay",
-    attribution=AttributionOptions(
-        events=True,
-        on_missing="warn",
-        stack_depth=4,
-    ),
-)
-print(lifetimes.to_text())
-lifetimes.write("reports/lifetimes")
-```
-
-The anchor keeps only allocation instances active at that point. Cohorts are
-grouped by device, pool, and allocation call stack, with streams and allocation
-size histograms retained as detail. Each release is classified as:
-
-- `event_exact`: a matching `free_requested` event was found between point
-  markers;
-- `snapshot_inferred`: the block disappeared between snapshots without an
-  exact event;
-- still active at the final point.
-
-Full allocator history is required for exact release timing and free call
-stacks. Without it, snapshot-only lifetime analysis still works but cannot
-distinguish an unobserved free-and-reallocate cycle that reuses the same address
-and shape. The report describes allocator blocks, not Python tensor names or
-object ownership.
-
-To answer a different question, "what was allocated in this interval?", use
-the half-open `(start, end]` birth selection:
-
-```python
-born = run.lifetimes(
-    born_between=("before_capture", "after_capture"),
-    through="after_replay",
-)
-```
-
-With full event history, this mode retains allocations that were both created
-and freed between the two points, even when they are active in neither endpoint
-snapshot. It reports allocation and release stacks plus an event-derived live
-byte peak. With events disabled or incomplete, it falls back to snapshot-
-inferred births and warns that transient allocations may be missing.
-
-Set `lifetimes=True` in `AttributionOptions` to embed the same top-cohort
-summary in a same-run comparison, a timeline, or both same-run growth legs of a
-four-point phase comparison.
-
-Same-run comparison can use allocator addresses for lifecycle observations such
-as new segments and blocks becoming active or inactive.
-
-For independent runs, use `compare_points()`:
-
-```python
-baseline = MemoryRun.load("baseline-rank0.tcgd-memory")
-candidate = MemoryRun.load("candidate-rank0.tcgd-memory")
-
-end_delta = compare_points(
-    baseline["forward_end"],
-    candidate["capture_end"],
-    pool_mapping={(0, 1): (0, 4)},
-    attribution=AttributionOptions(stacks=True),
-)
-```
-
-Cross-run rules are intentionally conservative:
-
-- `(0,0)` matches `(0,0)` automatically.
-- Private pools remain before-only/after-only even when their raw IDs happen to
-  be equal, unless `pool_mapping` explicitly pairs them.
-- Stream IDs are never matched across runs. Pool/stream observations remain
-  before-only or after-only.
-- Address lifecycle and allocator events are unavailable across runs.
-
-The optional four-point helper separates start-state differences from phase
-growth:
-
-```python
-phase = compare_phases(
-    baseline.between("forward_start", "forward_end"),
-    candidate.between("capture_start", "capture_end"),
-    pool_mapping={(0, 1): (0, 4)},
-)
-print(phase.to_text())
-```
-
-For every matched pool and metric it checks:
+Output from the tested run:
 
 ```text
-end delta = start delta + candidate growth - baseline growth
+Memory comparison 'before_capture' -> 'after_capture' (same run)
+  allocator totals:
+    total[all]
+      allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 18.00 MiB (delta +18.00 MiB)
+      active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
+    total[default]
+      allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
+      active: 0 B -> 1.00 KiB (delta +1.00 KiB), requested: 0 B -> 16 B (delta +16 B)
+    total[private]
+      allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
+      active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
+  pools:
+    pool[0,0] -> pool[0,0] [same_run]
+      allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
+      active: 0 B -> 1.00 KiB (delta +1.00 KiB), requested: 0 B -> 16 B (delta +16 B)
+    pool[1,0] -> pool[1,0] [same_run]
+      allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
+      active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
+  pool/stream groups:
+    pool[0,0] stream[246971088] -> pool[0,0] stream[246971088] [same_run]
+      allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
+    pool[1,0] stream[246971088] -> pool[1,0] stream[246971088] [same_run]
+      allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
 ```
 
-The same four-point equation is emitted for `all`, `default`, and `private`
-totals independently of private-pool ID matching.
+Read the report top-down:
 
-### Multi-Rank Groups
+1. Every metric is `before -> after (delta)`.
+2. `total[all]` combines every pool, `total[default]` is `pool[0,0]`, and
+   `total[private]` combines all non-default pools, including CUDA Graph
+   pools.
+3. `requested` is the original active allocation request, `allocated` is
+   allocator-owned allocated space, `active` is space not yet reusable, and
+   `reserved` is the full segment capacity held by the caching allocator.
+4. `pools` identifies which pool changed; `pool/stream groups` attributes that
+   pool state to individual CUDA streams.
 
-Place direct per-rank bundles under one directory:
+The main signal here is `total[private]`: graph capture added a 16 MiB active
+allocation in a private pool. The small default-pool change is separate
+allocator/runtime activity; this state-only report does not identify its owner.
 
-```text
-baseline/
-  rank-00000.tcgd-memory/
-  rank-00001.tcgd-memory/
-```
+Absolute values, allocator rounding, pool and stream IDs, incidental
+default-pool activity, and the changed rows that appear can vary with the
+PyTorch/CUDA environment and prior allocator state.
 
-Then validate and summarize them as one group:
+More Memory Debug workflows are available when needed:
 
-```python
-baseline_group = MemoryRunGroup.load("baseline")
-candidate_group = MemoryRunGroup.load("candidate")
+**Analysis modes**
 
-summary = baseline_group.summary()
-summary.write("reports/baseline-group")
+- `timeline()` follows allocator state across every recorded point.
+- `lifetimes()` tracks allocation births, releases, and still-active cohorts
+  within one run.
+- `compare_points()` compares points from independent runs.
+- `compare_phases()` separates initial-state differences from phase growth.
 
-group_phase = compare_group_phases(
-    baseline_group,
-    candidate_group,
-    baseline_start="forward_start",
-    baseline_end="forward_end",
-    candidate_start="capture_start",
-    candidate_end="capture_end",
-)
-group_phase.write("reports/group-phase")
-```
+**Optional attribution**
 
-Groups require unique ranks, matching point-label sequences, and consistent
-non-null group IDs/world sizes. Missing ranks and provenance mismatches are
-warnings. Reports preserve per-rank values and show min, max, spread, and the
-worst rank; GPU memory is deliberately not summed across ranks. Group loading
-defaults to `cache_snapshots=False` so decompressed payloads do not accumulate
-across ranks and points. Pass `cache_snapshots=True` only when repeated raw
-snapshot access is worth the additional host memory.
+- `AttributionOptions(stacks=True)` attributes active memory to allocation
+  stacks in same-run or cross-run analysis and requires state history.
+- `AttributionOptions(events=True)` attributes alloc/free events and requires
+  full history; event attribution is available only within one run.
 
-### Reports And Bundles
+**Multi-rank analysis**
 
-Every timeline, comparison, and phase result owns:
+- `MemoryRunGroup.summary()` summarizes rank-local bundles without summing
+  per-GPU memory.
+- `compare_group_phases()` compares phase growth across two rank groups.
 
-- `to_text(include_unchanged=True)`
-- `to_dict()`
-- `to_html(include_unchanged=True)`
-- `write(output_dir, include_unchanged=True)`
+**Offline analysis**
 
-`write()` creates `report.txt`, `report.json`, `report.html`, `totals.csv`,
-`pools.csv`, and `pool_streams.csv`. Attribution adds
-`allocation_stacks.csv` or `events.csv`; phase reports add `phase.csv` and
-`phase_totals.csv`.
-Lifetime reports add `cohorts.csv`, `cohort_points.csv`,
-`size_histograms.csv`, and, when present, `birth_stacks.csv` and
-`release_stacks.csv`. Group reports add `rank_points.csv` plus
-`point_summary.csv`, or `rank_phase.csv` plus `phase_summary.csv`.
-Timeline HTML includes allocated, reserved, and optional cohort charts.
-`include_unchanged=False` filters zero-change rows from text, HTML, and CSV;
-JSON always retains the complete result.
+- `MemoryRecorder(..., bundle_dir=...)` saves a run for later loading with
+  `MemoryRun.load()` or analysis with the `tcgd-memory` CLI.
 
-Bundles use the `torch-cudagraph-debug/memory-run` schema: one
-`manifest.json` plus one gzip JSON snapshot per point. Manifest, point, and
-group fields are canonical; derived inactive/fragmentation values are not
-stored. Loading a run reads only the manifest and compact summaries;
-`point.raw_snapshot()` loads and caches the full snapshot lazily when the run
-was loaded with `cache_snapshots=True`, the `MemoryRun.load()` default. The
-CLI and `MemoryRunGroup.load()` use bounded-memory loading, retaining only
-current comparison payloads and compact indexes. The format is JSON-only. Use
-one bundle per process/rank and one writer per bundle.
+Results can be exported as text, JSON, CSV, and HTML or analyzed through the
+`tcgd-memory` CLI.
 
-### CLI
+Continue with the [Memory Debug guide](docs/memory_debug.md), the
+[example learning path](examples/memory_debug/README.md), the
+[API reference](docs/api.md#memory-debug), or the
+[`tcgd-memory` CLI reference](docs/api.md#cli).
 
-The `tcgd-memory` entry point mirrors the Python analysis modes:
+## Documentation
 
-```bash
-tcgd-memory lifetimes rank0.tcgd-memory \
-  --at before_capture --through after_replay \
-  --output reports/lifetimes
-
-tcgd-memory lifetimes rank0.tcgd-memory \
-  --born-between before_capture after_capture \
-  --through after_replay --output reports/born
-
-tcgd-memory timeline rank0.tcgd-memory \
-  --output reports/timeline
-
-tcgd-memory compare rank0.tcgd-memory \
-  --before before_capture --after after_capture \
-  --stacks --output reports/capture
-
-tcgd-memory compare-runs baseline.tcgd-memory candidate.tcgd-memory \
-  --before forward_end --after capture_end \
-  --pool-map 0,1=0,4 --output reports/end-delta
-
-tcgd-memory compare-phases baseline.tcgd-memory candidate.tcgd-memory \
-  --baseline-start forward_start --baseline-end forward_end \
-  --candidate-start capture_start --candidate-end capture_end \
-  --pool-map 0,1=0,4 --output reports/phase
-
-tcgd-memory summarize-group baseline \
-  --output reports/baseline-group
-
-tcgd-memory compare-group-phases baseline candidate \
-  --baseline-start forward_start --baseline-end forward_end \
-  --candidate-start capture_start --candidate-end capture_end \
-  --output reports/group-phase
-```
-
-The analysis commands support `--stacks`, `--events`, `--lifetimes`,
-`--on-missing`, `--stack-depth`, `--limit`, and `--only-changed`.
-`lifetimes` always groups cohorts by allocation stack and enables allocator
-events by default; pass `--no-events` for snapshot-only inference. Cross-run
-event and lifetime requests are rejected
-because allocator addresses and histories have no cross-run identity.
-
-Low-level snapshot parsers and attribution helpers are available under
-`torch_cudagraph_debug.memory_debug.advanced`. They are experimental and may
-change in a minor release. Snapshot summaries use
-`Mapping[GroupKey, MemoryStats]`.
-
-## Examples
-
-The runnable examples are organized as learning paths and exercise only the
-stable APIs and CLI:
-
-- [Complete examples index](examples/README.md)
-- [Tensor Debug learning path](examples/tensor_debug/README.md)
-- [Memory Debug learning path](examples/memory_debug/README.md)
-- [Optional integrations](examples/integrations/README.md)
-
-Start with the Tensor or Memory quickstart, then move to the complete workflows
-for gradients, persistence, lifetime attribution, cross-run phases, multi-rank
-groups, and all seven `tcgd-memory` commands.
-
-## Constraints
-
-- Linux and CUDA are required for enabled tensor probes.
-- Tensor probe nodes can create large GPU bubbles and are for correctness
-  debugging, not performance measurement.
-- Keep a tensor probe alive while any graph containing it can replay, and call
-  `close()` only afterward.
-- Synchronize after graph replay before reading tensor snapshots or status.
-- Full allocator event history is cumulative up to PyTorch's `max_entries`;
-  frequent memory points can produce large bundles.
-- Lifetime analysis is per process/rank. Event-backed `born_between` can retain
-  transient allocations between points; snapshot-only fallback cannot observe
-  allocations that are active at no recorded point.
+| Resource | Purpose |
+|---|---|
+| [Tensor Debug guide](docs/tensor_debug.md) | Probe lifecycle, invocation slots, gradients, non-contiguous inputs, TensorBoard |
+| [Memory Debug guide](docs/memory_debug.md) | Recording, history policy, timelines, lifetimes, phases, groups, reports, CLI |
+| [API reference](docs/api.md) | Public signatures, result models, errors, and experimental helpers |
+| [Examples](examples/README.md) | Ordered runnable workflows and integration examples |
 
 ## Development
 
-CPU-side checks:
-
-```bash
-python -m py_compile $(find src tests examples -name '*.py')
-pytest -q
-python -m build --sdist --no-isolation
-```
-
-CUDA tests must run against an installed extension in a CUDA-enabled PyTorch
-environment.
+See [Contributing](CONTRIBUTING.md) for development setup and checks. Release
+validation is documented in [the release checklist](docs/release_checklist.md).
