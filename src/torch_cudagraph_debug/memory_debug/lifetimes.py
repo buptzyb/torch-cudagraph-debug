@@ -305,11 +305,6 @@ def analyze_allocation_lifetimes(
                 "event history was unavailable or incomplete; transient allocations "
                 "may be missing"
             )
-    else:
-        # Preserve the existing all-cohort behavior: event-only transient
-        # generations are exposed only by explicit born-between analysis.
-        instances = [item for item in instances if item.observations]
-
     total_instance_bytes = sum(item.size_bytes for item in instances)
     attributed_instance_bytes = sum(
         item.size_bytes for item in instances if item.stack_key != "<unattributed>"

@@ -17,6 +17,8 @@
 
 ```bash
 python -m py_compile $(find src tests examples -name '*.py')
+bash -n examples/memory_debug/cli_workflows.sh
+ruff check src tests examples
 pytest -q
 python -m build --sdist --no-isolation
 twine check dist/*
@@ -59,14 +61,47 @@ Memory coverage must include:
 - replay-stable state;
 - gzip JSON persistence and `MemoryRun.load()` round trip.
 
-Run the user-facing examples that are relevant to the release:
+Run every stable single-GPU example from an installed package:
 
 ```bash
-python examples/grad_probe_patterns.py
-python examples/multiple_invocations_record_compare.py
-python examples/tensorboard_export_records.py
-python examples/memory_debug_basic.py
-python examples/memory_debug_timeline.py
+EXAMPLE_ROOT="$(mktemp -d /tmp/tcgd-examples.XXXXXX)"
+
+python examples/tensor_debug/quickstart.py
+python examples/tensor_debug/record_and_compare.py
+python examples/tensor_debug/multiple_invocations.py
+python examples/tensor_debug/gradient_probes.py
+python examples/tensor_debug/probe_modes.py
+python examples/tensor_debug/module_integration.py
+
+python examples/memory_debug/quickstart.py
+python examples/memory_debug/timeline_and_reports.py \
+  --output-dir "${EXAMPLE_ROOT}/timeline"
+python examples/memory_debug/attribution_modes.py \
+  --output-dir "${EXAMPLE_ROOT}/attribution"
+python examples/memory_debug/allocation_lifetimes.py \
+  --output-dir "${EXAMPLE_ROOT}/lifetimes"
+python examples/memory_debug/compare_runs_and_phases.py \
+  --output-dir "${EXAMPLE_ROOT}/runs"
+bash examples/memory_debug/cli_workflows.sh \
+  single "${EXAMPLE_ROOT}/cli-single"
+```
+
+With the optional TensorBoard dependency installed, also run:
+
+```bash
+python examples/integrations/tensorboard_export.py \
+  --logdir "${EXAMPLE_ROOT}/tensorboard"
+```
+
+On a node with at least two GPUs, cover rank-local groups and the remaining CLI
+commands:
+
+```bash
+torchrun --standalone --nproc-per-node=2 \
+  examples/memory_debug/distributed_groups.py \
+  --output-dir "${EXAMPLE_ROOT}/groups"
+NPROC_PER_NODE=2 bash examples/memory_debug/cli_workflows.sh \
+  distributed "${EXAMPLE_ROOT}/cli-distributed"
 ```
 
 ## Public Ref Gate

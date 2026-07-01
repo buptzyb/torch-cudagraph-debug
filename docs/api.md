@@ -17,6 +17,8 @@ domain explicitly.
 
 ## Tensor Debug
 
+Runnable guide: [Tensor Debug examples](../examples/tensor_debug/README.md).
+
 ### Stable Imports
 
 ```python
@@ -180,9 +182,13 @@ export_snapshots_to_tensorboard(
 ```
 
 The helper accepts an existing TensorBoard-compatible writer and does not import
-TensorBoard itself. The caller owns synchronization and writer lifecycle.
+TensorBoard itself. The caller owns synchronization and writer lifecycle. See
+the [TensorBoard integration example](../examples/integrations/tensorboard_export.py)
+for replay-by-replay snapshot retention and export.
 
 ## Memory Debug
+
+Runnable guide: [Memory Debug examples](../examples/memory_debug/README.md).
 
 ### Stable Imports
 
@@ -478,7 +484,8 @@ comparison uses compact manifest state and never reads raw snapshots. Cross-run
 matching is conservative:
 
 1. Default `(0,0)` pools match automatically when present in both runs.
-2. Private pools match only through a one-to-one `pool_mapping`.
+2. Private pools match only through a one-to-one `pool_mapping`; every mapped
+   source and target must exist at the selected points.
 3. Identical raw private IDs are still unmatched without that mapping.
 4. Streams are never matched across runs; all pool/stream rows are before-only
    or after-only.
@@ -511,6 +518,11 @@ verifies:
 ```text
 end_delta = start_delta + candidate_growth - baseline_growth
 ```
+
+Every explicit private-pool mapping must exist at all four selected phase
+points because the mapping is applied to both cross-run endpoint comparisons.
+Seed a shared graph pool before the phase starts when the phase itself will grow
+that pool.
 
 Event attribution applies to the two same-run growth comparisons. Start/end
 cross-run comparisons never compare events.
@@ -610,6 +622,9 @@ Loading reads only manifest summaries and never executes pickle. A bundle has
 one writer; distributed users create one bundle per rank.
 
 ### CLI
+
+The [CLI workflow example](../examples/memory_debug/cli_workflows.sh) creates
+its own bundles and exercises every command below.
 
 ```text
 tcgd-memory lifetimes BUNDLE \

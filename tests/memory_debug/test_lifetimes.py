@@ -193,6 +193,57 @@ def test_born_between_keeps_event_only_transient_allocation(tmp_path: Path) -> N
     assert "release_stacks" in paths
 
 
+def test_embedded_lifetimes_keep_event_only_transient_allocation() -> None:
+    markers: list[str] = []
+
+    def provider(marker: str):
+        markers.append(marker)
+        if len(markers) == 1:
+            return snapshot(traces=[[event("snapshot", marker=marker)]])
+        return snapshot(
+            traces=[
+                [
+                    event("snapshot", marker=markers[0]),
+                    event("alloc", address=9000, size=64, pool=(0, 7)),
+                    event(
+                        "free_requested",
+                        address=9000,
+                        size=64,
+                        pool=(0, 7),
+                        frame="released.py",
+                    ),
+                ]
+            ]
+        )
+
+    recorder = MemoryRecorder._from_snapshot_provider(provider)
+    recorder.mark("before")
+    recorder.mark("after")
+    run = recorder.finish()
+    options = AttributionOptions(
+        events=True,
+        lifetimes=True,
+        on_missing="error",
+    )
+
+    comparison = run.compare("before", "after", attribution=options)
+    timeline = run.timeline(attribution=options)
+
+    assert comparison.allocation_lifetimes is not None
+    assert timeline.allocation_lifetimes is not None
+    for report in (
+        comparison.allocation_lifetimes,
+        timeline.allocation_lifetimes,
+    ):
+        assert report.history_complete is True
+        assert len(report.cohorts) == 1
+        cohort = report.cohorts[0]
+        assert [item.active_bytes for item in cohort.points] == [0, 0]
+        assert cohort.event_exact_birth_bytes == 64
+        assert cohort.event_exact_release_bytes == 64
+
+
+
 def test_born_between_snapshot_fallback_warns_and_misses_no_survivor() -> None:
     run = make_run(
         [snapshot(), snapshot(segment(active=64, frame="born.py")), snapshot()],

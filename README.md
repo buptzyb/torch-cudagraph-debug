@@ -504,13 +504,17 @@ change in a minor release. Snapshot summaries use
 
 ## Examples
 
-- [Tensor print and compare](examples/tensor_debug_basic.py)
-- [Tensor record and compare](examples/tensor_debug_record_compare.py)
-- [Repeated tensor probe calls](examples/multiple_invocations_record_compare.py)
-- [Gradient probe patterns](examples/grad_probe_patterns.py)
-- [Basic memory capture analysis](examples/memory_debug_basic.py)
-- [Persisted memory timeline](examples/memory_debug_timeline.py)
-- [Allocation cohort lifetimes](examples/memory_debug_lifetimes.py)
+The runnable examples are organized as learning paths and exercise only the
+stable APIs and CLI:
+
+- [Complete examples index](examples/README.md)
+- [Tensor Debug learning path](examples/tensor_debug/README.md)
+- [Memory Debug learning path](examples/memory_debug/README.md)
+- [Optional integrations](examples/integrations/README.md)
+
+Start with the Tensor or Memory quickstart, then move to the complete workflows
+for gradients, persistence, lifetime attribution, cross-run phases, multi-rank
+groups, and all seven `tcgd-memory` commands.
 
 ## Constraints
 

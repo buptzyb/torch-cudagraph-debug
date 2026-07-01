@@ -40,6 +40,8 @@
   invocation-indexed expected values, sticky comparison status, and explicit
   non-contiguous copy mode.
 - TensorBoard export through `export_snapshots_to_tensorboard`.
+- Categorized, runnable Tensor Debug, Memory Debug, CLI, distributed, and
+  TensorBoard examples with quickstarts and complete synthetic workflows.
 
 ## v0.1.0 - 2026-05-12
 
