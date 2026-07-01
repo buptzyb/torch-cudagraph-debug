@@ -27,11 +27,27 @@ from torch_cudagraph_debug.tensor_debug import (
     CompareTensor,
     PrintTensor,
     RecordTensor,
+    TensorBundleError,
+    TensorCompareOptions,
+    TensorComparison,
     TensorDebugError,
+    TensorDifference,
     TensorMismatchError,
+    TensorObservation,
+    TensorOwnershipError,
+    TensorPayloadUnavailableError,
+    TensorPoint,
     TensorProbe,
     TensorProbeStatus,
+    TensorRecorder,
+    TensorRun,
+    TensorRunComparison,
+    TensorSeriesComparison,
     TensorSnapshot,
+    TensorValueSummary,
+    compare_points,
+    compare_runs,
+    compare_series,
 )
 ```
 
@@ -222,6 +238,183 @@ Returned snapshots remain unchanged across later replays, so an additional
 for each capture-time invocation slot. A capture slot queried before its first
 replay uses index 0; after replay, captured snapshots are 1-based. Eager
 `when="always"` snapshots also use index 0.
+
+### TensorRecorder And TensorRun
+
+```python
+TensorRecorder(
+    *,
+    execution: Literal["eager", "cuda_graph"],
+    name: str = "run",
+    bundle_dir: str | Path | None = None,
+    device: torch.device | str | int | None = None,
+    payload: Literal["full", "summary"] = "full",
+    non_contiguous: Literal["error", "copy"] = "error",
+    synchronize: bool | torch.cuda.Stream | torch.device = True,
+    rank: int | None = None,
+    group_id: str | None = None,
+    world_size: int | None = None,
+    run_metadata: Mapping[str, Any] | None = None,
+)
+
+recorder.observe(name, tensor, *, payload=None) -> torch.Tensor
+recorder.watch_grad(
+    name,
+    tensor,
+    *,
+    payload=None,
+    strict=False,
+) -> RemovableHandle | None
+recorder.point(
+    label,
+    *,
+    metadata=None,
+    synchronize=None,
+) -> ContextManager[None]
+recorder.snapshot_run() -> TensorRun
+recorder.finish() -> TensorRun
+recorder.result -> TensorRun
+recorder.close() -> None
+```
+
+`execution` is explicit because eager execution and graph replay have
+different collection boundaries. Eager `observe()` calls are active only
+inside `point()`. A CUDA Graph recorder uses `observe()` calls during its
+one capture session to define slots and reads their latest values when
+`point()` later wraps a replay. Calls outside those active paths are
+transparent no-ops.
+
+All observations must be supported CUDA tensors on the recorder device.
+`non_contiguous` has the same error/copy behavior as `TensorProbe`. One
+recorder-wide native `RecordTensor` session owns every CUDA Graph observation,
+so logical names do not create one replay counter kernel each.
+
+`point()` labels must be nonempty and unique and point contexts cannot nest.
+Its synchronization target inherits the recorder default when omitted.
+Interrupted contexts do not append a point.
+
+`finish()` is idempotent, writes a complete manifest, and rejects later
+points. It does not release captured native storage. `close()` releases that
+storage and requires that the graph can no longer replay. Context-manager exit
+calls `finish()` and then `close()`.
+
+```python
+@dataclass(frozen=True)
+class TensorRun:
+    run_id: str
+    name: str
+    execution: Literal["eager", "cuda_graph"]
+    rank: int | None
+    created_at: float
+    finished_at: float | None
+    complete: bool
+    default_payload: Literal["full", "summary"]
+    points: tuple[TensorPoint, ...]
+    group_id: str | None
+    world_size: int | None
+    provenance: Mapping[str, Any]
+    run_metadata: Mapping[str, Any]
+    bundle_dir: Path | None
+
+TensorRun.load(bundle_dir, *, cache_tensors=False) -> TensorRun
+run.point(ref: str | int | TensorPoint) -> TensorPoint
+run[ref: str | int] -> TensorPoint
+run.compare(reference, candidate, *, options=None) -> TensorComparison
+```
+
+A `TensorPoint` owns ordered `TensorObservation` objects.
+`point.observation(name, invocation_index=0)` performs stable-key lookup.
+A foreign point passed to `run.point()` raises `TensorOwnershipError`.
+
+`TensorObservation` records point order, name, invocation and optional replay
+index, shape, stride, dtype, source device, payload kind, nbytes, SHA-256, and a
+`TensorValueSummary`. `observation.tensor()` lazily returns a CPU tensor for
+a full payload and validates blob size and digest. It raises
+`TensorPayloadUnavailableError` for a summary-only observation.
+
+### Offline Tensor Comparison
+
+```python
+TensorCompareOptions(
+    mode: Literal["allclose", "exact"] = "allclose",
+    rtol: float = 1e-5,
+    atol: float = 1e-8,
+    equal_nan: bool = False,
+    dtype_policy: Literal["strict", "promote"] = "strict",
+    limit: int = 20,
+)
+
+compare_points(reference, candidate, *, options=None) -> TensorComparison
+compare_runs(
+    reference,
+    candidate,
+    *,
+    point_mapping=None,
+    options=None,
+) -> TensorRunComparison
+compare_series(reference, candidates, *, options=None) -> TensorSeriesComparison
+```
+
+The stable observation key is `(probe_name, invocation_index)`.
+`compare_points()` follows reference order and appends candidate-only keys.
+Missing keys, shape changes, and strict dtype changes are mismatches.
+
+Allclose uses the reference tensor in
+`atol + rtol * abs(reference)`. Integer and bool values compare exactly.
+`dtype_policy="promote"` explicitly converts both values with
+`torch.promote_types()`. Exact comparison uses per-element raw bytes when
+dtypes match.
+
+`TensorDifference` contains status, reason, both observation descriptors,
+mismatch count and fraction, max absolute and relative error, mean absolute
+error, and the first mismatching coordinate and values when full payloads make
+those metrics available.
+
+`TensorComparison`, `TensorRunComparison`, and
+`TensorSeriesComparison` expose `status`, `ok`, `conclusive`, `to_text()`,
+`to_dict()`, and `write()`. A point report provides `first_issue`,
+`worst_differences()`, and `assert_ok()`. Text, HTML, and CSV include
+matches by default and accept `include_matches=False`; JSON remains complete.
+
+Summary comparison uses three states. Equal digests match. Different digests
+are a mismatch in exact mode, but are inconclusive in allclose mode when either
+full payload is unavailable.
+
+### Tensor Bundle And CLI
+
+The schema is `torch-cudagraph-debug/tensor-run`:
+
+```text
+manifest.json
+blobs/
+  <sha256>.bin
+  ...
+```
+
+The strict manifest stores run identity, execution mode, rank fields,
+provenance, metadata, points, observation descriptors, summaries, and
+content-addressed blob paths. Writes use temporary siblings and atomic
+replacement. Identical raw bytes across points share one blob. Loading is
+CPU-only, lazy, and defaults to no tensor cache.
+
+```text
+tcgd-tensor summary BUNDLE
+tcgd-tensor compare REFERENCE_BUNDLE CANDIDATE_BUNDLE \
+  --reference-point LABEL --candidate-point LABEL
+tcgd-tensor compare-runs REFERENCE_BUNDLE CANDIDATE_BUNDLE
+tcgd-tensor compare-series REFERENCE_BUNDLE CANDIDATE_BUNDLE \
+  --reference-point LABEL
+```
+
+Comparison commands accept `--mode`, `--rtol`, `--atol`,
+`--equal-nan`, `--promote-dtypes`, `--limit`, `--only-changed`, and
+`--output`. Exit status is zero only for a complete match, one for mismatch
+or inconclusive, and two for invalid input or an operational error.
+
+`TensorBundleError` reports malformed or unreadable bundles.
+`TensorOwnershipError` reports foreign run objects, and
+`TensorPayloadUnavailableError` reports attempts to materialize summary-only
+values.
 
 ### TensorBoard Export
 
@@ -874,6 +1067,9 @@ advanced.format_before_after(before, after, delta)
 - `NativeExtensionUnavailableError`: compiled tensor extension cannot be loaded.
 - `TensorDebugError`: tensor domain base.
 - `TensorMismatchError`: sticky tensor compare mismatch.
+- `TensorBundleError`: malformed, unsupported, or unreadable tensor bundle.
+- `TensorOwnershipError`: point used with a run that does not own it.
+- `TensorPayloadUnavailableError`: full values requested from a summary observation.
 - `MemoryDebugError`: memory domain base.
 - `MemoryHistoryError`: requested history unavailable or incomplete.
 - `MemoryBundleError`: malformed, unsupported, or unreadable bundle.

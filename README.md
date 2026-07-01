@@ -2,7 +2,8 @@
 
 Focused debugging tools for PyTorch CUDA Graphs:
 
-- `tensor_debug` inserts native tensor print, record, and comparison probes.
+- `tensor_debug` inserts native tensor probes and builds persisted eager or
+  CUDA Graph runs for offline differential analysis.
 - `memory_debug` records allocator snapshots and analyzes default and
   non-default pools, including CUDA Graph private pools.
 
@@ -100,6 +101,17 @@ Multiple actions can be combined on one probe.
 Continue with the [Tensor Debug guide](docs/tensor_debug.md), the
 [example learning path](examples/tensor_debug/README.md), or the
 [API reference](docs/api.md#tensor-debug).
+
+For comparisons that span eager execution, CUDA Graph replay, code revisions,
+or devices, use `TensorRecorder` to persist named observations as
+`.tcgd-tensor` bundles. `compare_points()` locates the first divergent probe,
+`compare_runs()` aligns same-labeled points, and `compare_series()` checks one
+reference against every replay. Full payloads provide numerical error metrics;
+summary payloads provide compact exact-digest evidence and explicitly report
+inconclusive allclose results when raw values are unavailable.
+
+See the [eager-vs-CUDA-Graph example]
+(examples/tensor_debug/eager_vs_cuda_graph.py) for the end-to-end workflow.
 
 ## Memory Quick Start
 
@@ -220,7 +232,7 @@ Continue with the [Memory Debug guide](docs/memory_debug.md), the
 
 | Resource | Purpose |
 |---|---|
-| [Tensor Debug guide](docs/tensor_debug.md) | Probe lifecycle, invocation slots, gradients, non-contiguous inputs, TensorBoard |
+| [Tensor Debug guide](docs/tensor_debug.md) | Low-level probes, eager/CG runs, bundles, differential comparison, gradients, TensorBoard |
 | [Memory Debug guide](docs/memory_debug.md) | Recording, history policy, timelines, lifetimes, phases, groups, reports, CLI |
 | [API reference](docs/api.md) | Public signatures, result models, errors, and experimental helpers |
 | [Examples](examples/README.md) | Ordered runnable workflows and integration examples |

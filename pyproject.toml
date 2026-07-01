@@ -37,6 +37,7 @@ Issues = "https://github.com/buptzyb/torch-cudagraph-debug/issues"
 
 [project.scripts]
 tcgd-memory = "torch_cudagraph_debug.memory_debug.cli:main"
+tcgd-tensor = "torch_cudagraph_debug.tensor_debug.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

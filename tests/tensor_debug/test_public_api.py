@@ -7,13 +7,29 @@ from torch_cudagraph_debug.tensor_debug import postprocess
 def test_tensor_stable_facade() -> None:
     assert tensor_debug.__all__ == [
         "TensorProbe",
+        "TensorRecorder",
         "PrintTensor",
         "RecordTensor",
         "CompareTensor",
         "TensorSnapshot",
         "TensorProbeStatus",
+        "TensorRun",
+        "TensorPoint",
+        "TensorObservation",
+        "TensorValueSummary",
+        "TensorCompareOptions",
+        "TensorDifference",
+        "TensorComparison",
+        "TensorRunComparison",
+        "TensorSeriesComparison",
+        "compare_points",
+        "compare_runs",
+        "compare_series",
         "TensorDebugError",
         "TensorMismatchError",
+        "TensorBundleError",
+        "TensorOwnershipError",
+        "TensorPayloadUnavailableError",
     ]
 
 

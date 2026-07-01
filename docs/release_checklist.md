@@ -13,6 +13,9 @@
 - Confirm tensor lifecycle, single-capture ownership, unified replay and
   invocation indexing, device matching, callback overhead, and non-contiguous
   copy cost are documented.
+- Confirm tensor run point boundaries, eager/CG observation alignment,
+  full/summary payload semantics, three-state comparison, raw blob format, and
+  CPU-only offline loading are documented.
 - Confirm memory ownership, history policy, cross-run matching, JSON bundle
   format, and one-bundle-per-rank rule are documented.
 
@@ -67,6 +70,15 @@ Tensor coverage must include:
   bool/stream/device query synchronization, print cadence, exact compare
   failure indices, explicit device selection, and device mismatch errors.
 
+- eager repeated named observations and CUDA Graph logical-name slot mapping;
+- one shared recorder session and replay counter across many named observations;
+- full and summary bundles, content-addressed deduplication, every supported
+  dtype, scalars, empty tensors, lazy loading, corruption rejection, and
+  payload digest verification;
+- point, run, and replay-series comparison, first divergence, worst errors,
+  strict and promoted dtypes, three-state summary results, reports, and the
+  `tcgd-tensor` CLI.
+
 Memory coverage must include:
 
 - state snapshots with history disabled;
@@ -90,6 +102,17 @@ python "${TCGD_REPO_ROOT}/examples/tensor_debug/multiple_invocations.py"
 python "${TCGD_REPO_ROOT}/examples/tensor_debug/gradient_probes.py"
 python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe_modes.py"
 python "${TCGD_REPO_ROOT}/examples/tensor_debug/module_integration.py"
+
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/eager_vs_cuda_graph.py" \
+  --output-dir "${EXAMPLE_ROOT}/tensor-eager-vs-cg"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/replay_series.py" \
+  --output-dir "${EXAMPLE_ROOT}/tensor-series"
+tcgd-tensor summary "${EXAMPLE_ROOT}/tensor-eager-vs-cg/eager.tcgd-tensor"
+tcgd-tensor compare \
+  "${EXAMPLE_ROOT}/tensor-eager-vs-cg/eager.tcgd-tensor" \
+  "${EXAMPLE_ROOT}/tensor-eager-vs-cg/cuda-graph.tcgd-tensor" \
+  --reference-point forward --candidate-point replay-1 \
+  --output "${EXAMPLE_ROOT}/tensor-cli-report"
 
 python "${TCGD_REPO_ROOT}/examples/memory_debug/quickstart.py"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/timeline_and_reports.py" \

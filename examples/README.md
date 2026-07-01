@@ -18,6 +18,8 @@ checkout. The commands below use `/tmp` for that reason.
 | 4 | [Gradient probes](tensor_debug/gradient_probes.py) | activation and parameter gradient hooks | 1 GPU |
 | 5 | [Probe modes](tensor_debug/probe_modes.py) | capture-only, always-active, non-contiguous error/copy | 1 GPU |
 | 6 | [Module integration](tensor_debug/module_integration.py) | configurable probe inside `torch.nn.Module` | 1 GPU |
+| 7 | [Eager vs CUDA Graph](tensor_debug/eager_vs_cuda_graph.py) | `TensorRecorder`, persisted runs, offline point comparison | 1 GPU |
+| 8 | [Replay series](tensor_debug/replay_series.py) | summary/full payloads, three-state analysis, replay drift | 1 GPU |
 
 Read the [Tensor Debug guide](../docs/tensor_debug.md) for concepts and
 [Tensor Debug examples](tensor_debug/README.md) for expected output.
@@ -54,6 +56,10 @@ Run these commands from the repository root:
 ```bash
 python examples/tensor_debug/quickstart.py
 python examples/tensor_debug/record_and_compare.py
+python examples/tensor_debug/eager_vs_cuda_graph.py \
+  --output-dir /tmp/tcgd-tensor-eager-vs-cg
+python examples/tensor_debug/replay_series.py \
+  --output-dir /tmp/tcgd-tensor-series
 python examples/memory_debug/quickstart.py
 python examples/memory_debug/timeline_and_reports.py \
   --output-dir /tmp/tcgd-timeline

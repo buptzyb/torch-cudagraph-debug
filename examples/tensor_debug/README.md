@@ -26,3 +26,19 @@ they are not test failures.
 `non_contiguous="copy"` allocates a debug-only contiguous tensor in the graph
 pool. Use it only when that memory cost is acceptable. `when="always"` enables
 probe work on eager calls and is separate from the default capture-only mode.
+
+## Run-Level Workflows
+
+The low-level examples above teach one probe and one graph. Use
+[`eager_vs_cuda_graph.py`](eager_vs_cuda_graph.py) when values must be compared
+across independent executions. It records the same named observations in eager
+and CUDA Graph modes, loads both bundles, and writes text, JSON, CSV, and HTML
+reports.
+
+[`replay_series.py`](replay_series.py) records two graph replays against one
+eager reference. Summary-only input and hidden observations demonstrate
+`inconclusive` allclose results, while the full output payload provides a
+conclusive mismatch and first-divergence evidence.
+
+Both workflows require fresh output directories because bundle writers never
+overwrite an existing nonempty bundle.

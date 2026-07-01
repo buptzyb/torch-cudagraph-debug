@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 - 2026-06-28
+## v0.2.0 - 2026-07-01
 
 ### Added
 
@@ -43,6 +43,17 @@
   status results, with 1-based graph replay indices, explicit device selection,
   bool/stream/device query synchronization, query-time transfer for
   callback-free recording, and callback-counter staging reuse.
+- `TensorRecorder` with explicit eager and CUDA Graph execution modes, named
+  observations, ordered points, gradient observation hooks, and one shared
+  native recording session across every logical probe in a graph.
+- Immutable `TensorRun`, `TensorPoint`, and `TensorObservation` models with
+  strict content-addressed bundles, full or summary payloads, SHA-256
+  verification, numerical summaries, deduplication, and lazy CPU-only loading.
+- Point, same-label run, and replay-series comparison with allclose or exact
+  policies, strict or promoted dtypes, first-divergence and worst-error
+  reporting, and explicit match/mismatch/inconclusive results.
+- Text, JSON, CSV, and standalone HTML tensor reports plus the `tcgd-tensor`
+  summary, point comparison, run comparison, and series comparison CLI.
 - TensorBoard export through `export_snapshots_to_tensorboard`.
 - Categorized, runnable Tensor Debug, Memory Debug, CLI, distributed, and
   TensorBoard examples with quickstarts and complete synthetic workflows.

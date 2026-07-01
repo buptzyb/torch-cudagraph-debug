@@ -65,6 +65,136 @@ probe.close()
 The default `when="capture"` makes eager warmup calls transparent no-ops.
 Use `when="always"` only when eager debug side effects are intentional.
 
+## Run-Level Differential Debugging
+
+`TensorProbe` is the low-level tool for one graph and its latest replay.
+`TensorRecorder` adds named observations, ordered points, persistence, and
+offline comparison. Use it when the question spans execution modes, replays,
+processes, code revisions, or devices.
+
+The same instrumented function can feed an eager reference and a CUDA Graph
+candidate:
+
+```python
+from torch_cudagraph_debug.tensor_debug import (
+    TensorRecorder,
+    TensorRun,
+    compare_points,
+)
+
+def forward(inputs, recorder):
+    inputs = recorder.observe("input", inputs)
+    hidden = recorder.observe("layers.0.hidden", inputs + 1)
+    return recorder.observe("output", hidden.square())
+
+with TensorRecorder(
+    execution="eager",
+    name="eager",
+    bundle_dir="eager.tcgd-tensor",
+) as eager_recorder:
+    with eager_recorder.point("forward", synchronize=replay_stream):
+        eager_output = forward(static_x, eager_recorder)
+
+with TensorRecorder(
+    execution="cuda_graph",
+    name="cuda-graph",
+    bundle_dir="cg.tcgd-tensor",
+) as graph_recorder:
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_output = forward(static_x, graph_recorder)
+
+    with graph_recorder.point("replay-1", synchronize=replay_stream):
+        graph.replay()
+
+eager = TensorRun.load("eager.tcgd-tensor")
+candidate = TensorRun.load("cg.tcgd-tensor")
+comparison = compare_points(eager["forward"], candidate["replay-1"])
+comparison.assert_ok()
+print(comparison.to_text())
+```
+
+`observe()` returns the exact tensor object. Within one point, repeated calls
+with the same name become invocation 0, 1, and so on. The stable cross-run key
+is `(probe_name, invocation_index)`; replay index is evidence rather than
+identity.
+
+An eager recorder observes calls only inside `point()`. A CUDA Graph recorder
+ignores eager warmup, uses calls made during graph capture to establish its
+fixed slot layout, and reads those slots when a later `point()` wraps
+`graph.replay()`. All named CG observations owned by one recorder share one
+internal `RecordTensor` session, one replay counter, and one counter increment
+kernel. Tensor payload copies still occur once per observed slot.
+
+`point()` applies the same synchronization policy as low-level probe queries.
+Pass the replay or eager execution stream when it is known. `False` is valid
+only after the application has already made every D2H copy host-visible.
+
+### Full And Summary Payloads
+
+The recorder default is `payload="full"`. Override it globally or for one
+observation:
+
+```python
+recorder = TensorRecorder(execution="eager", payload="summary")
+hidden = recorder.observe("hidden", hidden)
+output = recorder.observe("output", output, payload="full")
+```
+
+Every observation stores metadata, SHA-256, and finite/NaN/Inf/zero counts plus
+min, max, mean, standard deviation, and L2 norm.
+
+- `full` also stores raw tensor bytes and supports allclose or exact
+  comparison.
+- `summary` omits raw bytes. It reduces bundle size but does not reduce the
+  current D2H cost because digest and statistics are computed on the CPU.
+- Equal digests prove an exact match.
+- Different summary digests prove a bitwise change. They cannot determine
+  whether the change is within a nonzero tolerance, so allclose reports
+  `inconclusive`.
+- Exact comparison may classify different summary digests as a mismatch.
+
+`match`, `mismatch`, and `inconclusive` are distinct report states. A
+comparison is successful only when every aligned observation matches.
+
+### Point, Run, And Series Comparison
+
+`compare_points(reference, candidate)` is the primitive. It validates shape
+and dtype, then compares values using allclose by default. Missing observations
+and invocations are mismatches. Set `mode="exact"` for raw-value identity or
+`dtype_policy="promote"` to explicitly compare different numeric dtypes after
+promotion.
+
+`compare_runs(reference, candidate)` aligns points by label and reports
+missing points. `compare_series(reference_point, candidate_run)` compares one
+reference against every candidate point in order. Series comparison is intended
+for replay drift, stale static inputs, and state-update bugs.
+
+Reports identify the first issue in reference execution order and label it as
+`mismatch` or `inconclusive`; a later definite mismatch still makes the overall
+status `mismatch`. They rank the worst value differences by mismatch fraction
+and absolute error. Result objects provide text, JSON, CSV, and standalone HTML
+output through `write()`.
+
+The CLI performs the same offline analysis without CUDA or the native extension:
+
+```bash
+tcgd-tensor summary eager.tcgd-tensor
+tcgd-tensor compare eager.tcgd-tensor cg.tcgd-tensor \
+  --reference-point forward --candidate-point replay-1
+tcgd-tensor compare-runs baseline.tcgd-tensor candidate.tcgd-tensor
+tcgd-tensor compare-series eager.tcgd-tensor cg.tcgd-tensor \
+  --reference-point forward --output tensor-report
+```
+
+Use `--mode exact`, `--promote-dtypes`, `--rtol`, `--atol`,
+`--equal-nan`, and `--only-changed` to control comparison and presentation.
+Mismatch and inconclusive reports return a nonzero status.
+
+Bundles use the `torch-cudagraph-debug/tensor-run` schema. The manifest is
+strict JSON; full payloads are content-addressed raw byte blobs. Loading is lazy
+and validates payload size and SHA-256 before materialization.
+
 ## Query Synchronization
 
 `snapshots()`, `clear_snapshots()`, `status()`, and `assert_ok()` accept one
