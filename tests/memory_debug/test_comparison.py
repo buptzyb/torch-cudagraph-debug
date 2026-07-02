@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-import torch_cudagraph_debug.memory_debug.summary as summary_module
+import torch_cudagraph_debug.memory_debug.allocator_snapshot as allocator_snapshot_module
 from torch_cudagraph_debug.memory_debug import (
-    AttributionOptions,
+    MemoryAttributionOptions,
     MemoryDebugError,
     MemoryHistoryError,
     MemoryOwnershipError,
@@ -35,13 +35,14 @@ def test_same_run_keeps_pool_totals_and_stream_deltas_separate() -> None:
     comparison = run.compare("before", "after")
 
     assert comparison.lifecycle_available is True
-    assert comparison.pools[0].delta.active_bytes == 0
+    assert comparison.pool_comparisons[0].delta.active_bytes == 0
     by_stream = {
-        item.before_stream: item.delta.active_bytes for item in comparison.pool_streams
+        item.reference_stream: item.delta.active_bytes
+        for item in comparison.observation_comparisons
     }
     assert by_stream == {0: 10, 7: -10}
-    assert comparison.pools[0].before.active_bytes == 30
-    assert comparison.pools[0].after.active_bytes == 30
+    assert comparison.pool_comparisons[0].reference.active_bytes == 30
+    assert comparison.pool_comparisons[0].candidate.active_bytes == 30
 
 
 def test_cross_run_matches_only_default_pool_without_mapping() -> None:
@@ -78,15 +79,16 @@ def test_cross_run_matches_only_default_pool_without_mapping() -> None:
 
     comparison = compare_points(before["point"], after["point"])
 
-    assert [item.match for item in comparison.pools].count("default") == 1
+    assert [item.match for item in comparison.pool_comparisons].count("default") == 1
     private = [
         item
-        for item in comparison.pools
-        if item.before_pool_id == (0, 1) or item.after_pool_id == (0, 1)
+        for item in comparison.pool_comparisons
+        if item.reference_pool_id == (0, 1) or item.candidate_pool_id == (0, 1)
     ]
-    assert {item.match for item in private} == {"before_only", "after_only"}
+    assert {item.match for item in private} == {"reference_only", "candidate_only"}
     assert all(
-        item.match in {"before_only", "after_only"} for item in comparison.pool_streams
+        item.match in {"reference_only", "candidate_only"}
+        for item in comparison.observation_comparisons
     )
     assert comparison.lifecycle_available is False
     assert any("private pools are unmatched" in item for item in comparison.warnings)
@@ -113,13 +115,15 @@ def test_cross_run_totals_include_unmatched_private_pools() -> None:
     )
 
     comparison = compare_points(before["point"], after["point"])
-    totals = {item.scope: item for item in comparison.totals}
+    allocator_scope_comparisons = {
+        item.scope: item for item in comparison.allocator_scope_comparisons
+    }
 
-    assert totals["all"].before.active_bytes == 30
-    assert totals["all"].after.active_bytes == 55
-    assert totals["all"].delta.active_bytes == 25
-    assert totals["default"].delta.active_bytes == 5
-    assert totals["private"].delta.active_bytes == 20
+    assert allocator_scope_comparisons["all"].reference.active_bytes == 30
+    assert allocator_scope_comparisons["all"].candidate.active_bytes == 55
+    assert allocator_scope_comparisons["all"].delta.active_bytes == 25
+    assert allocator_scope_comparisons["default"].delta.active_bytes == 5
+    assert allocator_scope_comparisons["private"].delta.active_bytes == 20
 
 
 def test_cross_run_private_pool_mapping_is_explicit_and_one_to_one() -> None:
@@ -147,10 +151,10 @@ def test_cross_run_private_pool_mapping_is_explicit_and_one_to_one() -> None:
         after["point"],
         pool_mapping={(0, 1): (0, 8), (0, 2): (0, 9)},
     )
-    assert all(item.match == "mapped" for item in comparison.pools)
-    assert [item.delta.active_bytes for item in comparison.pools] == [5, 5]
+    assert all(item.match == "mapped" for item in comparison.pool_comparisons)
+    assert [item.delta.active_bytes for item in comparison.pool_comparisons] == [5, 5]
 
-    with pytest.raises(ValueError, match="target.*more than once"):
+    with pytest.raises(ValueError, match="candidate.*more than once"):
         compare_points(
             before["point"],
             after["point"],
@@ -180,7 +184,7 @@ def test_compare_points_rejects_same_run_and_events() -> None:
         compare_points(
             run["before"],
             other["point"],
-            attribution=AttributionOptions(events=True),
+            attribution=MemoryAttributionOptions(events=True),
         )
 
 
@@ -196,17 +200,17 @@ def test_missing_stack_history_warns_or_errors() -> None:
     warning = run.compare(
         "before",
         "after",
-        attribution=AttributionOptions(stacks=True),
+        attribution=MemoryAttributionOptions(stacks=True),
     )
     assert any("coverage is incomplete" in item for item in warning.warnings)
-    assert warning.before_stack_coverage is not None
-    assert warning.before_stack_coverage.ratio == 0.0
+    assert warning.reference_stack_coverage is not None
+    assert warning.reference_stack_coverage.ratio == 0.0
 
     with pytest.raises(MemoryHistoryError, match="coverage is incomplete"):
         run.compare(
             "before",
             "after",
-            attribution=AttributionOptions(
+            attribution=MemoryAttributionOptions(
                 stacks=True,
                 on_missing="error",
             ),
@@ -245,13 +249,13 @@ def test_event_history_uses_point_boundary_marker() -> None:
         )
 
     recorder = MemoryRecorder._from_snapshot_provider(provider)
-    recorder.mark("before")
-    recorder.mark("after")
+    recorder.record_point("before")
+    recorder.record_point("after")
     run = recorder.finish()
     comparison = run.compare(
         "before",
         "after",
-        attribution=AttributionOptions(events=True, on_missing="error"),
+        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
     )
 
     assert comparison.events_available is True
@@ -264,14 +268,16 @@ def test_event_history_uses_point_boundary_marker() -> None:
 def test_event_history_normalizes_only_the_marker_window(monkeypatch) -> None:
     markers: list[str] = []
     normalized = 0
-    original = summary_module._normalize_trace_entry
+    original = allocator_snapshot_module._normalize_trace_entry
 
     def counting_normalizer(*args, **kwargs):
         nonlocal normalized
         normalized += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(summary_module, "_normalize_trace_entry", counting_normalizer)
+    monkeypatch.setattr(
+        allocator_snapshot_module, "_normalize_trace_entry", counting_normalizer
+    )
 
     def provider(marker: str):
         markers.append(marker)
@@ -294,12 +300,12 @@ def test_event_history_normalizes_only_the_marker_window(monkeypatch) -> None:
         )
 
     recorder = MemoryRecorder._from_snapshot_provider(provider)
-    recorder.mark("before")
-    recorder.mark("after")
+    recorder.record_point("before")
+    recorder.record_point("after")
     comparison = recorder.finish().compare(
         "before",
         "after",
-        attribution=AttributionOptions(events=True, on_missing="error"),
+        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
     )
 
     assert len(comparison.allocator_events) == 1
@@ -317,8 +323,10 @@ def test_timeline_reports_absolute_state_and_zero_deltas() -> None:
     )
 
     timeline = run.timeline()
-    steady = [item for item in timeline.pools if item.point_label == "steady"][0]
-    released = [item for item in timeline.pools if item.point_label == "released"][0]
+    steady = [item for item in timeline.pool_entries if item.point_label == "steady"][0]
+    released = [
+        item for item in timeline.pool_entries if item.point_label == "released"
+    ][0]
     assert steady.stats.reserved_bytes == 20
     assert steady.delta.reserved_bytes == 0
     assert released.stats.reserved_bytes == 0
@@ -344,13 +352,15 @@ def test_phase_comparison_preserves_four_point_identity() -> None:
     phase = compare_phases(
         baseline.between("start", "end"),
         candidate.between("start", "end"),
-        attribution=AttributionOptions(stacks=True),
+        attribution=MemoryAttributionOptions(stacks=True),
     )
-    row = next(item for item in phase.decomposition if item["metric"] == "active_bytes")
-    assert row["start_delta_bytes"] == 10
-    assert row["baseline_growth_bytes"] == 20
-    assert row["candidate_growth_bytes"] == 15
-    assert row["end_delta_bytes"] == 5
+    row = next(
+        item for item in phase.pool_decomposition if item["metric"] == "active_bytes"
+    )
+    assert row["start_gap_bytes"] == 10
+    assert row["baseline_change_bytes"] == 20
+    assert row["candidate_change_bytes"] == 15
+    assert row["end_gap_bytes"] == 5
     assert row["identity_holds"] is True
 
 
@@ -381,18 +391,18 @@ def test_phase_total_identity_includes_unmatched_private_pools() -> None:
     )
     row = next(
         item
-        for item in phase.total_decomposition
+        for item in phase.allocator_scope_decomposition
         if item["scope"] == "all" and item["metric"] == "active_bytes"
     )
 
     assert row == {
         "scope": "all",
         "metric": "active_bytes",
-        "start_delta_bytes": 20,
-        "baseline_growth_bytes": 20,
-        "candidate_growth_bytes": 55,
-        "growth_delta_bytes": 35,
-        "end_delta_bytes": 55,
+        "start_gap_bytes": 20,
+        "baseline_change_bytes": 20,
+        "candidate_change_bytes": 55,
+        "change_gap_bytes": 35,
+        "end_gap_bytes": 55,
         "identity_holds": True,
     }
 
@@ -420,12 +430,12 @@ def test_event_history_uses_trace_for_segment_device() -> None:
         return snapshot(other_segment, active_segment, traces=traces)
 
     recorder = MemoryRecorder._from_snapshot_provider(provider)
-    recorder.mark("before")
-    recorder.mark("after")
+    recorder.record_point("before")
+    recorder.record_point("after")
     comparison = recorder.finish().compare(
         "before",
         "after",
-        attribution=AttributionOptions(events=True, on_missing="error"),
+        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
     )
 
     assert comparison.events_available is True
@@ -453,12 +463,12 @@ def test_event_history_detects_overwritten_marker_on_segment_device() -> None:
         return snapshot(active_segment, traces=traces)
 
     recorder = MemoryRecorder._from_snapshot_provider(provider)
-    recorder.mark("before")
-    recorder.mark("after")
+    recorder.record_point("before")
+    recorder.record_point("after")
     comparison = recorder.finish().compare(
         "before",
         "after",
-        attribution=AttributionOptions(events=True),
+        attribution=MemoryAttributionOptions(events=True),
     )
 
     assert comparison.events_available is True
@@ -468,8 +478,8 @@ def test_event_history_detects_overwritten_marker_on_segment_device() -> None:
 
 
 def test_manifest_only_comparisons_do_not_load_raw_snapshots(monkeypatch) -> None:
-    left = make_run([snapshot(segment(active=10))], name="left")
-    right = make_run([snapshot(segment(active=20))], name="right")
+    reference = make_run([snapshot(segment(active=10))], name="reference")
+    candidate = make_run([snapshot(segment(active=20))], name="candidate")
     run = make_run(
         [snapshot(segment(active=10)), snapshot(segment(active=20))],
         labels=("before", "after"),
@@ -482,7 +492,7 @@ def test_manifest_only_comparisons_do_not_load_raw_snapshots(monkeypatch) -> Non
         return original(point)
 
     monkeypatch.setattr(MemoryPoint, "raw_snapshot", tracked)
-    compare_points(left.points[0], right.points[0])
+    compare_points(reference.points[0], candidate.points[0])
     run.timeline()
     assert calls == []
 
@@ -514,14 +524,14 @@ def test_attributed_timeline_and_phase_load_each_point_once(monkeypatch) -> None
         return original(point)
 
     monkeypatch.setattr(MemoryPoint, "raw_snapshot", tracked)
-    timeline_run.timeline(attribution=AttributionOptions(stacks=True))
+    timeline_run.timeline(attribution=MemoryAttributionOptions(stacks=True))
     assert calls == [(timeline_run.run_id, index) for index in range(3)]
 
     calls.clear()
     compare_phases(
         baseline.between("start", "end"),
         candidate.between("start", "end"),
-        attribution=AttributionOptions(stacks=True),
+        attribution=MemoryAttributionOptions(stacks=True),
     )
     assert calls == [
         (baseline.run_id, 0),

@@ -8,8 +8,8 @@ from __future__ import annotations
 import torch
 
 from torch_cudagraph_debug.tensor_debug import (
-    CompareTensor,
-    RecordTensor,
+    CheckAction,
+    RecordAction,
     TensorProbe,
 )
 
@@ -52,17 +52,14 @@ def main() -> None:
     probe = TensorProbe(
         "block.hidden_after_fc1",
         [
-            RecordTensor(),
-            CompareTensor(expected_hidden, rtol=1e-5, atol=1e-6),
+            RecordAction(),
+            CheckAction(expected_hidden, rtol=1e-5, atol=1e-6),
         ],
     )
     block.hidden_probe = probe
     try:
         with torch.no_grad():
             block(static_input)
-        assert probe.snapshots(
-            synchronize=torch.cuda.current_stream()
-        ) == []
 
         graph = torch.cuda.CUDAGraph()
         with torch.no_grad(), torch.cuda.graph(graph):
@@ -71,17 +68,20 @@ def main() -> None:
         replay_stream = torch.cuda.current_stream()
         graph.replay()
 
-        probe.assert_ok(synchronize=replay_stream)
-        snapshots = probe.snapshots(synchronize=False)
-        assert len(snapshots) == 1
+        probe.assert_check_ok(synchronize=replay_stream)
+        snapshot = probe.snapshot(synchronize=False)
+        assert len(snapshot.observations) == 1
         torch.testing.assert_close(
-            snapshots[0].tensor,
+            snapshot.tensor(),
             expected_hidden,
             rtol=1e-5,
             atol=1e-6,
         )
         assert output is not None
-        print(f"recorded {snapshots[0].probe_name} with shape {snapshots[0].shape}")
+        print(
+            f"recorded {snapshot.probe_name} "
+            f"with shape {snapshot.observation().shape}"
+        )
     finally:
         probe.close()
 

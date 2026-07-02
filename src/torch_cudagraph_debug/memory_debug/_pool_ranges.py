@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .summary import normalize_pool_id
+from .allocator_snapshot import normalize_pool_id
 
 
 @dataclass(frozen=True)
@@ -20,7 +20,7 @@ class _PoolRange:
 
 
 @dataclass(frozen=True)
-class _PoolRangeGroup:
+class _PoolRangeLayer:
     starts_by_device: Mapping[int | None, tuple[int, ...]]
     ranges_by_device: Mapping[int | None, tuple[_PoolRange, ...]]
 
@@ -45,25 +45,25 @@ class _PoolRangeGroup:
 
 @dataclass(frozen=True)
 class PoolRangeIndex:
-    """Address-to-pool index preserving segment-group preference."""
+    """Address-to-pool index preserving segment-set preference."""
 
-    groups: tuple[_PoolRangeGroup, ...]
+    layers: tuple[_PoolRangeLayer, ...]
 
     def find(self, device: int | None, address: int) -> tuple[Any, ...] | None:
-        for group in self.groups:
-            pool_id = group.find(device, address)
+        for layer in self.layers:
+            pool_id = layer.find(device, address)
             if pool_id is not None:
                 return pool_id
         return None
 
 
 def build_pool_range_index(
-    *segment_groups: Sequence[Mapping[str, Any]],
+    *segment_sets: Sequence[Mapping[str, Any]],
 ) -> PoolRangeIndex:
-    """Index non-overlapping allocator segments separately by snapshot group."""
+    """Index non-overlapping allocator segments separately by snapshot input."""
 
-    groups: list[_PoolRangeGroup] = []
-    for segments in segment_groups:
+    layers: list[_PoolRangeLayer] = []
+    for segments in segment_sets:
         ranges_by_device: defaultdict[int | None, list[_PoolRange]] = defaultdict(list)
         for ordinal, segment in enumerate(segments):
             address = segment.get("address")
@@ -85,8 +85,8 @@ def build_pool_range_index(
             device: tuple(sorted(items, key=lambda item: (item.start, item.ordinal)))
             for device, items in ranges_by_device.items()
         }
-        groups.append(
-            _PoolRangeGroup(
+        layers.append(
+            _PoolRangeLayer(
                 starts_by_device={
                     device: tuple(item.start for item in items)
                     for device, items in ordered_ranges.items()
@@ -94,4 +94,4 @@ def build_pool_range_index(
                 ranges_by_device=ordered_ranges,
             )
         )
-    return PoolRangeIndex(groups=tuple(groups))
+    return PoolRangeIndex(layers=tuple(layers))

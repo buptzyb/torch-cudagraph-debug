@@ -2,106 +2,29 @@
 
 from __future__ import annotations
 
+import hashlib
+import time
+import uuid
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import TYPE_CHECKING
 
 import torch
 from torch.utils.hooks import RemovableHandle
 
-from torch_cudagraph_debug import _native
-
-from .actions import (
-    NonContiguousPolicy,
-    CompareTensor,
-    PrintTensor,
-    RecordTensor,
-    validate_non_contiguous_policy,
+from ._collector import (
+    DeviceLike,
+    ProbeWhen,
+    SynchronizeTarget,
+    TensorAction,
+    _TensorCollector,
 )
-from .errors import TensorMismatchError
-from .records import TensorProbeStatus, TensorSnapshot
+from .actions import NonContiguousPolicy
+from .errors import TensorCheckError, TensorDebugError, TensorOwnershipError
+from .recording import TensorObservation, _summarize_tensor
+from .snapshots import TensorCheckStatus, TensorProbeSnapshot
 
-TensorAction = PrintTensor | RecordTensor | CompareTensor
-ProbeWhen = Literal["capture", "always"]
-DeviceLike = torch.device | str | int
-
-
-def _create_replay_index(device: DeviceLike | None) -> torch.Tensor:
-    if device is None:
-        resolved = torch.device("cuda", torch.cuda.current_device())
-    elif isinstance(device, int) and not isinstance(device, bool):
-        resolved = torch.device("cuda", device)
-    else:
-        resolved = torch.device(device)
-        if resolved.type != "cuda":
-            raise ValueError("device must identify a CUDA device")
-        if resolved.index is None:
-            resolved = torch.device("cuda", torch.cuda.current_device())
-
-    return torch.zeros((), dtype=torch.int64, device=resolved)
-
-
-def _validate_synchronize_target(
-    synchronize: bool | torch.cuda.Stream | torch.device,
-) -> None:
-    if not isinstance(synchronize, (bool, torch.cuda.Stream, torch.device)):
-        raise TypeError(
-            "synchronize must be a bool, torch.cuda.Stream, or torch.device"
-        )
-
-
-def _indexed_cuda_device(device: torch.device, *, argument: str) -> torch.device:
-    if device.type != "cuda":
-        raise ValueError(f"{argument} must identify a CUDA device")
-    if device.index is None:
-        return torch.device("cuda", torch.cuda.current_device())
-    return device
-
-
-def _synchronize_probe_results(
-    probe_device: torch.device,
-    synchronize: bool | torch.cuda.Stream | torch.device,
-) -> None:
-    if isinstance(synchronize, bool):
-        if not synchronize:
-            return
-        target_device = probe_device
-        target_stream = None
-    elif isinstance(synchronize, torch.cuda.Stream):
-        target_device = _indexed_cuda_device(
-            synchronize.device,
-            argument="synchronize stream device",
-        )
-        target_stream = synchronize
-    else:
-        target_device = _indexed_cuda_device(
-            synchronize,
-            argument="synchronize device",
-        )
-        target_stream = None
-
-    if target_device != probe_device:
-        raise ValueError(
-            f"synchronize target {target_device} does not match probe device "
-            f"{probe_device}"
-        )
-    if torch.cuda.is_current_stream_capturing():
-        raise RuntimeError(
-            "cannot synchronize TensorProbe results during CUDA graph capture; "
-            "query after capture or pass synchronize=False"
-        )
-
-    if target_stream is not None:
-        target_stream.synchronize()
-    else:
-        torch.cuda.synchronize(target_device)
-
-
-def validate_probe_when(when: str) -> ProbeWhen:
-    """Validate when a probe should enqueue debug work."""
-
-    if when not in {"capture", "always"}:
-        raise ValueError('when must be either "capture" or "always"')
-    return when  # type: ignore[return-value]
+if TYPE_CHECKING:
+    from .comparison import TensorComparisonOptions, TensorSnapshotComparison
 
 
 class TensorProbe:
@@ -116,59 +39,29 @@ class TensorProbe:
         when: ProbeWhen = "capture",
         device: DeviceLike | None = None,
     ):
-        if not name:
-            raise ValueError("name must be non-empty")
-        if not actions:
-            raise ValueError("actions must be non-empty")
-
         self.name = name
+        self._probe_id = uuid.uuid4().hex
         self._closed = False
-        self._actions = tuple(actions)
-        self.non_contiguous = validate_non_contiguous_policy(non_contiguous)
-        self.when = validate_probe_when(when)
-        self._enabled_actions = tuple(
-            action for action in self._actions if bool(action.enabled)
+        self._collector = _TensorCollector(
+            name,
+            actions,
+            non_contiguous=non_contiguous,
+            when=when,
+            device=device,
         )
-        self._records_enabled = any(
-            isinstance(action, RecordTensor) for action in self._enabled_actions
-        )
-        self._callback_actions_enabled = any(
-            isinstance(action, (PrintTensor, CompareTensor))
-            for action in self._enabled_actions
-        )
-        self._replay_index: torch.Tensor | None = None
-        self._device: torch.device | None = None
-        if self._enabled_actions:
-            native = _native.require_native()
-            self._replay_index = _create_replay_index(device)
-            self._device = self._replay_index.device
-            action_specs = [action._to_native() for action in self._enabled_actions]
-            self._handle: Any | None = native.create_tensor_debug_probe(
-                name,
-                action_specs,
-                self._replay_index,
-                self.non_contiguous,
-                self.when,
-            )
-        else:
-            self._handle = None
+        self.non_contiguous = self._collector.non_contiguous
+        self.when = self._collector.when
 
     @property
     def replay_index(self) -> torch.Tensor | None:
         """Return a detached GPU copy of the graph replay counter."""
 
-        self._ensure_open()
-        if self._replay_index is None:
-            return None
-        return self._replay_index.detach().clone()
+        return self._collector.replay_index
 
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
         """Return ``tensor`` unchanged while enqueueing debug work on the current stream."""
 
-        self._ensure_open()
-        if self._handle is None:
-            return tensor
-        return self._handle.enqueue(tensor)
+        return self._collector.enqueue(tensor)
 
     def watch_grad(
         self,
@@ -194,12 +87,12 @@ class TensorProbe:
 
         return tensor.register_hook(hook)
 
-    def snapshots(
+    def snapshot(
         self,
         *,
-        synchronize: bool | torch.cuda.Stream | torch.device = True,
-    ) -> list[TensorSnapshot]:
-        """Return latest CPU snapshots after applying the requested synchronization.
+        synchronize: SynchronizeTarget = True,
+    ) -> TensorProbeSnapshot:
+        """Return all recorded invocation values from the latest replay.
 
         ``True`` synchronizes the probe device, a CUDA stream synchronizes only
         that stream, a CUDA device explicitly synchronizes that device, and
@@ -207,78 +100,108 @@ class TensorProbe:
         """
 
         self._ensure_open()
-        _validate_synchronize_target(synchronize)
-        if self._handle is None or not self._records_enabled:
-            return []
-        if self._replay_index is None:
-            raise RuntimeError("enabled tensor probe is missing its replay counter")
-        self._synchronize_results(synchronize)
-        current_replay_index = (
-            None
-            if self._callback_actions_enabled
-            else int(self._replay_index.item())
-        )
-        snapshots: list[TensorSnapshot] = []
-        for item in self._handle.records(current_replay_index):
-            tensor = item["tensor"]
-            snapshots.append(
-                TensorSnapshot(
-                    probe_name=str(item["probe_name"]),
-                    replay_index=int(item["replay_index"]),
-                    tensor=tensor,
-                    shape=tuple(item.get("shape", tuple(tensor.shape))),
-                    dtype=getattr(tensor, "dtype"),
-                    device=str(item.get("device", "")),
-                    invocation_index=int(item.get("invocation_index", 0)),
+        if not self._collector.record_enabled:
+            raise TensorDebugError(
+                "TensorProbe.snapshot() requires an enabled RecordAction"
+            )
+        collected = self._collector.collect(synchronize=synchronize)
+        if not collected:
+            raise TensorDebugError("TensorProbe has no recorded invocation snapshot")
+        replay_indices = {item.replay_index for item in collected}
+        if len(replay_indices) != 1:
+            raise TensorDebugError(
+                "recorded tensor invocations reported different replay indices"
+            )
+        observations = []
+        for order, item in enumerate(collected):
+            tensor = item.tensor.detach().contiguous().cpu()
+            raw = tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
+            observations.append(
+                TensorObservation(
+                    order=order,
+                    probe_name=item.probe_name,
+                    invocation_index=item.invocation_index,
+                    shape=item.shape,
+                    stride=tuple(tensor.stride()),
+                    dtype=item.dtype,
+                    source_device=item.source_device,
+                    nbytes=len(raw),
+                    payload="full",
+                    sha256=hashlib.sha256(raw).hexdigest(),
+                    summary=_summarize_tensor(tensor),
+                    _tensor_cache={"tensor": tensor},
+                    _cache_tensors=True,
                 )
             )
-        return snapshots
-
-    def clear_snapshots(
-        self,
-        *,
-        synchronize: bool | torch.cuda.Stream | torch.device = True,
-    ) -> None:
-        """Synchronize as requested, then zero retained host record storage."""
-
-        self._ensure_open()
-        _validate_synchronize_target(synchronize)
-        if self._handle is None or not self._records_enabled:
-            return
-        self._synchronize_results(synchronize)
-        self._handle.clear_records()
-
-    def status(
-        self,
-        *,
-        synchronize: bool | torch.cuda.Stream | torch.device = True,
-    ) -> TensorProbeStatus:
-        """Return native callback status after requested synchronization."""
-
-        self._ensure_open()
-        _validate_synchronize_target(synchronize)
-        if self._handle is None:
-            return TensorProbeStatus(True, "", 0, -1)
-        if self._callback_actions_enabled:
-            self._synchronize_results(synchronize)
-        status = self._handle.status()
-        return TensorProbeStatus(
-            ok=bool(status.get("ok", False)),
-            message=str(status.get("message", "")),
-            replay_index=int(status.get("replay_index", 0)),
-            invocation_index=int(status.get("invocation_index", -1)),
+        return TensorProbeSnapshot(
+            probe_id=self._probe_id,
+            probe_name=self.name,
+            replay_index=next(iter(replay_indices)),
+            timestamp=time.time(),
+            observations=tuple(observations),
         )
 
-    def assert_ok(
+    def compare(
+        self,
+        reference: TensorProbeSnapshot,
+        candidate: TensorProbeSnapshot,
+        *,
+        options: TensorComparisonOptions | None = None,
+    ) -> TensorSnapshotComparison:
+        """Compare two chronologically ordered snapshots owned by this probe."""
+
+        self._ensure_open()
+        for role, snapshot in (
+            ("reference", reference),
+            ("candidate", candidate),
+        ):
+            if snapshot.probe_id != self._probe_id:
+                raise TensorOwnershipError(
+                    f"{role} snapshot does not belong to TensorProbe({self.name!r})"
+                )
+        if candidate.replay_index <= reference.replay_index:
+            raise ValueError("candidate snapshot must follow reference snapshot")
+
+        from .comparison import compare_snapshots
+
+        return compare_snapshots(reference, candidate, options=options)
+
+    def clear_snapshot(
         self,
         *,
-        synchronize: bool | torch.cuda.Stream | torch.device = True,
+        synchronize: SynchronizeTarget = True,
+    ) -> None:
+        """Synchronize as requested, then clear retained host snapshot storage."""
+
+        self._ensure_open()
+        self._collector.clear(synchronize=synchronize)
+
+    def check_status(
+        self,
+        *,
+        synchronize: SynchronizeTarget = True,
+    ) -> TensorCheckStatus:
+        """Return the native CheckAction status after requested synchronization."""
+
+        self._ensure_open()
+        native_check_status = self._collector.check_status(synchronize=synchronize)
+        return TensorCheckStatus(
+            ok=bool(native_check_status.get("ok", False)),
+            message=str(native_check_status.get("message", "")),
+            replay_index=int(native_check_status.get("replay_index", 0)),
+            invocation_index=int(native_check_status.get("invocation_index", -1)),
+        )
+
+    def assert_check_ok(
+        self,
+        *,
+        synchronize: SynchronizeTarget = True,
     ) -> None:
         """Synchronize once and raise if a callback reported a mismatch."""
 
-        status = self.status(synchronize=synchronize)
-        if not status.ok:
-            raise TensorMismatchError(status.message or "tensor comparison failed")
+        check_status = self.check_status(synchronize=synchronize)
+        if not check_status.ok:
+            raise TensorCheckError(check_status.message or "tensor check failed")
 
     def close(self) -> None:
         """Release native resources.
@@ -287,20 +210,8 @@ class TensorProbe:
         """
 
         if not self._closed:
-            if self._handle is not None:
-                self._handle.close()
-            self._handle = None
-            self._replay_index = None
-            self._device = None
+            self._collector.close()
             self._closed = True
-
-    def _synchronize_results(
-        self,
-        synchronize: bool | torch.cuda.Stream | torch.device,
-    ) -> None:
-        if self._device is None:
-            raise RuntimeError("enabled tensor probe is missing its CUDA device")
-        _synchronize_probe_results(self._device, synchronize)
 
     def _ensure_open(self) -> None:
         if self._closed:

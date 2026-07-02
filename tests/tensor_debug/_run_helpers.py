@@ -5,12 +5,15 @@ from pathlib import Path
 
 import torch
 
-from torch_cudagraph_debug.tensor_debug import TensorRecorder, TensorRun
-from torch_cudagraph_debug.tensor_debug.runs import (
+from torch_cudagraph_debug.tensor_debug import (
+    TensorProbeSnapshot,
+    TensorRecorder,
+    TensorRun,
+)
+from torch_cudagraph_debug.tensor_debug.recording import (
     PayloadKind,
     _PendingObservation,
 )
-
 
 ObservationInput = tuple[str, torch.Tensor, PayloadKind]
 
@@ -53,3 +56,23 @@ def make_tensor_run(
             )
         recorder._commit_point(label, {}, pending)
     return recorder.finish()
+
+
+def make_probe_snapshot(
+    tensor: torch.Tensor,
+    *,
+    probe_name: str = "mid",
+    replay_index: int = 1,
+    probe_id: str = "test-probe",
+) -> TensorProbeSnapshot:
+    run = make_tensor_run(
+        [("snapshot", [(probe_name, tensor, "full")])],
+        name="probe-snapshot",
+    )
+    return TensorProbeSnapshot(
+        probe_id=probe_id,
+        probe_name=probe_name,
+        replay_index=replay_index,
+        timestamp=0.0,
+        observations=run.points[0].observations,
+    )

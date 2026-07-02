@@ -19,7 +19,6 @@ from torch_cudagraph_debug.memory_debug import (
     compare_points,
 )
 
-
 MIB = 1024 * 1024
 DEFAULT_POOL = (0, 0)
 
@@ -48,27 +47,29 @@ def _record_scenario(
         run_metadata={"scenario": name},
     )
     static_state = torch.empty(4 * MIB, dtype=torch.uint8, device="cuda")
-    recorder.mark("before_pool")
+    recorder.record_point("before_pool")
 
     pool = torch.cuda.graph_pool_handle()
     seed_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(seed_graph, pool=pool):
         seed_state = torch.empty(MIB, dtype=torch.uint8, device="cuda")
         seed_state.fill_(1)
-    recorder.mark("phase_start")
+    recorder.record_point("phase_start")
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, pool=pool):
         graph_state = torch.empty(private_bytes, dtype=torch.uint8, device="cuda")
         graph_state.fill_(1)
-        recorder.mark("during_capture")
+        recorder.record_point("during_capture")
 
-    recorder.mark("phase_end")
+    recorder.record_point("phase_end")
     graph.replay()
-    recorder.mark("after_replay")
+    recorder.record_point("after_replay")
     run = recorder.finish()
 
-    created_pools = set(run["phase_start"].pools) - set(run["before_pool"].pools)
+    created_pools = set(run["phase_start"].pool_stats) - set(
+        run["before_pool"].pool_stats
+    )
     private_pools = [pool_id for pool_id in created_pools if pool_id != DEFAULT_POOL]
     if len(private_pools) != 1:
         raise RuntimeError(f"expected one seeded private pool, found {private_pools}")
@@ -134,10 +135,10 @@ def main() -> None:
     endpoint_paths = endpoint.write(output_dir / "endpoint-comparison")
     phase_paths = phase.write(output_dir / "phase-comparison")
 
-    assert any(item.match == "mapped" for item in endpoint.pools)
-    assert all(row["identity_holds"] for row in phase.total_decomposition)
+    assert any(item.match == "mapped" for item in endpoint.pool_comparisons)
+    assert all(row["identity_holds"] for row in phase.allocator_scope_decomposition)
     assert endpoint_paths["json"].is_file()
-    assert phase_paths["phase_totals"].is_file()
+    assert phase_paths["allocator_scope_decomposition"].is_file()
 
     print(f"pool mapping: {pool_map_text}")
     print(endpoint.to_text(include_unchanged=False))

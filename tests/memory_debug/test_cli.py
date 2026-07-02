@@ -26,8 +26,10 @@ def _bundles(tmp_path: Path) -> tuple[Path, Path]:
     return baseline_path, candidate_path
 
 
-def test_cli_timeline_and_compare(tmp_path: Path) -> None:
+def test_cli_summary_timeline_and_compare(tmp_path: Path, capsys) -> None:
     baseline, _ = _bundles(tmp_path)
+    assert main(["summary", str(baseline)]) == 0
+    assert "Memory run 'baseline'" in capsys.readouterr().out
     timeline_output = tmp_path / "timeline"
     assert (
         main(
@@ -41,17 +43,17 @@ def test_cli_timeline_and_compare(tmp_path: Path) -> None:
         == 0
     )
     assert (timeline_output / "pools.csv").exists()
-    assert (timeline_output / "pool_streams.csv").exists()
+    assert (timeline_output / "observations.csv").exists()
 
     comparison_output = tmp_path / "comparison"
     assert (
         main(
             [
-                "compare",
+                "compare-points",
                 str(baseline),
-                "--before",
+                "--reference-point",
                 "start",
-                "--after",
+                "--candidate-point",
                 "end",
                 "--stacks",
                 "--output",
@@ -63,8 +65,8 @@ def test_cli_timeline_and_compare(tmp_path: Path) -> None:
     payload = json.loads(
         (comparison_output / "report.json").read_text(encoding="utf-8")
     )
-    assert payload["kind"] == "comparison"
-    assert payload["pools"][0]["delta"]["active_bytes"] == 20
+    assert payload["kind"] == "point-comparison"
+    assert payload["pool_comparisons"][0]["delta"]["active_bytes"] == 20
 
 
 def test_cli_compare_runs_and_compare_phases(tmp_path: Path) -> None:
@@ -73,12 +75,12 @@ def test_cli_compare_runs_and_compare_phases(tmp_path: Path) -> None:
     assert (
         main(
             [
-                "compare-runs",
+                "compare-points",
                 str(baseline),
                 str(candidate),
-                "--before",
+                "--reference-point",
                 "end",
-                "--after",
+                "--candidate-point",
                 "end",
                 "--output",
                 str(runs_output),
@@ -109,7 +111,7 @@ def test_cli_compare_runs_and_compare_phases(tmp_path: Path) -> None:
         )
         == 0
     )
-    assert (phase_output / "phase.csv").exists()
+    assert (phase_output / "pool_decomposition.csv").exists()
 
 
 def test_cli_pool_mapping_syntax(tmp_path: Path) -> None:
@@ -130,12 +132,12 @@ def test_cli_pool_mapping_syntax(tmp_path: Path) -> None:
     assert (
         main(
             [
-                "compare-runs",
+                "compare-points",
                 str(before_path),
                 str(after_path),
-                "--before",
+                "--reference-point",
                 "point",
-                "--after",
+                "--candidate-point",
                 "point",
                 "--pool-map",
                 "0,1=0,8",
@@ -146,7 +148,7 @@ def test_cli_pool_mapping_syntax(tmp_path: Path) -> None:
         == 0
     )
     payload = json.loads((output / "report.json").read_text(encoding="utf-8"))
-    assert payload["pools"][0]["match"] == "mapped"
+    assert payload["pool_comparisons"][0]["match"] == "mapped"
 
 
 def test_cli_lifetimes_and_timeline_summary(tmp_path: Path) -> None:
@@ -156,7 +158,7 @@ def test_cli_lifetimes_and_timeline_summary(tmp_path: Path) -> None:
     assert (
         main(
             [
-                "lifetimes",
+                "allocation-lifetimes",
                 str(baseline),
                 "--at",
                 "start",
@@ -170,14 +172,14 @@ def test_cli_lifetimes_and_timeline_summary(tmp_path: Path) -> None:
         == 0
     )
     payload = json.loads((lifetime_output / "report.json").read_text(encoding="utf-8"))
-    assert payload["kind"] == "allocation_lifetimes"
+    assert payload["kind"] == "allocation-lifetime-analysis"
     assert (lifetime_output / "cohort_points.csv").exists()
 
     born_output = tmp_path / "born"
     assert (
         main(
             [
-                "lifetimes",
+                "allocation-lifetimes",
                 str(baseline),
                 "--born-between",
                 "start",
@@ -237,7 +239,7 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
     assert (
         main(
             [
-                "summarize-group",
+                "summarize-run-group",
                 str(roots["baseline"]),
                 "--output",
                 str(summary_output),
@@ -245,14 +247,14 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
         )
         == 0
     )
-    assert (summary_output / "rank_points.csv").exists()
-    assert (summary_output / "point_summary.csv").exists()
+    assert (summary_output / "rank_point_entries.csv").exists()
+    assert (summary_output / "point_aggregates.csv").exists()
 
     phase_output = tmp_path / "group-phase"
     assert (
         main(
             [
-                "compare-group-phases",
+                "compare-run-group-phases",
                 str(roots["baseline"]),
                 str(roots["candidate"]),
                 "--baseline-start",
@@ -269,5 +271,5 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
         )
         == 0
     )
-    assert (phase_output / "rank_phase.csv").exists()
-    assert (phase_output / "phase_summary.csv").exists()
+    assert (phase_output / "rank_decomposition.csv").exists()
+    assert (phase_output / "phase_aggregates.csv").exists()

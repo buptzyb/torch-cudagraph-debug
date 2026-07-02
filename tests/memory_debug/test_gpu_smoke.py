@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from torch_cudagraph_debug.memory_debug import (
-    AttributionOptions,
+    MemoryAttributionOptions,
     MemoryRecorder,
     MemoryRun,
 )
@@ -82,15 +82,15 @@ def test_real_full_history_produces_marker_delimited_events() -> None:
     )
     try:
         recorder = MemoryRecorder()
-        recorder.mark("before")
+        recorder.record_point("before")
         tensor = _allocate_with_named_stack(1_000_033)
         torch.cuda.synchronize()
-        recorder.mark("after")
+        recorder.record_point("after")
         run = recorder.finish()
         comparison = run.compare(
             "before",
             "after",
-            attribution=AttributionOptions(
+            attribution=MemoryAttributionOptions(
                 events=True,
                 on_missing="error",
             ),
@@ -123,16 +123,16 @@ def test_real_full_history_attributes_allocation_lifetime_release() -> None:
         torch.cuda.synchronize()
 
         recorder = MemoryRecorder()
-        recorder.mark("anchor")
+        recorder.record_point("anchor")
         del tensor
         gc.collect()
         torch.cuda.synchronize()
-        recorder.mark("released")
+        recorder.record_point("released")
 
         report = recorder.finish().lifetimes(
             "anchor",
             through="released",
-            attribution=AttributionOptions(
+            attribution=MemoryAttributionOptions(
                 events=True,
                 on_missing="error",
                 stack_depth=4,
@@ -166,17 +166,17 @@ def test_real_full_history_keeps_event_only_born_and_freed_generation() -> None:
     )
     try:
         recorder = MemoryRecorder()
-        recorder.mark("before")
+        recorder.record_point("before")
 
         transient = _allocate_with_named_stack(1_000_057)
         del transient
         gc.collect()
         torch.cuda.synchronize()
-        recorder.mark("after")
+        recorder.record_point("after")
 
         report = recorder.finish().lifetimes(
             born_between=("before", "after"),
-            attribution=AttributionOptions(
+            attribution=MemoryAttributionOptions(
                 events=True,
                 on_missing="error",
                 stack_depth=4,
@@ -216,37 +216,42 @@ def test_graph_pool_capture_and_json_bundle_round_trip(
 
         bundle = tmp_path / "graph.tcgd-memory"
         recorder = MemoryRecorder(bundle_dir=bundle, name="graph")
-        recorder.mark("before_capture")
+        recorder.record_point("before_capture")
         pool = torch.cuda.graph_pool_handle()
         graph = torch.cuda.CUDAGraph()
 
         with torch.cuda.graph(graph, pool=pool):
             graph_tmp_a = torch.empty_like(static_x)
             graph_tmp_a.copy_(static_x)
-            during = recorder.mark("during_capture")
+            during = recorder.record_point("during_capture")
             graph_tmp_b = torch.empty((512, 1024), device="cuda")
             graph_tmp_b.copy_(static_x[:512])
             static_out.copy_(graph_tmp_a)
 
         graph_buffers = (graph_tmp_a, graph_tmp_b)
-        after = recorder.mark("after_capture")
+        after = recorder.record_point("after_capture")
         graph.replay()
-        after_replay = recorder.mark("after_replay")
+        after_replay = recorder.record_point("after_replay")
         run = recorder.finish()
 
         capture_comparison = run.compare(
             "before_capture",
             "after_capture",
-            attribution=AttributionOptions(stacks=True),
+            attribution=MemoryAttributionOptions(stacks=True),
         )
         replay_comparison = run.compare(
             "after_capture",
             "after_replay",
         )
         assert during.label == "during_capture"
-        assert any(pool_id != (0, 0) for pool_id in after.pools)
-        assert any(item.delta.reserved_bytes > 0 for item in capture_comparison.pools)
-        assert all(item.delta.active_bytes == 0 for item in replay_comparison.pools)
+        assert any(pool_id != (0, 0) for pool_id in after.pool_stats)
+        assert any(
+            item.delta.reserved_bytes > 0
+            for item in capture_comparison.pool_comparisons
+        )
+        assert all(
+            item.delta.active_bytes == 0 for item in replay_comparison.pool_comparisons
+        )
 
         loaded = MemoryRun.load(bundle)
         assert [point.label for point in loaded.points] == [
@@ -258,9 +263,12 @@ def test_graph_pool_capture_and_json_bundle_round_trip(
         loaded_comparison = loaded.compare(
             "before_capture",
             "after_capture",
-            attribution=AttributionOptions(stacks=True),
+            attribution=MemoryAttributionOptions(stacks=True),
         )
-        assert loaded_comparison.pool_rows() == capture_comparison.pool_rows()
+        assert (
+            loaded_comparison.pool_comparison_rows()
+            == capture_comparison.pool_comparison_rows()
+        )
         assert graph_buffers
         assert after_replay.raw_snapshot()["segments"]
     finally:

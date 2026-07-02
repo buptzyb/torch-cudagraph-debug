@@ -33,20 +33,21 @@ if [[ "${MODE}" == "single" ]]; then
 
     "${TCGD_MEMORY_BIN}" timeline "${SCENARIOS}/candidate.tcgd-memory" \
         --only-changed --output "${REPORTS}/timeline"
-    "${TCGD_MEMORY_BIN}" compare "${SCENARIOS}/candidate.tcgd-memory" \
-        --before phase_start --after phase_end --only-changed \
+    "${TCGD_MEMORY_BIN}" summary "${SCENARIOS}/candidate.tcgd-memory" > "${REPORTS}/summary.txt"
+    "${TCGD_MEMORY_BIN}" compare-points "${SCENARIOS}/candidate.tcgd-memory" \
+        --reference-point phase_start --candidate-point phase_end --only-changed \
         --output "${REPORTS}/compare"
-    "${TCGD_MEMORY_BIN}" lifetimes "${LIFETIMES}/lifetimes.tcgd-memory" \
+    "${TCGD_MEMORY_BIN}" allocation-lifetimes "${LIFETIMES}/lifetimes.tcgd-memory" \
         --at anchor --through after_cleanup \
         --output "${REPORTS}/lifetimes-active"
-    "${TCGD_MEMORY_BIN}" lifetimes "${LIFETIMES}/lifetimes.tcgd-memory" \
+    "${TCGD_MEMORY_BIN}" allocation-lifetimes "${LIFETIMES}/lifetimes.tcgd-memory" \
         --born-between before_transient after_transient --through after_cleanup \
         --output "${REPORTS}/lifetimes-born"
-    "${TCGD_MEMORY_BIN}" compare-runs \
+    "${TCGD_MEMORY_BIN}" compare-points \
         "${SCENARIOS}/baseline.tcgd-memory" \
         "${SCENARIOS}/candidate.tcgd-memory" \
-        --before phase_end --after phase_end --pool-map "${POOL_MAP}" \
-        --only-changed --output "${REPORTS}/compare-runs"
+        --reference-point phase_end --candidate-point phase_end --pool-map "${POOL_MAP}" \
+        --only-changed --output "${REPORTS}/compare-points"
     "${TCGD_MEMORY_BIN}" compare-phases \
         "${SCENARIOS}/baseline.tcgd-memory" \
         "${SCENARIOS}/candidate.tcgd-memory" \
@@ -62,14 +63,14 @@ else
     NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
     "${PYTHON_BIN}" -m torch.distributed.run \
         --standalone --nproc-per-node="${NPROC_PER_NODE}" \
-        "${SCRIPT_DIR}/distributed_groups.py" \
+        "${SCRIPT_DIR}/distributed_run_groups.py" \
         --output-dir "${GROUP_ROOT}" --record-only
 
-    "${TCGD_MEMORY_BIN}" summarize-group "${GROUP_ROOT}/baseline" \
+    "${TCGD_MEMORY_BIN}" summarize-run-group "${GROUP_ROOT}/baseline" \
         --output "${REPORTS}/baseline-summary"
-    "${TCGD_MEMORY_BIN}" summarize-group "${GROUP_ROOT}/candidate" \
+    "${TCGD_MEMORY_BIN}" summarize-run-group "${GROUP_ROOT}/candidate" \
         --output "${REPORTS}/candidate-summary"
-    "${TCGD_MEMORY_BIN}" compare-group-phases \
+    "${TCGD_MEMORY_BIN}" compare-run-group-phases \
         "${GROUP_ROOT}/baseline" "${GROUP_ROOT}/candidate" \
         --baseline-start phase_start --baseline-end phase_end \
         --candidate-start phase_start --candidate-end phase_end \

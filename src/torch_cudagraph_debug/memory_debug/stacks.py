@@ -7,10 +7,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._identity import PoolId
-from .summary import (
+from ._pool_identity import PoolId
+from .allocator_snapshot import (
     ACTIVE_STATES,
-    SnapshotInput,
+    AllocatorSnapshotData,
     format_bytes,
     format_delta_bytes,
     normalize_pool_id,
@@ -73,19 +73,19 @@ class AllocationStackSummary:
 
 @dataclass(frozen=True)
 class AllocationStackDelta:
-    """Before/after delta for one allocation-stack bucket."""
+    """Reference/candidate delta for one allocation-stack bucket."""
 
     pool_id: tuple[Any, ...]
     stream: Any | None
     stack_key: str
-    before_size_bytes: int
-    after_size_bytes: int
+    reference_size_bytes: int
+    candidate_size_bytes: int
     delta_size_bytes: int
-    before_requested_bytes: int
-    after_requested_bytes: int
+    reference_requested_bytes: int
+    candidate_requested_bytes: int
     delta_requested_bytes: int
-    before_count: int
-    after_count: int
+    reference_count: int
+    candidate_count: int
     delta_count: int
 
     @property
@@ -98,17 +98,17 @@ class AllocationStackDelta:
         row: dict[str, object] = {
             "pool_id": pool_id_label(self.pool_id),
             "stack_key": self.stack_key,
-            "before_size_bytes": self.before_size_bytes,
-            "after_size_bytes": self.after_size_bytes,
+            "reference_size_bytes": self.reference_size_bytes,
+            "candidate_size_bytes": self.candidate_size_bytes,
             "delta_size_bytes": self.delta_size_bytes,
-            "before_requested_bytes": self.before_requested_bytes,
-            "after_requested_bytes": self.after_requested_bytes,
+            "reference_requested_bytes": self.reference_requested_bytes,
+            "candidate_requested_bytes": self.candidate_requested_bytes,
             "delta_requested_bytes": self.delta_requested_bytes,
-            "before_count": self.before_count,
-            "after_count": self.after_count,
+            "reference_count": self.reference_count,
+            "candidate_count": self.candidate_count,
             "delta_count": self.delta_count,
-            "before_size": format_bytes(self.before_size_bytes),
-            "after_size": format_bytes(self.after_size_bytes),
+            "reference_size": format_bytes(self.reference_size_bytes),
+            "candidate_size": format_bytes(self.candidate_size_bytes),
             "delta_size": format_delta_bytes(self.delta_size_bytes),
         }
         if self.stream is not None:
@@ -131,9 +131,7 @@ def _build_allocation_stack_index(
     if stack_depth < 1:
         raise ValueError("stack_depth must be >= 1")
     aggregate: dict[tuple[PoolId, str], list[int]] = defaultdict(lambda: [0, 0, 0])
-    detailed: dict[tuple[PoolId, Any, str], list[int]] = defaultdict(
-        lambda: [0, 0, 0]
-    )
+    detailed: dict[tuple[PoolId, Any, str], list[int]] = defaultdict(lambda: [0, 0, 0])
     active = attributed = 0
     for segment in segments:
         pool_id = normalize_pool_id(segment.get("segment_pool_id"))
@@ -187,51 +185,55 @@ def _build_allocation_stack_index(
 
 
 def _compare_stack_indexes(
-    before: _AllocationStackIndex,
-    after: _AllocationStackIndex,
+    reference: _AllocationStackIndex,
+    candidate: _AllocationStackIndex,
     *,
     by_stream: bool,
     top: int | None,
     include_unchanged: bool = False,
 ) -> tuple[AllocationStackDelta, ...]:
-    before_rows = before.by_pool_stream.values() if by_stream else before.by_pool.values()
-    after_rows = after.by_pool_stream.values() if by_stream else after.by_pool.values()
+    reference_rows = (
+        reference.by_pool_stream.values() if by_stream else reference.by_pool.values()
+    )
+    candidate_rows = (
+        candidate.by_pool_stream.values() if by_stream else candidate.by_pool.values()
+    )
     return _compare_stack_rows(
-        before_rows,
-        after_rows,
+        reference_rows,
+        candidate_rows,
         top=top,
         include_unchanged=include_unchanged,
     )
 
 
 def _compare_mapped_stack_indexes(
-    before: _AllocationStackIndex,
-    after: _AllocationStackIndex,
+    reference: _AllocationStackIndex,
+    candidate: _AllocationStackIndex,
     mapping: Mapping[PoolId, tuple[PoolId, str]],
     *,
     top: int | None,
 ) -> tuple[AllocationStackDelta, ...]:
     deltas: list[AllocationStackDelta] = []
-    for before_pool, (after_pool, _match) in mapping.items():
-        before_rows = {
+    for reference_pool, (candidate_pool, _match) in mapping.items():
+        reference_rows = {
             stack_key: row
-            for (pool_id, stack_key), row in before.by_pool.items()
-            if pool_id == before_pool
+            for (pool_id, stack_key), row in reference.by_pool.items()
+            if pool_id == reference_pool
         }
-        after_rows = {
+        candidate_rows = {
             stack_key: row
-            for (pool_id, stack_key), row in after.by_pool.items()
-            if pool_id == after_pool
+            for (pool_id, stack_key), row in candidate.by_pool.items()
+            if pool_id == candidate_pool
         }
-        for stack_key in set(before_rows) | set(after_rows):
-            left = before_rows.get(stack_key)
-            right = after_rows.get(stack_key)
+        for stack_key in set(reference_rows) | set(candidate_rows):
+            reference_row = reference_rows.get(stack_key)
+            candidate_row = candidate_rows.get(stack_key)
             delta = _stack_delta(
-                pool_id=after_pool,
+                pool_id=candidate_pool,
                 stream=None,
                 stack_key=stack_key,
-                before=left,
-                after=right,
+                reference=reference_row,
+                candidate=candidate_row,
             )
             if delta.has_changes:
                 deltas.append(delta)
@@ -240,7 +242,7 @@ def _compare_mapped_stack_indexes(
 
 
 def allocation_stack_coverage(
-    snapshot: SnapshotInput,
+    snapshot: AllocatorSnapshotData,
     *,
     pool_id: Sequence[Any] | Any | None = None,
 ) -> AllocationStackCoverage:
@@ -267,7 +269,7 @@ def allocation_stack_coverage(
 
 
 def summarize_allocation_stacks(
-    snapshot: SnapshotInput,
+    snapshot: AllocatorSnapshotData,
     *,
     pool_id: Sequence[Any] | Any | None = None,
     stream: Any | None = None,
@@ -329,8 +331,8 @@ def summarize_allocation_stacks(
 
 
 def compare_allocation_stacks(
-    before: SnapshotInput,
-    after: SnapshotInput,
+    reference: AllocatorSnapshotData,
+    candidate: AllocatorSnapshotData,
     *,
     pool_id: Sequence[Any] | Any | None = None,
     stream: Any | None = None,
@@ -341,47 +343,49 @@ def compare_allocation_stacks(
 ) -> tuple[AllocationStackDelta, ...]:
     """Compare active allocation-stack buckets between two snapshots."""
 
-    before_rows = summarize_allocation_stacks(
-        before,
+    reference_rows = summarize_allocation_stacks(
+        reference,
         pool_id=pool_id,
         stream=stream,
         stack_depth=stack_depth,
         by_stream=by_stream,
     )
-    after_rows = summarize_allocation_stacks(
-        after,
+    candidate_rows = summarize_allocation_stacks(
+        candidate,
         pool_id=pool_id,
         stream=stream,
         stack_depth=stack_depth,
         by_stream=by_stream,
     )
     return _compare_stack_rows(
-        before_rows,
-        after_rows,
+        reference_rows,
+        candidate_rows,
         top=top,
         include_unchanged=include_unchanged,
     )
 
 
 def _compare_stack_rows(
-    before_rows: Iterable[AllocationStackSummary],
-    after_rows: Iterable[AllocationStackSummary],
+    reference_rows: Iterable[AllocationStackSummary],
+    candidate_rows: Iterable[AllocationStackSummary],
     *,
     top: int | None,
     include_unchanged: bool,
 ) -> tuple[AllocationStackDelta, ...]:
-    before_map = {
-        (row.pool_id, row.stream, row.stack_key): row for row in before_rows
+    reference_map = {
+        (row.pool_id, row.stream, row.stack_key): row for row in reference_rows
     }
-    after_map = {(row.pool_id, row.stream, row.stack_key): row for row in after_rows}
+    candidate_map = {
+        (row.pool_id, row.stream, row.stack_key): row for row in candidate_rows
+    }
     deltas = []
-    for key in set(before_map) | set(after_map):
+    for key in set(reference_map) | set(candidate_map):
         delta = _stack_delta(
             pool_id=key[0],
             stream=key[1],
             stack_key=key[2],
-            before=before_map.get(key),
-            after=after_map.get(key),
+            reference=reference_map.get(key),
+            candidate=candidate_map.get(key),
         )
         if include_unchanged or delta.has_changes:
             deltas.append(delta)
@@ -394,28 +398,28 @@ def _stack_delta(
     pool_id: PoolId,
     stream: Any | None,
     stack_key: str,
-    before: AllocationStackSummary | None,
-    after: AllocationStackSummary | None,
+    reference: AllocationStackSummary | None,
+    candidate: AllocationStackSummary | None,
 ) -> AllocationStackDelta:
-    before_size = before.size_bytes if before else 0
-    after_size = after.size_bytes if after else 0
-    before_requested = before.requested_bytes if before else 0
-    after_requested = after.requested_bytes if after else 0
-    before_count = before.count if before else 0
-    after_count = after.count if after else 0
+    reference_size = reference.size_bytes if reference else 0
+    candidate_size = candidate.size_bytes if candidate else 0
+    reference_requested = reference.requested_bytes if reference else 0
+    candidate_requested = candidate.requested_bytes if candidate else 0
+    reference_count = reference.count if reference else 0
+    candidate_count = candidate.count if candidate else 0
     return AllocationStackDelta(
         pool_id=pool_id,
         stream=stream,
         stack_key=stack_key,
-        before_size_bytes=before_size,
-        after_size_bytes=after_size,
-        delta_size_bytes=after_size - before_size,
-        before_requested_bytes=before_requested,
-        after_requested_bytes=after_requested,
-        delta_requested_bytes=after_requested - before_requested,
-        before_count=before_count,
-        after_count=after_count,
-        delta_count=after_count - before_count,
+        reference_size_bytes=reference_size,
+        candidate_size_bytes=candidate_size,
+        delta_size_bytes=candidate_size - reference_size,
+        reference_requested_bytes=reference_requested,
+        candidate_requested_bytes=candidate_requested,
+        delta_requested_bytes=candidate_requested - reference_requested,
+        reference_count=reference_count,
+        candidate_count=candidate_count,
+        delta_count=candidate_count - reference_count,
     )
 
 

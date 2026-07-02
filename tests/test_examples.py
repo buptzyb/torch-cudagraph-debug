@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import importlib
 from pathlib import Path
 import re
 
@@ -7,7 +9,6 @@ import torch_cudagraph_debug
 import torch_cudagraph_debug.memory_debug as memory_debug
 import torch_cudagraph_debug.tensor_debug as tensor_debug
 from torch_cudagraph_debug.memory_debug import advanced
-
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
@@ -22,6 +23,23 @@ OLD_EXAMPLE_PATHS = (
     "examples/tensorboard_export_records.py",
     "examples/transformer_block_probe.py",
 )
+
+
+def test_example_package_imports_resolve() -> None:
+    for path in sorted(EXAMPLES.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if not node.module.startswith("torch_cudagraph_debug"):
+                continue
+            module = importlib.import_module(node.module)
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                assert hasattr(
+                    module, alias.name
+                ), f"{path}: {node.module}.{alias.name} is not exported"
 
 
 def test_example_index_covers_every_script_once() -> None:
@@ -102,12 +120,9 @@ def test_docs_do_not_reference_removed_example_paths() -> None:
         ROOT / "docs" / "release_checklist.md",
         EXAMPLES / "README.md",
     )
-    combined = "\n".join(
-        path.read_text(encoding="utf-8") for path in documents
-    )
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in documents)
     for old_path in OLD_EXAMPLE_PATHS:
         assert old_path not in combined
-
 
 
 def _public_markdown_files() -> tuple[Path, ...]:
@@ -153,9 +168,9 @@ def test_public_markdown_links_resolve() -> None:
             assert target_path.is_file(), f"{document}: missing link target {target}"
             if separator and anchor:
                 target_text = target_path.read_text(encoding="utf-8")
-                assert anchor in _heading_anchors(target_text), (
-                    f"{document}: missing anchor {target}"
-                )
+                assert anchor in _heading_anchors(
+                    target_text
+                ), f"{document}: missing anchor {target}"
 
 
 def test_api_reference_covers_every_supported_export() -> None:
@@ -163,7 +178,9 @@ def test_api_reference_covers_every_supported_export() -> None:
     modules = (torch_cudagraph_debug, tensor_debug, memory_debug, advanced)
     for module in modules:
         for name in module.__all__:
-            assert name in reference, f"docs/api.md does not cover {module.__name__}.{name}"
+            assert (
+                name in reference
+            ), f"docs/api.md does not cover {module.__name__}.{name}"
 
 
 def test_public_markdown_has_balanced_fences() -> None:
@@ -180,9 +197,7 @@ def test_docs_do_not_split_hyphenated_words_across_lines() -> None:
 
 
 def test_release_checklist_covers_every_runnable_example() -> None:
-    checklist = (ROOT / "docs" / "release_checklist.md").read_text(
-        encoding="utf-8"
-    )
+    checklist = (ROOT / "docs" / "release_checklist.md").read_text(encoding="utf-8")
     scripts = sorted(
         path.relative_to(ROOT).as_posix()
         for path in EXAMPLES.rglob("*")

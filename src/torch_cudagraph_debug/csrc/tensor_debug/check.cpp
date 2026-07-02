@@ -1,4 +1,4 @@
-#include "tensor_debug/compare.h"
+#include "tensor_debug/check.h"
 
 #include "tensor_debug/tensor_format.h"
 
@@ -24,7 +24,7 @@ double to_double(T value) {
 }
 
 template <typename T>
-CompareResult compare_typed(
+CheckResult check_typed(
     const void* actual_data,
     const void* expected_data,
     int64_t numel,
@@ -51,7 +51,7 @@ CompareResult compare_typed(
                 continue;
             }
 
-            CompareResult result;
+            CheckResult result;
             result.ok = false;
             result.mismatch_index = i;
             result.actual = a;
@@ -69,7 +69,7 @@ CompareResult compare_typed(
                 continue;
             }
 
-            CompareResult result;
+            CheckResult result;
             result.ok = false;
             result.mismatch_index = i;
             result.actual = to_double(actual[i]);
@@ -84,12 +84,12 @@ CompareResult compare_typed(
         }
     }
 
-    return CompareResult{};
+    return CheckResult{};
 }
 
 }  // namespace
 
-CompareResult compare_tensor_bytes(
+CheckResult check_tensor_bytes(
     const void* actual,
     const void* expected,
     int64_t numel,
@@ -99,29 +99,29 @@ CompareResult compare_tensor_bytes(
     bool equal_nan) {
     switch (dtype) {
         case at::kFloat:
-            return compare_typed<float>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<float>(actual, expected, numel, rtol, atol, equal_nan);
         case at::kDouble:
-            return compare_typed<double>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<double>(actual, expected, numel, rtol, atol, equal_nan);
         case at::kHalf:
-            return compare_typed<c10::Half>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<c10::Half>(actual, expected, numel, rtol, atol, equal_nan);
         case at::kBFloat16:
-            return compare_typed<c10::BFloat16>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<c10::BFloat16>(actual, expected, numel, rtol, atol, equal_nan);
         case at::kByte:
-            return compare_typed<uint8_t>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<uint8_t>(actual, expected, numel, rtol, atol, equal_nan);
         case at::kChar:
-            return compare_typed<int8_t>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<int8_t>(actual, expected, numel, rtol, atol, equal_nan);
         case at::kShort:
-            return compare_typed<int16_t>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<int16_t>(actual, expected, numel, rtol, atol, equal_nan);
         case at::kInt:
-            return compare_typed<int32_t>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<int32_t>(actual, expected, numel, rtol, atol, equal_nan);
         case at::kLong:
-            return compare_typed<int64_t>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<int64_t>(actual, expected, numel, rtol, atol, equal_nan);
         case at::kBool:
-            return compare_typed<bool>(actual, expected, numel, rtol, atol, equal_nan);
+            return check_typed<bool>(actual, expected, numel, rtol, atol, equal_nan);
         default:
-            CompareResult result;
+            CheckResult result;
             result.ok = false;
-            result.message = "unsupported dtype for compare: " + scalar_type_name(dtype);
+            result.message = "unsupported dtype for check: " + scalar_type_name(dtype);
             return result;
     }
 }

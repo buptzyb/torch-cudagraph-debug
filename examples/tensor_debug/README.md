@@ -12,13 +12,17 @@ The examples deliberately keep the following lifecycle visible:
 1. Create a `TensorProbe` before graph capture.
 2. Eager warmup is a transparent no-op with the default `when="capture"`.
 3. Capture and replay the graph.
-4. Pass the replay stream to the first snapshot or status query, then use
-   `synchronize=False` for additional queries covered by that wait.
+4. Pass the replay stream to `snapshot()` or the first check-status query, then
+   use `synchronize=False` for additional queries covered by that wait.
 5. Observe that all invocation slots from one replay share one 1-based replay
-   index.
+   index inside one aggregate `TensorProbeSnapshot`.
 6. Keep the probe alive while the graph may replay, then call `close()`.
 
-`record_and_compare.py` catches one intentional `TensorMismatchError` and still
+`snapshot_comparison.py` shows the second quick workflow: collect one eager
+snapshot and one CUDA Graph snapshot with independent probes, then compare them
+directly without run metadata or bundles.
+
+`record_and_check.py` catches one intentional `TensorCheckError` and still
 exits successfully. `probe_modes.py` similarly catches the expected default
 non-contiguous-input error. Those failures demonstrate user-facing diagnostics;
 they are not test failures.
@@ -27,9 +31,9 @@ they are not test failures.
 pool. Use it only when that memory cost is acceptable. `when="always"` enables
 probe work on eager calls and is separate from the default capture-only mode.
 
-## Run-Level Workflows
+## Complete Workflows
 
-The low-level examples above teach one probe and one graph. Use
+The quick-workflow examples above teach one probe and one graph. Use
 [`eager_vs_cuda_graph.py`](eager_vs_cuda_graph.py) when values must be compared
 across independent executions. It records the same named observations in eager
 and CUDA Graph modes, loads both bundles, and writes text, JSON, CSV, and HTML

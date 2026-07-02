@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import torch
 
-from torch_cudagraph_debug.tensor_debug import RecordTensor, TensorProbe
+from torch_cudagraph_debug.tensor_debug import RecordAction, TensorProbe
 
 
 def main() -> None:
@@ -17,7 +17,7 @@ def main() -> None:
     static_x = torch.arange(8, device="cuda", dtype=torch.float32)
     first_expected = torch.arange(8, dtype=torch.float32) * 2
     expected = (first_expected, torch.relu(first_expected - 5))
-    probe = TensorProbe("quickstart.hidden", [RecordTensor()])
+    probe = TensorProbe("quickstart.hidden", [RecordAction()])
     try:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
@@ -32,13 +32,14 @@ def main() -> None:
         graph.replay()
 
         # The query waits only for the stream that launched this replay.
-        snapshots = probe.snapshots(synchronize=replay_stream)
-        assert [item.invocation_index for item in snapshots] == [0, 1]
-        for snapshot, expected_tensor in zip(snapshots, expected):
-            torch.testing.assert_close(snapshot.tensor, expected_tensor)
+        snapshot = probe.snapshot(synchronize=replay_stream)
+        assert [item.invocation_index for item in snapshot.observations] == [0, 1]
+        for observation, expected_tensor in zip(snapshot.observations, expected):
+            tensor = observation.tensor()
+            torch.testing.assert_close(tensor, expected_tensor)
             print(
                 f"replay={snapshot.replay_index} "
-                f"invocation={snapshot.invocation_index}: {snapshot.tensor}"
+                f"invocation={observation.invocation_index}: {tensor}"
             )
         assert first_hidden is first_source
         assert second_hidden is second_source

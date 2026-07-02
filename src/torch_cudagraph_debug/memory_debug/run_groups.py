@@ -10,11 +10,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from .core import AttributionOptions, MemoryRun, compare_phases
+from .attribution import MemoryAttributionOptions
+from .comparison import compare_phases
+from .recording import MemoryRun
 from .errors import MemoryBundleError
-from .reports import GroupPhaseComparison, MemoryGroupSummary
-from .totals import ALLOCATOR_SCOPES
-
+from .reports import MemoryRunGroupPhaseComparison, MemoryRunGroupSummary
+from .aggregation import ALLOCATOR_SCOPES
 
 GROUP_MEMORY_METRICS = (
     "reserved_bytes",
@@ -25,11 +26,11 @@ GROUP_MEMORY_METRICS = (
     "fragmentation_bytes",
 )
 PHASE_COMPONENTS = (
-    "start_delta_bytes",
-    "baseline_growth_bytes",
-    "candidate_growth_bytes",
-    "growth_delta_bytes",
-    "end_delta_bytes",
+    "start_gap_bytes",
+    "baseline_change_bytes",
+    "candidate_change_bytes",
+    "change_gap_bytes",
+    "end_gap_bytes",
 )
 
 
@@ -66,14 +67,14 @@ class MemoryRunGroup:
             "runs": {str(rank): run.descriptor() for rank, run in self.runs.items()},
         }
 
-    def summary(self) -> MemoryGroupSummary:
+    def summary(self) -> MemoryRunGroupSummary:
         """Summarize point states and cross-rank skew without summing GPUs."""
 
         rank_rows = _rank_point_rows(self)
-        return MemoryGroupSummary(
-            group=self,
-            rank_points=rank_rows,
-            point_summary=_aggregate_point_rows(rank_rows),
+        return MemoryRunGroupSummary(
+            run_group=self,
+            rank_point_entries=rank_rows,
+            point_aggregates=_aggregate_point_rows(rank_rows),
             warnings=self.warnings,
         )
 
@@ -242,7 +243,7 @@ class MemoryRunGroup:
         )
 
 
-def compare_group_phases(
+def compare_run_group_phases(
     baseline: MemoryRunGroup,
     candidate: MemoryRunGroup,
     *,
@@ -250,8 +251,8 @@ def compare_group_phases(
     baseline_end: str | int,
     candidate_start: str | int,
     candidate_end: str | int,
-    attribution: AttributionOptions | None = None,
-) -> GroupPhaseComparison:
+    attribution: MemoryAttributionOptions | None = None,
+) -> MemoryRunGroupPhaseComparison:
     """Compare four-point phase equations rank by rank and report skew."""
 
     common_ranks = tuple(sorted(set(baseline.runs) & set(candidate.runs)))
@@ -277,27 +278,29 @@ def compare_group_phases(
             + ", ".join(str(rank) for rank in candidate_only)
         )
 
-    comparisons = {}
-    rank_rows: list[dict[str, object]] = []
-    options = attribution or AttributionOptions()
+    rank_comparisons = {}
+    rank_decomposition: list[dict[str, object]] = []
+    options = attribution or MemoryAttributionOptions()
     for rank in common_ranks:
         phase = compare_phases(
             baseline[rank].between(baseline_start, baseline_end),
             candidate[rank].between(candidate_start, candidate_end),
             attribution=options,
         )
-        comparisons[rank] = phase
-        rank_rows.extend({"rank": rank, **row} for row in phase.total_decomposition)
+        rank_comparisons[rank] = phase
+        rank_decomposition.extend(
+            {"rank": rank, **row} for row in phase.allocator_scope_decomposition
+        )
         warnings.extend(f"rank {rank}: {warning}" for warning in phase.warnings)
 
-    immutable_comparisons = MappingProxyType(comparisons)
-    frozen_rows = tuple(rank_rows)
-    return GroupPhaseComparison(
+    immutable_rank_comparisons = MappingProxyType(rank_comparisons)
+    frozen_rank_decomposition = tuple(rank_decomposition)
+    return MemoryRunGroupPhaseComparison(
         baseline_group=baseline,
         candidate_group=candidate,
-        rank_comparisons=immutable_comparisons,
-        rank_phase=frozen_rows,
-        phase_summary=_aggregate_phase_rows(frozen_rows),
+        rank_comparisons=immutable_rank_comparisons,
+        rank_decomposition=frozen_rank_decomposition,
+        phase_aggregates=_aggregate_phase_rows(frozen_rank_decomposition),
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
@@ -314,7 +317,7 @@ def _rank_point_rows(group: MemoryRunGroup) -> tuple[dict[str, object], ...]:
                         "point_index": point.index,
                         "point_label": point.label,
                         "scope": scope,
-                        **point.totals[scope].to_dict(),
+                        **point.allocator_scope_stats[scope].to_dict(),
                     }
                 )
     return tuple(rows)

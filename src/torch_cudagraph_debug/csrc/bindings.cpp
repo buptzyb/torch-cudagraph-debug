@@ -74,22 +74,22 @@ std::vector<ActionConfig> parse_actions(py::list action_specs) {
         } else if (kind == "record") {
             action.kind = ActionConfig::Kind::Record;
             action.record.enabled = get_bool(spec, "enabled", true);
-        } else if (kind == "compare") {
-            action.kind = ActionConfig::Kind::Compare;
-            action.compare.enabled = get_bool(spec, "enabled", true);
-            action.compare.rtol = get_double(spec, "rtol", 1e-5);
-            action.compare.atol = get_double(spec, "atol", 1e-8);
-            action.compare.equal_nan = get_bool(spec, "equal_nan", false);
+        } else if (kind == "check") {
+            action.kind = ActionConfig::Kind::Check;
+            action.check.enabled = get_bool(spec, "enabled", true);
+            action.check.rtol = get_double(spec, "rtol", 1e-5);
+            action.check.atol = get_double(spec, "atol", 1e-8);
+            action.check.equal_nan = get_bool(spec, "equal_nan", false);
 
             py::list expected_items = py::cast<py::list>(spec["expected"]);
             if (py::len(expected_items) == 0) {
-                throw std::runtime_error("TensorCompare expected list must be non-empty");
+                throw std::runtime_error("CheckAction expected list must be non-empty");
             }
-            action.compare.expected.reserve(py::len(expected_items));
+            action.check.expected.reserve(py::len(expected_items));
             for (py::handle expected_item : expected_items) {
                 torch::Tensor expected = py::cast<torch::Tensor>(expected_item);
-                action.compare.expected.push_back(
-                    parse_expected_tensor(expected, "TensorCompare"));
+                action.check.expected.push_back(
+                    parse_expected_tensor(expected, "CheckAction"));
             }
         } else {
             throw std::runtime_error("unknown tensor debug action kind: " + kind);
@@ -151,11 +151,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         m, "TensorDebugProbeHandle")
         .def("enqueue", &torch_cudagraph_debug::tensor_debug::ProbeContext::enqueue)
         .def(
-            "records",
-            &torch_cudagraph_debug::tensor_debug::ProbeContext::records,
+            "observations",
+            &torch_cudagraph_debug::tensor_debug::ProbeContext::observations,
             py::arg("replay_index") = py::none())
-        .def("clear_records", &torch_cudagraph_debug::tensor_debug::ProbeContext::clear_records)
-        .def("status", &torch_cudagraph_debug::tensor_debug::ProbeContext::status)
+        .def("clear_observations", &torch_cudagraph_debug::tensor_debug::ProbeContext::clear_observations)
+        .def("check_status", &torch_cudagraph_debug::tensor_debug::ProbeContext::check_status)
         .def("close", &torch_cudagraph_debug::tensor_debug::ProbeContext::close);
 
     m.def(

@@ -5,7 +5,7 @@ import pytest
 import torch_cudagraph_debug.memory_debug as memory_debug
 from torch_cudagraph_debug import CudaGraphDebugError
 from torch_cudagraph_debug.memory_debug import (
-    AttributionOptions,
+    MemoryAttributionOptions,
     MemoryBundleError,
     MemoryDebugError,
     MemoryHistoryError,
@@ -13,23 +13,30 @@ from torch_cudagraph_debug.memory_debug import (
 )
 
 
-def test_stable_facade_is_intentionally_small() -> None:
+def test_memory_facade_is_intentionally_small() -> None:
     assert memory_debug.__all__ == [
+        "MemoryProbe",
+        "MemoryProbeSnapshot",
         "MemoryRecorder",
         "MemoryRun",
         "MemoryRunGroup",
         "MemoryPoint",
+        "MemoryObservation",
+        "MemoryObservationKey",
+        "MemoryStats",
         "MemoryRange",
         "MemoryTimeline",
-        "MemoryComparison",
-        "PhaseComparison",
-        "MemoryGroupSummary",
-        "GroupPhaseComparison",
-        "AllocationLifetimeReport",
-        "AttributionOptions",
+        "MemorySnapshotComparison",
+        "MemoryPointComparison",
+        "MemoryPhaseComparison",
+        "MemoryRunGroupSummary",
+        "MemoryRunGroupPhaseComparison",
+        "MemoryAllocationLifetimeAnalysis",
+        "MemoryAttributionOptions",
+        "compare_snapshots",
         "compare_points",
         "compare_phases",
-        "compare_group_phases",
+        "compare_run_group_phases",
         "MemoryDebugError",
         "MemoryHistoryError",
         "MemoryBundleError",
@@ -57,7 +64,7 @@ def test_memory_errors_share_package_base() -> None:
 )
 def test_attribution_options_validate(kwargs: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        AttributionOptions(**kwargs)  # type: ignore[arg-type]
+        MemoryAttributionOptions(**kwargs)  # type: ignore[arg-type]
 
 
 def test_advanced_helpers_live_in_explicit_module() -> None:
@@ -69,14 +76,14 @@ def test_advanced_helpers_live_in_explicit_module() -> None:
         "AllocationStackDelta",
         "AllocationStackSummary",
         "EventWindow",
-        "GroupKey",
+        "MemoryObservationKey",
         "MemoryStats",
-        "SnapshotInput",
-        "TraceEntry",
+        "AllocatorSnapshotData",
+        "AllocatorTraceEntry",
         "allocation_stack_coverage",
         "compare_allocation_stacks",
         "extract_event_window",
-        "format_before_after",
+        "format_comparison",
         "format_bytes",
         "format_delta_bytes",
         "normalize_pool_id",

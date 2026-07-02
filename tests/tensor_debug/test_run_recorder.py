@@ -10,7 +10,6 @@ from torch_cudagraph_debug.tensor_debug import (
     compare_points,
 )
 
-
 pytestmark = pytest.mark.gpu
 
 
@@ -25,14 +24,14 @@ def test_eager_recorder_preserves_repeated_named_invocations() -> None:
     recorder = TensorRecorder(execution="eager", name="eager")
     x = torch.arange(4, dtype=torch.float32, device="cuda")
 
-    with recorder.point("forward", synchronize=stream):
+    with recorder.record_point("forward", synchronize=stream):
         assert recorder.observe("hidden", x + 1) is not None
         recorder.observe("hidden", x + 2, payload="summary")
 
     run = recorder.finish()
     first = run["forward"].observation("hidden", 0)
     second = run["forward"].observation("hidden", 1)
-    assert first.replay_index is None
+    assert run["forward"].replay_index is None
     assert second.payload == "summary"
     assert torch.equal(first.tensor(), torch.arange(4) + 1)
     assert second.summary.mean == pytest.approx(3.5)
@@ -45,7 +44,7 @@ def test_eager_and_cuda_graph_runs_compare_and_replays_form_a_series() -> None:
     static_x = torch.arange(4, dtype=torch.float32, device="cuda")
 
     eager_recorder = TensorRecorder(execution="eager", name="eager")
-    with eager_recorder.point("forward", synchronize=stream):
+    with eager_recorder.record_point("forward", synchronize=stream):
         eager_first = eager_recorder.observe("hidden", static_x + 1)
         eager_recorder.observe("hidden", eager_first * 2)
     eager = eager_recorder.finish()
@@ -57,13 +56,13 @@ def test_eager_and_cuda_graph_runs_compare_and_replays_form_a_series() -> None:
         graph_first = graph_recorder.observe("hidden", static_x + 1)
         graph_recorder.observe("hidden", graph_first * 2)
 
-    with graph_recorder.point("replay-1", synchronize=stream):
+    with graph_recorder.record_point("replay-1", synchronize=stream):
         graph.replay()
     with pytest.raises(TensorDebugError, match="new CUDA Graph replay"):
-        with graph_recorder.point("stale", synchronize=stream):
+        with graph_recorder.record_point("stale", synchronize=stream):
             pass
 
-    with graph_recorder.point("replay-2", synchronize=stream):
+    with graph_recorder.record_point("replay-2", synchronize=stream):
         graph.replay()
 
     candidate = graph_recorder.finish()
@@ -71,8 +70,8 @@ def test_eager_and_cuda_graph_runs_compare_and_replays_form_a_series() -> None:
         0,
         1,
     ]
-    assert {item.replay_index for item in candidate["replay-1"].observations} == {1}
-    assert {item.replay_index for item in candidate["replay-2"].observations} == {2}
+    assert candidate["replay-1"].replay_index == 1
+    assert candidate["replay-2"].replay_index == 2
     assert compare_points(eager["forward"], candidate["replay-1"]).ok
     assert compare_points(eager["forward"], candidate["replay-2"]).ok
     graph_recorder.close()
@@ -110,7 +109,7 @@ def test_cuda_graph_recorder_captures_activation_and_gradient() -> None:
     replay_stream = torch.cuda.current_stream()
     replay_stream.wait_stream(capture_stream)
 
-    with recorder.point("forward-backward", synchronize=replay_stream):
+    with recorder.record_point("forward-backward", synchronize=replay_stream):
         graph.replay()
 
     run = recorder.finish()

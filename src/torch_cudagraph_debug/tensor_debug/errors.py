@@ -7,8 +7,12 @@ class TensorDebugError(CudaGraphDebugError):
     """Base error for tensor debug probes."""
 
 
-class TensorMismatchError(TensorDebugError, AssertionError):
-    """Raised when a tensor comparison action reported a mismatch."""
+class TensorCheckError(TensorDebugError, AssertionError):
+    """Raised when an online tensor check reports a mismatch."""
+
+
+class TensorComparisonError(TensorDebugError, AssertionError):
+    """Raised when an offline tensor comparison is not a match."""
 
 
 class TensorBundleError(TensorDebugError):

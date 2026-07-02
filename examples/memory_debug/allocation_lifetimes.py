@@ -13,11 +13,10 @@ from pathlib import Path
 import torch
 
 from torch_cudagraph_debug.memory_debug import (
-    AttributionOptions,
+    MemoryAttributionOptions,
     MemoryRecorder,
     MemoryRun,
 )
-
 
 MIB = 1024 * 1024
 
@@ -58,19 +57,19 @@ def main() -> None:
             rank=0,
             bundle_dir=bundle_dir,
         )
-        recorder.mark("anchor")
-        recorder.mark("before_transient")
+        recorder.record_point("anchor")
+        recorder.record_point("before_transient")
 
         transient_state = torch.empty(16 * MIB, dtype=torch.uint8, device="cuda")
         del transient_state
         gc.collect()
         torch.cuda.synchronize()
-        recorder.mark("after_transient")
+        recorder.record_point("after_transient")
 
         del warmup_state
         gc.collect()
         torch.cuda.synchronize()
-        recorder.mark("after_cleanup")
+        recorder.record_point("after_cleanup")
         recorder.finish()
 
         if args.record_only:
@@ -78,7 +77,7 @@ def main() -> None:
             return
 
         run = MemoryRun.load(bundle_dir, cache_snapshots=False)
-        options = AttributionOptions(
+        options = MemoryAttributionOptions(
             events=True,
             on_missing="error",
             stack_depth=4,

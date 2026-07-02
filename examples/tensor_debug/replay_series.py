@@ -19,7 +19,7 @@ import torch
 from torch_cudagraph_debug.tensor_debug import (
     TensorRecorder,
     TensorRun,
-    compare_series,
+    compare_point_series,
 )
 
 
@@ -56,7 +56,7 @@ def main() -> None:
         bundle_dir=eager_bundle,
         payload="summary",
     ) as eager_recorder:
-        with eager_recorder.point("forward", synchronize=replay_stream):
+        with eager_recorder.record_point("forward", synchronize=replay_stream):
             observed_forward(reference_x, eager_recorder)
 
     with TensorRecorder(
@@ -69,21 +69,21 @@ def main() -> None:
         with torch.cuda.graph(graph):
             observed_forward(static_x, graph_recorder)
 
-        with graph_recorder.point("replay-1", synchronize=replay_stream):
+        with graph_recorder.record_point("replay-1", synchronize=replay_stream):
             graph.replay()
 
         static_x.add_(1)
-        with graph_recorder.point("replay-2", synchronize=replay_stream):
+        with graph_recorder.record_point("replay-2", synchronize=replay_stream):
             graph.replay()
 
     eager = TensorRun.load(eager_bundle)
     candidate = TensorRun.load(graph_bundle)
-    series = compare_series(eager["forward"], candidate)
-    assert series.comparisons[0].status == "match"
-    assert series.comparisons[1].status == "mismatch"
-    paths = series.write(report_dir, include_matches=False)
+    series = compare_point_series(eager["forward"], candidate)
+    assert series.point_comparisons[0].status == "match"
+    assert series.point_comparisons[1].status == "mismatch"
+    paths = series.write(report_dir, include_unchanged=False)
 
-    print(series.to_text(include_matches=False))
+    print(series.to_text(include_unchanged=False))
     print(f"HTML report: {paths['html']}")
 
 

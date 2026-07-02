@@ -10,7 +10,11 @@ from pathlib import Path
 
 import torch
 
-from torch_cudagraph_debug.tensor_debug import RecordTensor, TensorProbe, TensorSnapshot
+from torch_cudagraph_debug.tensor_debug import (
+    RecordAction,
+    TensorProbe,
+    TensorProbeSnapshot,
+)
 from torch_cudagraph_debug.tensor_debug.postprocess import (
     export_snapshots_to_tensorboard,
 )
@@ -28,33 +32,35 @@ def main() -> None:
     try:
         from torch.utils.tensorboard import SummaryWriter
     except ImportError as exc:
-        raise RuntimeError("install TensorBoard with `pip install tensorboard`") from exc
+        raise RuntimeError(
+            "install TensorBoard with `pip install tensorboard`"
+        ) from exc
 
     args = parse_args()
     static_x = torch.arange(8, device="cuda", dtype=torch.float32)
-    probe = TensorProbe("tensorboard.activation", [RecordTensor()])
+    probe = TensorProbe("tensorboard.activation", [RecordAction()])
     writer = SummaryWriter(str(args.logdir))
     try:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             output = probe(static_x * 2)
 
-        records: list[TensorSnapshot] = []
+        snapshots: list[TensorProbeSnapshot] = []
         replay_stream = torch.cuda.current_stream()
         for _ in range(3):
             graph.replay()
-            # Each query waits for the replay stream and returns an independent
-            # CPU snapshot with the probe's current graph replay index.
-            records.extend(probe.snapshots(synchronize=replay_stream))
+            # Each query returns one independent aggregate snapshot for the
+            # probe's current graph replay.
+            snapshots.append(probe.snapshot(synchronize=replay_stream))
 
         export_snapshots_to_tensorboard(
             writer,
-            records,
+            snapshots,
             tag_prefix="tcgd/",
             write_histograms=True,
         )
         writer.flush()
-        assert [snapshot.replay_index for snapshot in records] == [1, 2, 3]
+        assert [snapshot.replay_index for snapshot in snapshots] == [1, 2, 3]
         assert output is not None
         print(f"TensorBoard logs: {args.logdir.resolve()}")
     finally:

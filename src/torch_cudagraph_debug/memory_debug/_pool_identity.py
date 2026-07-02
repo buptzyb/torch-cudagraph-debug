@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-
 PoolId = tuple[Any, ...]
 DEFAULT_POOL_ID: PoolId = (0, 0)
 UNKNOWN_STREAM = "unknown"

@@ -6,14 +6,12 @@ import argparse
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .core import (
-    AttributionOptions,
-    MemoryRun,
-    compare_phases,
-    compare_points,
-)
+from .attribution import MemoryAttributionOptions
+from .comparison import compare_phases, compare_points
+from .recording import MemoryRun
 from .errors import MemoryDebugError
-from .groups import MemoryRunGroup, compare_group_phases
+from .run_groups import MemoryRunGroup, compare_run_group_phases
+from .allocator_snapshot import format_bytes
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,16 +21,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
+    summary = commands.add_parser("summary", help="Summarize one memory run")
+    summary.add_argument("bundle")
+
     timeline = commands.add_parser(
         "timeline", help="Report every point in one memory run"
     )
     timeline.add_argument("bundle")
     _add_common_options(timeline)
-    lifetimes = commands.add_parser(
-        "lifetimes", help="Trace active allocation cohorts across one memory run"
+    lifetime_analysis = commands.add_parser(
+        "allocation-lifetimes",
+        help="Trace active allocation cohorts across one memory run",
     )
-    lifetimes.add_argument("bundle")
-    lifetime_selection = lifetimes.add_mutually_exclusive_group()
+    lifetime_analysis.add_argument("bundle")
+    lifetime_selection = lifetime_analysis.add_mutually_exclusive_group()
     lifetime_selection.add_argument(
         "--at",
         help="Only trace allocation instances active at this point",
@@ -43,47 +45,45 @@ def build_parser() -> argparse.ArgumentParser:
         metavar=("START", "END"),
         help="Trace allocation instances born in the marker interval (START, END]",
     )
-    lifetimes.add_argument(
+    lifetime_analysis.add_argument(
         "--through",
         help="Stop tracing at this point instead of the final point",
     )
-    _add_common_options(lifetimes)
-    lifetimes.add_argument(
+    _add_common_options(lifetime_analysis)
+    lifetime_analysis.add_argument(
         "--no-events",
         action="store_false",
         dest="events",
         help="Skip allocator event pairing and use snapshots only",
     )
-    lifetimes.set_defaults(events=True, stack_depth=4)
+    lifetime_analysis.set_defaults(events=True, stack_depth=4)
 
     compare = commands.add_parser(
-        "compare", help="Compare two ordered points in one memory run"
+        "compare-points",
+        help="Compare one reference point with one candidate point",
     )
-    compare.add_argument("bundle")
-    compare.add_argument("--before", required=True)
-    compare.add_argument("--after", required=True)
-    _add_common_options(compare)
-
-    runs = commands.add_parser(
-        "compare-runs",
-        help="Compare one point from each of two independent runs",
+    compare.add_argument(
+        "reference_bundle", help="Bundle containing the reference point"
     )
-    runs.add_argument("before_bundle")
-    runs.add_argument("after_bundle")
-    runs.add_argument("--before", required=True)
-    runs.add_argument("--after", required=True)
-    runs.add_argument(
+    compare.add_argument(
+        "candidate_bundle",
+        nargs="?",
+        help="Bundle containing the candidate point; defaults to the reference bundle",
+    )
+    compare.add_argument("--reference-point", required=True)
+    compare.add_argument("--candidate-point", required=True)
+    compare.add_argument(
         "--pool-map",
         action="append",
         default=[],
-        metavar="BEFORE=AFTER",
+        metavar="REFERENCE=CANDIDATE",
         help="Explicit private-pool mapping, for example 0,1=0,2",
     )
-    _add_common_options(runs)
+    _add_common_options(compare)
 
     phases = commands.add_parser(
         "compare-phases",
-        help="Decompose a baseline/candidate difference using four points",
+        help="Decompose baseline and candidate phase changes using four points",
     )
     phases.add_argument("baseline_bundle")
     phases.add_argument("candidate_bundle")
@@ -101,15 +101,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_options(phases)
 
     group_summary = commands.add_parser(
-        "summarize-group",
+        "summarize-run-group",
         help="Summarize compatible per-rank memory bundles without summing GPUs",
     )
     group_summary.add_argument("group_dir")
     group_summary.add_argument("--output", required=True)
 
     group_phases = commands.add_parser(
-        "compare-group-phases",
-        help="Compare four-point phase memory rank by rank across two groups",
+        "compare-run-group-phases",
+        help="Compare four-point phase memory rank by rank across two run groups",
     )
     group_phases.add_argument("baseline_group")
     group_phases.add_argument("candidate_group")
@@ -124,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    options = AttributionOptions(
+    options = MemoryAttributionOptions(
         stacks=getattr(args, "stacks", False),
         events=getattr(args, "events", False),
         lifetimes=getattr(args, "lifetimes", False),
@@ -135,9 +135,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     include_unchanged = not getattr(args, "only_changed", False)
 
     try:
+        if args.command == "summary":
+            print(_summary_text(_load_run(args.bundle)))
+            return 0
         if args.command == "timeline":
             result = _load_run(args.bundle).timeline(attribution=options)
-        elif args.command == "lifetimes":
+        elif args.command == "allocation-lifetimes":
             run = _load_run(args.bundle)
             result = run.lifetimes(
                 args.at,
@@ -147,22 +150,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 through=args.through,
                 attribution=options,
             )
-        elif args.command == "compare":
-            run = _load_run(args.bundle)
-            result = run.compare(
-                args.before,
-                args.after,
-                attribution=options,
-            )
-        elif args.command == "compare-runs":
-            before_run = _load_run(args.before_bundle)
-            after_run = _load_run(args.after_bundle)
-            result = compare_points(
-                before_run.point(args.before),
-                after_run.point(args.after),
-                pool_mapping=_parse_pool_mappings(args.pool_map),
-                attribution=options,
-            )
+        elif args.command == "compare-points":
+            reference = _load_run(args.reference_bundle)
+            candidate = _load_run(args.candidate_bundle or args.reference_bundle)
+            pool_mapping = _parse_pool_mappings(args.pool_map)
+            if reference.run_id == candidate.run_id:
+                if pool_mapping:
+                    raise ValueError("--pool-map is only valid across independent runs")
+                result = reference.compare(
+                    args.reference_point,
+                    args.candidate_point,
+                    attribution=options,
+                )
+            else:
+                result = compare_points(
+                    reference.point(args.reference_point),
+                    candidate.point(args.candidate_point),
+                    pool_mapping=pool_mapping,
+                    attribution=options,
+                )
         elif args.command == "compare-phases":
             baseline = _load_run(args.baseline_bundle)
             candidate = _load_run(args.candidate_bundle)
@@ -172,12 +178,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pool_mapping=_parse_pool_mappings(args.pool_map),
                 attribution=options,
             )
-        elif args.command == "summarize-group":
+        elif args.command == "summarize-run-group":
             result = MemoryRunGroup.load(args.group_dir).summary()
-        else:
+        elif args.command == "compare-run-group-phases":
             baseline_group = MemoryRunGroup.load(args.baseline_group)
             candidate_group = MemoryRunGroup.load(args.candidate_group)
-            result = compare_group_phases(
+            result = compare_run_group_phases(
                 baseline_group,
                 candidate_group,
                 baseline_start=args.baseline_start,
@@ -186,6 +192,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_end=args.candidate_end,
                 attribution=options,
             )
+        else:
+            parser.error(f"unknown command {args.command!r}")
     except (MemoryDebugError, KeyError, ValueError, IndexError) as exc:
         parser.error(str(exc))
 
@@ -195,6 +203,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(result.to_text(include_unchanged=include_unchanged))
     return 0
+
+
+def _summary_text(run: MemoryRun) -> str:
+    lines = [
+        f"Memory run {run.name!r}",
+        f"  complete={run.complete} points={len(run.points)} "
+        f"rank={run.rank} world_size={run.world_size}",
+    ]
+    for point in run.points:
+        total = point.allocator_scope_stats["all"]
+        lines.append(
+            f"  [{point.index}] {point.label}: "
+            f"observations={len(point.observations)} pools={len(point.pool_stats)} "
+            f"allocated={format_bytes(total.allocated_bytes)} "
+            f"reserved={format_bytes(total.reserved_bytes)}"
+        )
+    return "\n".join(lines)
 
 
 def _load_run(bundle: str) -> MemoryRun:
@@ -216,7 +241,7 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--only-changed",
         action="store_true",
-        help="Omit unchanged pool and pool/stream rows from text and CSV",
+        help="Omit unchanged pool and pool/stream observation rows from text, HTML, and CSV",
     )
 
 
@@ -226,13 +251,15 @@ def _parse_pool_mappings(
     result: dict[tuple[Any, ...], tuple[Any, ...]] = {}
     for value in values:
         if value.count("=") != 1:
-            raise ValueError(f"invalid pool mapping {value!r}; expected BEFORE=AFTER")
-        before_text, after_text = value.split("=", 1)
-        before = _parse_pool_id(before_text)
-        after = _parse_pool_id(after_text)
-        if before in result:
-            raise ValueError(f"pool {before_text!r} is mapped more than once")
-        result[before] = after
+            raise ValueError(
+                f"invalid pool mapping {value!r}; expected REFERENCE=CANDIDATE"
+            )
+        reference_text, candidate_text = value.split("=", 1)
+        reference = _parse_pool_id(reference_text)
+        candidate = _parse_pool_id(candidate_text)
+        if reference in result:
+            raise ValueError(f"pool {reference_text!r} is mapped more than once")
+        result[reference] = candidate
     return result
 
 

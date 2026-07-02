@@ -25,14 +25,14 @@ from torch_cudagraph_debug._provenance import (
     runtime_provenance,
 )
 
-from .actions import NonContiguousPolicy, RecordTensor, validate_non_contiguous_policy
+from .actions import NonContiguousPolicy, RecordAction, validate_non_contiguous_policy
 from .errors import (
     TensorBundleError,
     TensorDebugError,
     TensorOwnershipError,
     TensorPayloadUnavailableError,
 )
-from .probe import TensorProbe
+from ._collector import _EagerTensorCollector, _TensorCollector
 
 BUNDLE_SCHEMA = "torch-cudagraph-debug/tensor-run"
 ExecutionMode = Literal["eager", "cuda_graph"]
@@ -71,13 +71,14 @@ _MANIFEST_FIELDS = frozenset(
         "points",
     }
 )
-_POINT_FIELDS = frozenset({"index", "label", "timestamp", "metadata", "observations"})
+_POINT_FIELDS = frozenset(
+    {"index", "label", "timestamp", "metadata", "replay_index", "observations"}
+)
 _OBSERVATION_FIELDS = frozenset(
     {
         "order",
         "probe_name",
         "invocation_index",
-        "replay_index",
         "shape",
         "stride",
         "dtype",
@@ -118,6 +119,14 @@ def validate_payload_kind(value: str) -> PayloadKind:
     if value not in {"full", "summary"}:
         raise ValueError('payload must be either "full" or "summary"')
     return value  # type: ignore[return-value]
+
+
+@dataclass(frozen=True)
+class TensorObservationKey:
+    """Stable key for one tensor observation within a point."""
+
+    probe_name: str
+    invocation_index: int
 
 
 @dataclass(frozen=True)
@@ -189,14 +198,11 @@ class TensorValueSummary:
 
 @dataclass(frozen=True, eq=False)
 class TensorObservation:
-    """One named tensor value owned by a TensorPoint."""
+    """One named tensor value captured by a snapshot or point."""
 
-    run_id: str
-    point_index: int
     order: int
     probe_name: str
     invocation_index: int
-    replay_index: int | None
     shape: tuple[int, ...]
     stride: tuple[int, ...]
     dtype: torch.dtype
@@ -212,8 +218,8 @@ class TensorObservation:
     _cache_tensors: bool = field(default=False, repr=False, compare=False)
 
     @property
-    def key(self) -> tuple[str, int]:
-        return (self.probe_name, self.invocation_index)
+    def key(self) -> TensorObservationKey:
+        return TensorObservationKey(self.probe_name, self.invocation_index)
 
     @property
     def has_payload(self) -> bool:
@@ -221,12 +227,9 @@ class TensorObservation:
 
     def descriptor(self) -> dict[str, object]:
         return {
-            "run_id": self.run_id,
-            "point_index": self.point_index,
             "order": self.order,
             "probe_name": self.probe_name,
             "invocation_index": self.invocation_index,
-            "replay_index": self.replay_index,
             "shape": list(self.shape),
             "stride": list(self.stride),
             "dtype": _dtype_name(self.dtype),
@@ -283,10 +286,11 @@ class TensorPoint:
     label: str
     timestamp: float
     metadata: Mapping[str, Any]
+    replay_index: int | None
     observations: tuple[TensorObservation, ...]
 
     @cached_property
-    def by_key(self) -> Mapping[tuple[str, int], TensorObservation]:
+    def by_key(self) -> Mapping[TensorObservationKey, TensorObservation]:
         return MappingProxyType({item.key: item for item in self.observations})
 
     def observation(
@@ -295,7 +299,7 @@ class TensorPoint:
         invocation_index: int = 0,
     ) -> TensorObservation:
         try:
-            return self.by_key[(probe_name, invocation_index)]
+            return self.by_key[TensorObservationKey(probe_name, invocation_index)]
         except KeyError as exc:
             raise KeyError(
                 f"tensor observation {probe_name!r}[{invocation_index}] "
@@ -309,6 +313,7 @@ class TensorPoint:
             "label": self.label,
             "timestamp": self.timestamp,
             "metadata": dict(self.metadata),
+            "replay_index": self.replay_index,
             "observation_count": len(self.observations),
         }
 
@@ -459,18 +464,21 @@ class TensorRun:
                 )
             labels.add(label)
             metadata = _mapping_value(raw_point["metadata"], "point metadata")
+            replay_index = _optional_int(
+                raw_point["replay_index"], "tensor point replay_index"
+            )
+            if replay_index is not None and replay_index < 0:
+                raise TensorBundleError("point replay_index must be non-negative")
             raw_observations = raw_point["observations"]
             if not isinstance(raw_observations, list):
                 raise TensorBundleError(
                     f"observations for point {label!r} must be a JSON list"
                 )
             observations: list[TensorObservation] = []
-            keys: set[tuple[str, int]] = set()
+            keys: set[TensorObservationKey] = set()
             for expected_order, raw_observation in enumerate(raw_observations):
                 observation = _observation_from_manifest(
                     root,
-                    run_id,
-                    index,
                     expected_order,
                     raw_observation,
                     cache_tensors=cache_tensors,
@@ -490,6 +498,7 @@ class TensorRun:
                     timestamp=float(raw_point["timestamp"]),
                     metadata=MappingProxyType(metadata),
                     observations=tuple(observations),
+                    replay_index=replay_index,
                 )
             )
 
@@ -599,14 +608,17 @@ class TensorRecorder:
         self._capture_slots: list[_CaptureSlot] = []
         self._capture_invocation_counts: dict[str, int] = {}
         self._device: torch.device | None = None
-        self._session_probe: TensorProbe | None = None
-        self._last_recorded_replay_index: int | None = None
+        self._collector: _TensorCollector | None = None
+        self._eager_collector: _EagerTensorCollector | None = (
+            _EagerTensorCollector() if self.execution == "eager" else None
+        )
+        self._last_point_replay_index: int | None = None
 
         if self.execution == "cuda_graph":
             self._device = _resolve_cuda_device(device)
-            self._session_probe = TensorProbe(
+            self._collector = _TensorCollector(
                 f"{self.name}.__tensor_run__",
-                [RecordTensor()],
+                [RecordAction()],
                 non_contiguous=self.non_contiguous,
                 when="capture",
                 device=self._device,
@@ -645,13 +657,8 @@ class TensorRecorder:
                 return tensor
             source = self._validate_tensor(tensor)
             invocation_index = self._next_eager_invocation(name)
-            staging = torch.empty(
-                tuple(source.shape),
-                dtype=source.dtype,
-                device="cpu",
-                pin_memory=True,
-            )
-            staging.copy_(source.detach(), non_blocking=True)
+            assert self._eager_collector is not None
+            staging = self._eager_collector.collect(source)
             self._active_point.pending.append(
                 _PendingObservation(
                     order=len(self._active_point.pending),
@@ -672,8 +679,8 @@ class TensorRecorder:
         if not torch.cuda.is_current_stream_capturing():
             return tensor
         self._validate_tensor(tensor)
-        assert self._session_probe is not None
-        result = self._session_probe(tensor)
+        assert self._collector is not None
+        result = self._collector.enqueue(tensor)
         invocation_index = self._capture_invocation_counts.get(name, 0)
         self._capture_invocation_counts[name] = invocation_index + 1
         self._capture_slots.append(
@@ -717,7 +724,7 @@ class TensorRecorder:
         return tensor.register_hook(hook)
 
     @contextmanager
-    def point(
+    def record_point(
         self,
         label: str,
         *,
@@ -735,7 +742,7 @@ class TensorRecorder:
             raise TensorDebugError("tensor point contexts cannot be nested")
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
-                "TensorRecorder.point() cannot run during CUDA graph capture; "
+                "TensorRecorder.record_point() cannot run during CUDA graph capture; "
                 "capture observe() calls first, then wrap graph.replay()"
             )
         target = self.synchronize if synchronize is None else synchronize
@@ -788,9 +795,9 @@ class TensorRecorder:
             return
         if self._active_point is not None:
             raise TensorDebugError("cannot close while a tensor point is active")
-        if self._session_probe is not None:
-            self._session_probe.close()
-            self._session_probe = None
+        if self._collector is not None:
+            self._collector.close()
+            self._collector = None
         self._closed = True
 
     def __enter__(self) -> "TensorRecorder":
@@ -837,14 +844,16 @@ class TensorRecorder:
         if self.execution == "cuda_graph":
             active.pending.extend(self._collect_cuda_graph_observations(active))
         elif active.pending and self._device is not None:
-            _synchronize_results(self._device, active.synchronize)
+            assert self._eager_collector is not None
+            self._eager_collector.synchronize(self._device, active.synchronize)
         self._commit_point(active.label, active.metadata, active.pending)
         self._active_point = None
 
     def _abort_point(self, active: _ActivePoint) -> None:
         if self.execution == "eager" and active.pending and self._device is not None:
             try:
-                _synchronize_results(self._device, active.synchronize)
+                assert self._eager_collector is not None
+                self._eager_collector.synchronize(self._device, active.synchronize)
             except Exception:
                 pass
         active.pending.clear()
@@ -854,17 +863,17 @@ class TensorRecorder:
         self,
         active: _ActivePoint,
     ) -> list[_PendingObservation]:
-        if self._session_probe is None or self._device is None:
+        if self._collector is None or self._device is None:
             raise TensorDebugError("CUDA Graph tensor recorder has no native session")
         if not self._capture_slots:
             raise TensorDebugError(
                 "CUDA Graph tensor recorder captured no observations"
             )
         _synchronize_results(self._device, active.synchronize)
-        snapshots = self._session_probe.snapshots(synchronize=False)
+        snapshots = self._collector.collect(synchronize=False)
         if len(snapshots) != len(self._capture_slots):
             raise TensorDebugError(
-                "captured tensor slot count does not match recorded snapshots: "
+                "captured tensor slot count does not match collected snapshots: "
                 f"{len(self._capture_slots)} slots, {len(snapshots)} snapshots"
             )
         replay_indices = {snapshot.replay_index for snapshot in snapshots}
@@ -875,14 +884,14 @@ class TensorRecorder:
         replay_index = next(iter(replay_indices))
         if replay_index < 1:
             raise TensorDebugError(
-                "TensorRecorder.point() did not observe a CUDA Graph replay"
+                "TensorRecorder.record_point() did not observe a CUDA Graph replay"
             )
         if (
-            self._last_recorded_replay_index is not None
-            and replay_index <= self._last_recorded_replay_index
+            self._last_point_replay_index is not None
+            and replay_index <= self._last_point_replay_index
         ):
             raise TensorDebugError(
-                "TensorRecorder.point() did not observe a new CUDA Graph replay"
+                "TensorRecorder.record_point() did not observe a new CUDA Graph replay"
             )
         pending: list[_PendingObservation] = []
         for slot, snapshot in zip(self._capture_slots, snapshots):
@@ -911,7 +920,7 @@ class TensorRecorder:
                     tensor=snapshot.tensor,
                 )
             )
-        self._last_recorded_replay_index = replay_index
+        self._last_point_replay_index = replay_index
         return pending
 
     def _commit_point(
@@ -922,7 +931,13 @@ class TensorRecorder:
     ) -> TensorPoint:
         index = len(self._points)
         observations: list[TensorObservation] = []
-        seen: set[tuple[str, int]] = set()
+        seen: set[TensorObservationKey] = set()
+        replay_indices = {
+            item.replay_index for item in pending if item.replay_index is not None
+        }
+        if len(replay_indices) > 1:
+            raise TensorDebugError("tensor point contains multiple replay indices")
+        replay_index = next(iter(replay_indices), None)
         for expected_order, item in enumerate(pending):
             if item.order != expected_order:
                 raise TensorDebugError("tensor observation order must be contiguous")
@@ -945,12 +960,9 @@ class TensorRecorder:
                     blob_path = self._write_blob(digest, raw)
             observations.append(
                 TensorObservation(
-                    run_id=self._run_id,
-                    point_index=index,
                     order=expected_order,
                     probe_name=item.probe_name,
                     invocation_index=item.invocation_index,
-                    replay_index=item.replay_index,
                     shape=item.shape,
                     stride=item.stride,
                     dtype=item.dtype,
@@ -971,6 +983,7 @@ class TensorRecorder:
             timestamp=time.time(),
             metadata=metadata,
             observations=tuple(observations),
+            replay_index=replay_index,
         )
         self._points.append(point)
         self._record_device_provenance()
@@ -1089,7 +1102,6 @@ def _point_manifest(point: TensorPoint, root: Path) -> dict[str, object]:
                 "order": item.order,
                 "probe_name": item.probe_name,
                 "invocation_index": item.invocation_index,
-                "replay_index": item.replay_index,
                 "shape": list(item.shape),
                 "stride": list(item.stride),
                 "dtype": _dtype_name(item.dtype),
@@ -1106,14 +1118,13 @@ def _point_manifest(point: TensorPoint, root: Path) -> dict[str, object]:
         "label": point.label,
         "timestamp": point.timestamp,
         "metadata": dict(point.metadata),
+        "replay_index": point.replay_index,
         "observations": observations,
     }
 
 
 def _observation_from_manifest(
     root: Path,
-    run_id: str,
-    point_index: int,
     expected_order: int,
     raw: Any,
     *,
@@ -1137,9 +1148,6 @@ def _observation_from_manifest(
     invocation_index = int(raw["invocation_index"])
     if invocation_index < 0:
         raise TensorBundleError("invocation_index must be non-negative")
-    replay_index = _optional_int(raw["replay_index"], "replay_index")
-    if replay_index is not None and replay_index < 0:
-        raise TensorBundleError("replay_index must be non-negative")
     shape = _integer_tuple(raw["shape"], "shape", non_negative=True)
     stride = _integer_tuple(raw["stride"], "stride", non_negative=True)
     if len(stride) != len(shape):
@@ -1187,12 +1195,9 @@ def _observation_from_manifest(
         raise TensorBundleError("summary-only observations must not reference a blob")
 
     return TensorObservation(
-        run_id=run_id,
-        point_index=point_index,
         order=order,
         probe_name=probe_name,
         invocation_index=invocation_index,
-        replay_index=replay_index,
         shape=shape,
         stride=stride,
         dtype=dtype,

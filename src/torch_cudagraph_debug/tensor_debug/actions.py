@@ -18,7 +18,7 @@ def validate_non_contiguous_policy(policy: str) -> NonContiguousPolicy:
 
 
 @dataclass(frozen=True)
-class PrintTensor:
+class PrintAction:
     """Print a compact tensor summary from a CUDA Graph host callback."""
 
     max_items: int = 16
@@ -43,7 +43,7 @@ class PrintTensor:
 
 
 @dataclass(frozen=True)
-class RecordTensor:
+class RecordAction:
     """Record the latest replay snapshot without a CUDA host callback."""
 
     enabled: bool = True
@@ -56,8 +56,8 @@ class RecordTensor:
 
 
 @dataclass(frozen=True)
-class CompareTensor:
-    """Compare replay snapshots with per-invocation CPU or NumPy ground truth."""
+class CheckAction:
+    """Check replay snapshots with per-invocation CPU or NumPy ground truth."""
 
     expected: Any
     rtol: float = 1e-5
@@ -82,11 +82,11 @@ class CompareTensor:
             expected_items, Sequence
         ):
             raise TypeError(
-                "CompareTensor expected must be a CPU tensor, NumPy array, or a "
+                "CheckAction expected must be a CPU tensor, NumPy array, or a "
                 "sequence of them"
             )
         if len(expected_items) == 0:
-            raise ValueError("CompareTensor expected sequence must be non-empty")
+            raise ValueError("CheckAction expected sequence must be non-empty")
 
         expected_tensors: list[torch.Tensor] = []
         for index, expected in enumerate(expected_items):
@@ -94,15 +94,15 @@ class CompareTensor:
                 expected = torch.from_numpy(expected)
             if not isinstance(expected, torch.Tensor):
                 raise TypeError(
-                    f"CompareTensor expected[{index}] must be a CPU torch.Tensor "
+                    f"CheckAction expected[{index}] must be a CPU torch.Tensor "
                     "or NumPy array"
                 )
             if expected.device.type != "cpu":
-                raise ValueError(f"CompareTensor expected[{index}] must be on CPU")
+                raise ValueError(f"CheckAction expected[{index}] must be on CPU")
             expected_tensors.append(expected.detach().contiguous())
 
         return {
-            "kind": "compare",
+            "kind": "check",
             "expected": expected_tensors,
             "rtol": float(self.rtol),
             "atol": float(self.atol),

@@ -12,14 +12,15 @@ checkout. The commands below use `/tmp` for that reason.
 
 | Order | Example | Main capability | Requirement |
 |---:|---|---|---|
-| 1 | [Tensor quickstart](tensor_debug/quickstart.py) | `RecordTensor`, sequential hidden states, stream-scoped query | 1 GPU |
-| 2 | [Record and compare](tensor_debug/record_and_compare.py) | snapshots, typed status, successful and failed comparisons | 1 GPU |
-| 3 | [Multiple invocations](tensor_debug/multiple_invocations.py) | one probe with ordered capture slots | 1 GPU |
-| 4 | [Gradient probes](tensor_debug/gradient_probes.py) | activation and parameter gradient hooks | 1 GPU |
-| 5 | [Probe modes](tensor_debug/probe_modes.py) | capture-only, always-active, non-contiguous error/copy | 1 GPU |
-| 6 | [Module integration](tensor_debug/module_integration.py) | configurable probe inside `torch.nn.Module` | 1 GPU |
-| 7 | [Eager vs CUDA Graph](tensor_debug/eager_vs_cuda_graph.py) | `TensorRecorder`, persisted runs, offline point comparison | 1 GPU |
-| 8 | [Replay series](tensor_debug/replay_series.py) | summary/full payloads, three-state analysis, replay drift | 1 GPU |
+| 1 | [Tensor quickstart](tensor_debug/quickstart.py) | `RecordAction`, sequential hidden states, stream-scoped query | 1 GPU |
+| 2 | [Snapshot comparison](tensor_debug/snapshot_comparison.py) | eager-to-CUDA-Graph comparison without bundles | 1 GPU |
+| 3 | [Record and check](tensor_debug/record_and_check.py) | snapshots, typed status, successful and failed checks | 1 GPU |
+| 4 | [Multiple invocations](tensor_debug/multiple_invocations.py) | one probe with ordered capture slots | 1 GPU |
+| 5 | [Gradient probes](tensor_debug/gradient_probes.py) | activation and parameter gradient hooks | 1 GPU |
+| 6 | [Probe modes](tensor_debug/probe_modes.py) | capture-only, always-active, non-contiguous error/copy | 1 GPU |
+| 7 | [Module integration](tensor_debug/module_integration.py) | configurable probe inside `torch.nn.Module` | 1 GPU |
+| 8 | [Eager vs CUDA Graph](tensor_debug/eager_vs_cuda_graph.py) | `TensorRecorder`, persisted runs, offline point comparison | 1 GPU |
+| 9 | [Replay series](tensor_debug/replay_series.py) | summary/full payloads, three-state analysis, replay drift | 1 GPU |
 
 Read the [Tensor Debug guide](../docs/tensor_debug.md) for concepts and
 [Tensor Debug examples](tensor_debug/README.md) for expected output.
@@ -28,13 +29,14 @@ Read the [Tensor Debug guide](../docs/tensor_debug.md) for concepts and
 
 | Order | Example | Main capability | Requirement |
 |---:|---|---|---|
-| 1 | [Memory quickstart](memory_debug/quickstart.py) | capture points, all/default/private totals, same-run comparison | 1 GPU |
-| 2 | [Timeline and reports](memory_debug/timeline_and_reports.py) | persistence, reload, stack attribution, text/JSON/CSV/HTML | 1 GPU |
-| 3 | [Attribution modes](memory_debug/attribution_modes.py) | missing-history policy, snapshot inference, full-history attribution | 1 GPU |
-| 4 | [Allocation lifetimes](memory_debug/allocation_lifetimes.py) | active-at and born-between cohorts with exact events | 1 GPU |
-| 5 | [Compare runs and phases](memory_debug/compare_runs_and_phases.py) | cross-run comparison, private-pool mapping, four-point phase | 1 GPU |
-| 6 | [Distributed groups](memory_debug/distributed_groups.py) | rank-local bundles, group summary, group phase | 2+ GPUs |
-| 7 | [CLI workflows](memory_debug/cli_workflows.sh) | all seven `tcgd-memory` commands | 1 or 2+ GPUs |
+| 1 | [Memory quickstart](memory_debug/quickstart.py) | `MemoryProbe`, standalone snapshots, direct comparison | 1 GPU |
+| 2 | [Snapshot comparison](memory_debug/snapshot_comparison.py) | independent Probe endpoints and cross-probe comparison | 1 GPU |
+| 3 | [Timeline and reports](memory_debug/timeline_and_reports.py) | persistence, reload, stack attribution, text/JSON/CSV/HTML | 1 GPU |
+| 4 | [Attribution modes](memory_debug/attribution_modes.py) | missing-history policy, snapshot inference, full-history attribution | 1 GPU |
+| 5 | [Allocation lifetimes](memory_debug/allocation_lifetimes.py) | active-at and born-between cohorts with exact events | 1 GPU |
+| 6 | [Compare runs and phases](memory_debug/compare_runs_and_phases.py) | cross-run comparison, private-pool mapping, four-point phase | 1 GPU |
+| 7 | [Distributed run groups](memory_debug/distributed_run_groups.py) | rank-local bundles, group summary, group phase | 2+ GPUs |
+| 8 | [CLI workflows](memory_debug/cli_workflows.sh) | all seven `tcgd-memory` commands | 1 or 2+ GPUs |
 
 Read the [Memory Debug guide](../docs/memory_debug.md) for concepts and
 [Memory Debug examples](memory_debug/README.md) before enabling allocator
@@ -44,7 +46,7 @@ history in a long-running process.
 
 | Example | Main capability | Extra dependency |
 |---|---|---|
-| [TensorBoard export](integrations/tensorboard_export.py) | export synchronized `TensorSnapshot` records | `tensorboard` |
+| [TensorBoard export](integrations/tensorboard_export.py) | export synchronized `TensorProbeSnapshot` records | `tensorboard` |
 
 Read the [integration notes](integrations/README.md) for dependency and output
 ownership.
@@ -55,12 +57,14 @@ Run these commands from the repository root:
 
 ```bash
 python examples/tensor_debug/quickstart.py
-python examples/tensor_debug/record_and_compare.py
+python examples/tensor_debug/snapshot_comparison.py
+python examples/tensor_debug/record_and_check.py
 python examples/tensor_debug/eager_vs_cuda_graph.py \
   --output-dir /tmp/tcgd-tensor-eager-vs-cg
 python examples/tensor_debug/replay_series.py \
   --output-dir /tmp/tcgd-tensor-series
 python examples/memory_debug/quickstart.py
+python examples/memory_debug/snapshot_comparison.py
 python examples/memory_debug/timeline_and_reports.py \
   --output-dir /tmp/tcgd-timeline
 python examples/memory_debug/attribution_modes.py \
@@ -71,7 +75,7 @@ python examples/memory_debug/compare_runs_and_phases.py \
   --output-dir /tmp/tcgd-runs
 
 torchrun --standalone --nproc-per-node=2 \
-  examples/memory_debug/distributed_groups.py \
+  examples/memory_debug/distributed_run_groups.py \
   --output-dir /tmp/tcgd-groups
 
 bash examples/memory_debug/cli_workflows.sh \

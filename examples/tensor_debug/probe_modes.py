@@ -8,8 +8,8 @@ from __future__ import annotations
 import torch
 
 from torch_cudagraph_debug.tensor_debug import (
-    CompareTensor,
-    RecordTensor,
+    CheckAction,
+    RecordAction,
     TensorProbe,
 )
 
@@ -22,38 +22,35 @@ def main() -> None:
     non_contiguous = base.t()
     expected_view = non_contiguous.detach().cpu().contiguous()
 
-    capture_only = TensorProbe("mode.capture-only", [RecordTensor()])
+    capture_only = TensorProbe("mode.capture-only", [RecordAction()])
     eager = TensorProbe(
         "mode.always",
         [
-            RecordTensor(),
-            CompareTensor(base.detach().cpu(), rtol=0.0, atol=0.0),
+            RecordAction(),
+            CheckAction(base.detach().cpu(), rtol=0.0, atol=0.0),
         ],
         when="always",
     )
     copying = TensorProbe(
         "mode.non-contiguous-copy",
         [
-            RecordTensor(),
-            CompareTensor(expected_view, rtol=0.0, atol=0.0),
+            RecordAction(),
+            CheckAction(expected_view, rtol=0.0, atol=0.0),
         ],
         non_contiguous="copy",
     )
     rejecting = TensorProbe(
         "mode.non-contiguous-error",
-        [RecordTensor()],
+        [RecordAction()],
         when="always",
     )
     try:
         assert capture_only(non_contiguous) is non_contiguous
-        assert capture_only.snapshots(
-            synchronize=torch.cuda.current_stream()
-        ) == []
         print("capture-only probe: eager call was a transparent no-op")
 
         assert eager(base) is base
-        eager.assert_ok(synchronize=torch.cuda.current_stream())
-        assert len(eager.snapshots(synchronize=False)) == 1
+        eager.assert_check_ok(synchronize=torch.cuda.current_stream())
+        assert len(eager.snapshot(synchronize=False).observations) == 1
         print("always probe: eager call produced one snapshot")
 
         graph = torch.cuda.CUDAGraph()
@@ -61,10 +58,10 @@ def main() -> None:
             copied_output = copying(non_contiguous)
         replay_stream = torch.cuda.current_stream()
         graph.replay()
-        copying.assert_ok(synchronize=replay_stream)
+        copying.assert_check_ok(synchronize=replay_stream)
         assert copied_output is non_contiguous
         assert torch.equal(
-            copying.snapshots(synchronize=False)[0].tensor,
+            copying.snapshot(synchronize=False).tensor(),
             expected_view,
         )
         print("copy policy: non-contiguous graph input was recorded")

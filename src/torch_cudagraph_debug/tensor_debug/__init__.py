@@ -1,27 +1,31 @@
 """Tensor value debugging helpers for eager and CUDA Graph execution."""
 
-from .actions import CompareTensor, PrintTensor, RecordTensor
+from .actions import CheckAction, PrintAction, RecordAction
 from .comparison import (
-    TensorCompareOptions,
-    TensorComparison,
-    TensorDifference,
+    TensorComparisonOptions,
+    TensorSnapshotComparison,
+    TensorPointComparison,
+    TensorObservationComparison,
     TensorRunComparison,
-    TensorSeriesComparison,
+    TensorPointSeriesComparison,
+    compare_snapshots,
     compare_points,
     compare_runs,
-    compare_series,
+    compare_point_series,
 )
 from .errors import (
     TensorBundleError,
     TensorDebugError,
-    TensorMismatchError,
+    TensorCheckError,
+    TensorComparisonError,
     TensorOwnershipError,
     TensorPayloadUnavailableError,
 )
 from .probe import TensorProbe
-from .records import TensorProbeStatus, TensorSnapshot
-from .runs import (
+from .snapshots import TensorCheckStatus, TensorProbeSnapshot
+from .recording import (
     TensorObservation,
+    TensorObservationKey,
     TensorPoint,
     TensorRecorder,
     TensorRun,
@@ -31,25 +35,29 @@ from .runs import (
 __all__ = [
     "TensorProbe",
     "TensorRecorder",
-    "PrintTensor",
-    "RecordTensor",
-    "CompareTensor",
-    "TensorSnapshot",
-    "TensorProbeStatus",
+    "PrintAction",
+    "RecordAction",
+    "CheckAction",
+    "TensorProbeSnapshot",
+    "TensorCheckStatus",
     "TensorRun",
     "TensorPoint",
     "TensorObservation",
+    "TensorObservationKey",
     "TensorValueSummary",
-    "TensorCompareOptions",
-    "TensorDifference",
-    "TensorComparison",
+    "TensorComparisonOptions",
+    "TensorObservationComparison",
+    "TensorSnapshotComparison",
+    "TensorPointComparison",
     "TensorRunComparison",
-    "TensorSeriesComparison",
+    "TensorPointSeriesComparison",
+    "compare_snapshots",
     "compare_points",
     "compare_runs",
-    "compare_series",
+    "compare_point_series",
     "TensorDebugError",
-    "TensorMismatchError",
+    "TensorCheckError",
+    "TensorComparisonError",
     "TensorBundleError",
     "TensorOwnershipError",
     "TensorPayloadUnavailableError",

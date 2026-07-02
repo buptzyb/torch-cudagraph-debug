@@ -5,27 +5,22 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 
-from .models import (
-    AllocatorScope,
-    AllocatorScopeComparison,
-    MemoryStats,
-    MemoryStatsDelta,
-)
-from .summary import DEFAULT_POOL_ID, GroupKey
-
+from .comparison_models import MemoryAllocatorScopeComparison
+from .stats import AllocatorScope, MemoryStats, MemoryStatsDelta
+from .allocator_snapshot import DEFAULT_POOL_ID, MemoryObservationKey
 
 ALLOCATOR_SCOPES: tuple[AllocatorScope, ...] = ("all", "default", "private")
 
 
 def summarize_pools(
-    groups: Mapping[GroupKey, MemoryStats],
+    observations: Mapping[MemoryObservationKey, MemoryStats],
 ) -> dict[tuple[object, ...], MemoryStats]:
     """Aggregate pool/stream states into pool states."""
 
-    grouped: defaultdict[tuple[object, ...], list[MemoryStats]] = defaultdict(list)
-    for key, stats in groups.items():
-        grouped[key.pool_id].append(stats)
-    return {pool_id: MemoryStats.combine(values) for pool_id, values in grouped.items()}
+    by_pool: defaultdict[tuple[object, ...], list[MemoryStats]] = defaultdict(list)
+    for key, stats in observations.items():
+        by_pool[key.pool_id].append(stats)
+    return {pool_id: MemoryStats.combine(values) for pool_id, values in by_pool.items()}
 
 
 def summarize_allocator_scopes(
@@ -43,15 +38,15 @@ def summarize_allocator_scopes(
 
 
 def compare_allocator_scopes(
-    before: Mapping[AllocatorScope, MemoryStats],
-    after: Mapping[AllocatorScope, MemoryStats],
-) -> tuple[AllocatorScopeComparison, ...]:
+    reference: Mapping[AllocatorScope, MemoryStats],
+    candidate: Mapping[AllocatorScope, MemoryStats],
+) -> tuple[MemoryAllocatorScopeComparison, ...]:
     return tuple(
-        AllocatorScopeComparison(
+        MemoryAllocatorScopeComparison(
             scope=scope,
-            before=before[scope],
-            after=after[scope],
-            delta=MemoryStatsDelta.between(before[scope], after[scope]),
+            reference=reference[scope],
+            candidate=candidate[scope],
+            delta=MemoryStatsDelta.between(reference[scope], candidate[scope]),
         )
         for scope in ALLOCATOR_SCOPES
     )

@@ -1,7 +1,7 @@
 #include "tensor_debug/probe_context.h"
 
 #include "common/cuda_utils.h"
-#include "tensor_debug/compare.h"
+#include "tensor_debug/check.h"
 #include "tensor_debug/replay_counter.h"
 #include "tensor_debug/tensor_format.h"
 
@@ -33,27 +33,23 @@ int64_t tensor_nbytes(const torch::Tensor& tensor) {
     return tensor.numel() * tensor.element_size();
 }
 
-bool same_shape(const std::vector<int64_t>& lhs, at::IntArrayRef rhs) {
-    if (lhs.size() != static_cast<size_t>(rhs.size())) {
+bool same_shape(const std::vector<int64_t>& expected_shape, at::IntArrayRef actual_shape) {
+    if (expected_shape.size() != static_cast<size_t>(actual_shape.size())) {
         return false;
     }
-    for (size_t i = 0; i < lhs.size(); ++i) {
-        if (lhs[i] != rhs[static_cast<int64_t>(i)]) {
+    for (size_t i = 0; i < expected_shape.size(); ++i) {
+        if (expected_shape[i] != actual_shape[static_cast<int64_t>(i)]) {
             return false;
         }
     }
     return true;
 }
 
-bool same_shape(const std::vector<int64_t>& lhs, const std::vector<int64_t>& rhs) {
-    return lhs == rhs;
-}
-
-torch::Tensor snapshot_to_tensor(const TensorSnapshotRecord& snapshot) {
-    auto options = torch::TensorOptions().device(torch::kCPU).dtype(snapshot.dtype);
-    torch::Tensor tensor = torch::empty(snapshot.shape, options);
-    if (snapshot.nbytes > 0) {
-        std::memcpy(tensor.data_ptr(), snapshot.bytes.data(), snapshot.nbytes);
+torch::Tensor observation_to_tensor(const TensorObservationData& observation) {
+    auto options = torch::TensorOptions().device(torch::kCPU).dtype(observation.dtype);
+    torch::Tensor tensor = torch::empty(observation.shape, options);
+    if (observation.nbytes > 0) {
+        std::memcpy(tensor.data_ptr(), observation.bytes.data(), observation.nbytes);
     }
     return tensor;
 }
@@ -83,10 +79,10 @@ ProbeContext::ProbeContext(
 
     for (const ActionConfig& action : actions_) {
         if (action.kind == ActionConfig::Kind::Record && action.record.enabled) {
-            has_latest_record_actions_ = true;
+            has_record_action_ = true;
         } else if (
             (action.kind == ActionConfig::Kind::Print && action.print.enabled) ||
-            (action.kind == ActionConfig::Kind::Compare && action.compare.enabled)) {
+            (action.kind == ActionConfig::Kind::Check && action.check.enabled)) {
             has_callback_actions_ = true;
         }
     }
@@ -135,7 +131,7 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
     const uint64_t invocation_index = next_invocation_index(is_capturing, capture_id);
 
     validate_tensor(tensor);
-    validate_compare_actions(tensor, invocation_index);
+    validate_check_actions(tensor, invocation_index);
 
     torch::Tensor source = source_tensor_for_enqueue(tensor);
     const size_t nbytes = static_cast<size_t>(tensor_nbytes(tensor));
@@ -185,7 +181,7 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
     return tensor;
 }
 
-pybind11::list ProbeContext::records(std::optional<uint64_t> replay_index) {
+pybind11::list ProbeContext::observations(std::optional<uint64_t> replay_index) {
     uint64_t resolved_replay_index = 0;
     if (replay_index.has_value()) {
         resolved_replay_index = *replay_index;
@@ -196,55 +192,55 @@ pybind11::list ProbeContext::records(std::optional<uint64_t> replay_index) {
             : 0;
     } else {
         throw std::runtime_error(
-            "records requires replay_index when callback counter staging is unavailable");
+            "observations requires replay_index when callback counter staging is unavailable");
     }
 
-    std::vector<TensorSnapshotRecord> ordered;
+    std::vector<TensorObservationData> ordered;
     {
         std::lock_guard<std::mutex> guard(mutex_);
         ordered.reserve(invocation_slots_.size());
         for (const InvocationSlot& slot : invocation_slots_) {
-            if (!slot.snapshot.valid) {
+            if (!slot.observation.valid) {
                 continue;
             }
-            TensorSnapshotRecord snapshot = slot.snapshot;
-            snapshot.replay_index = snapshot.captured ? resolved_replay_index : 0;
-            snapshot.bytes.clear();
-            snapshot.bytes.resize(snapshot.nbytes);
-            if (snapshot.nbytes > 0 && slot.staging != nullptr) {
-                std::memcpy(snapshot.bytes.data(), slot.staging, snapshot.nbytes);
+            TensorObservationData observation = slot.observation;
+            observation.replay_index = observation.captured ? resolved_replay_index : 0;
+            observation.bytes.clear();
+            observation.bytes.resize(observation.nbytes);
+            if (observation.nbytes > 0 && slot.staging != nullptr) {
+                std::memcpy(observation.bytes.data(), slot.staging, observation.nbytes);
             }
-            ordered.push_back(std::move(snapshot));
+            ordered.push_back(std::move(observation));
         }
     }
 
     pybind11::list result;
-    for (const TensorSnapshotRecord& snapshot : ordered) {
+    for (const TensorObservationData& observation : ordered) {
         pybind11::dict item;
-        item["probe_name"] = snapshot.probe_name;
-        item["replay_index"] = snapshot.replay_index;
-        item["invocation_index"] = snapshot.invocation_index;
-        item["shape"] = snapshot.shape;
-        item["device"] = snapshot.device;
-        item["tensor"] = snapshot_to_tensor(snapshot);
+        item["probe_name"] = observation.probe_name;
+        item["replay_index"] = observation.replay_index;
+        item["invocation_index"] = observation.invocation_index;
+        item["shape"] = observation.shape;
+        item["device"] = observation.device;
+        item["tensor"] = observation_to_tensor(observation);
         result.append(item);
     }
     return result;
 }
 
-void ProbeContext::clear_records() {
+void ProbeContext::clear_observations() {
     std::lock_guard<std::mutex> guard(mutex_);
     for (InvocationSlot& slot : invocation_slots_) {
-        if (slot.snapshot.valid && slot.staging != nullptr && slot.snapshot.nbytes > 0) {
-            std::memset(slot.staging, 0, slot.snapshot.nbytes);
+        if (slot.observation.valid && slot.staging != nullptr && slot.observation.nbytes > 0) {
+            std::memset(slot.staging, 0, slot.observation.nbytes);
         }
     }
 }
 
-pybind11::dict ProbeContext::status() {
+pybind11::dict ProbeContext::check_status() {
     std::lock_guard<std::mutex> guard(mutex_);
     pybind11::dict result;
-    result["ok"] = !compare_failed_;
+    result["ok"] = !check_failed_;
     result["message"] = failure_message_;
     result["replay_index"] = failure_replay_index_;
     result["invocation_index"] = failure_invocation_index_;
@@ -303,10 +299,10 @@ void ProbeContext::on_callback(const CallbackPayload& payload) noexcept {
                         formatted.c_str());
                     std::fflush(stderr);
                 }
-            } else if (action.kind == ActionConfig::Kind::Compare && action.compare.enabled) {
-                if (invocation_index >= action.compare.expected.size()) {
+            } else if (action.kind == ActionConfig::Kind::Check && action.check.enabled) {
+                if (invocation_index >= action.check.expected.size()) {
                     std::ostringstream oss;
-                    oss << "TensorCompare expected list for probe " << name_
+                    oss << "CheckAction expected list for probe " << name_
                         << " has no tensor for invocation " << invocation_index;
                     set_failure(
                         replay_index,
@@ -315,24 +311,24 @@ void ProbeContext::on_callback(const CallbackPayload& payload) noexcept {
                     continue;
                 }
                 const ExpectedTensorConfig& expected =
-                    action.compare.expected[static_cast<size_t>(invocation_index)];
+                    action.check.expected[static_cast<size_t>(invocation_index)];
                 if (payload.dtype != expected.expected_dtype ||
                     payload.shape != expected.expected_shape ||
                     payload.numel != expected.expected_numel) {
                     std::ostringstream oss;
-                    oss << "compare metadata mismatch for probe " << name_
+                    oss << "check metadata mismatch for probe " << name_
                         << " invocation " << invocation_index;
                     set_failure(replay_index, static_cast<int64_t>(invocation_index), oss.str());
                     continue;
                 }
-                CompareResult result = compare_tensor_bytes(
+                CheckResult result = check_tensor_bytes(
                     payload.staging,
                     expected.expected_bytes.data(),
                     payload.numel,
                     payload.dtype,
-                    action.compare.rtol,
-                    action.compare.atol,
-                    action.compare.equal_nan);
+                    action.check.rtol,
+                    action.check.atol,
+                    action.check.equal_nan);
                 if (!result.ok) {
                     std::ostringstream oss;
                     oss << "probe " << name_ << " invocation " << invocation_index
@@ -377,30 +373,30 @@ void ProbeContext::validate_tensor(const torch::Tensor& tensor) const {
     scalar_type_size(tensor.scalar_type());
 }
 
-void ProbeContext::validate_compare_actions(
+void ProbeContext::validate_check_actions(
     const torch::Tensor& tensor,
     uint64_t invocation_index) const {
     for (const ActionConfig& action : actions_) {
-        if (action.kind != ActionConfig::Kind::Compare || !action.compare.enabled) {
+        if (action.kind != ActionConfig::Kind::Check || !action.check.enabled) {
             continue;
         }
-        if (invocation_index >= action.compare.expected.size()) {
+        if (invocation_index >= action.check.expected.size()) {
             std::ostringstream oss;
-            oss << "TensorCompare expected list for probe " << name_
+            oss << "CheckAction expected list for probe " << name_
                 << " has no tensor for invocation " << invocation_index;
             throw std::runtime_error(oss.str());
         }
         const ExpectedTensorConfig& expected =
-            action.compare.expected[static_cast<size_t>(invocation_index)];
+            action.check.expected[static_cast<size_t>(invocation_index)];
         if (tensor.scalar_type() != expected.expected_dtype) {
             std::ostringstream oss;
-            oss << "TensorCompare expected dtype does not match probe input dtype"
+            oss << "CheckAction expected dtype does not match probe input dtype"
                 << " for invocation " << invocation_index;
             throw std::runtime_error(oss.str());
         }
         if (!same_shape(expected.expected_shape, tensor.sizes())) {
             std::ostringstream oss;
-            oss << "TensorCompare expected shape does not match probe input shape"
+            oss << "CheckAction expected shape does not match probe input shape"
                 << " for invocation " << invocation_index;
             throw std::runtime_error(oss.str());
         }
@@ -481,17 +477,17 @@ InvocationSlot& ProbeContext::ensure_invocation_slot(
         slot.staging_nbytes = nbytes;
     }
 
-    if (has_latest_record_actions_) {
-        slot.snapshot.probe_name = name_;
-        slot.snapshot.replay_index = 0;
-        slot.snapshot.invocation_index = invocation_index;
-        slot.snapshot.shape = tensor.sizes().vec();
-        slot.snapshot.dtype = tensor.scalar_type();
-        slot.snapshot.device = tensor.device().str();
-        slot.snapshot.nbytes = nbytes;
-        slot.snapshot.valid = true;
-        slot.snapshot.captured = is_capturing;
-        slot.snapshot.bytes.clear();
+    if (has_record_action_) {
+        slot.observation.probe_name = name_;
+        slot.observation.replay_index = 0;
+        slot.observation.invocation_index = invocation_index;
+        slot.observation.shape = tensor.sizes().vec();
+        slot.observation.dtype = tensor.scalar_type();
+        slot.observation.device = tensor.device().str();
+        slot.observation.nbytes = nbytes;
+        slot.observation.valid = true;
+        slot.observation.captured = is_capturing;
+        slot.observation.bytes.clear();
     }
     return slot;
 }
@@ -527,10 +523,10 @@ void ProbeContext::set_failure(
     int64_t invocation_index,
     const std::string& message) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (compare_failed_) {
+    if (check_failed_) {
         return;
     }
-    compare_failed_ = true;
+    check_failed_ = true;
     failure_replay_index_ = replay_index;
     failure_invocation_index_ = invocation_index;
     failure_message_ = message;

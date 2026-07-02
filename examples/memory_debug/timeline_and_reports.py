@@ -12,11 +12,10 @@ from pathlib import Path
 import torch
 
 from torch_cudagraph_debug.memory_debug import (
-    AttributionOptions,
+    MemoryAttributionOptions,
     MemoryRecorder,
     MemoryRun,
 )
-
 
 MIB = 1024 * 1024
 
@@ -52,19 +51,19 @@ def main() -> None:
             bundle_dir=bundle_dir,
             run_metadata={"example": "timeline-and-reports"},
         ) as recorder:
-            recorder.mark("start")
+            recorder.record_point("start")
             static_state = torch.empty(8 * MIB, dtype=torch.uint8, device="cuda")
-            recorder.mark("after_static_alloc")
+            recorder.record_point("after_static_alloc")
 
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, pool=torch.cuda.graph_pool_handle()):
                 graph_state = torch.empty(12 * MIB, dtype=torch.uint8, device="cuda")
                 graph_state.fill_(1)
-                recorder.mark("during_capture")
+                recorder.record_point("during_capture")
 
-            recorder.mark("after_capture")
+            recorder.record_point("after_capture")
             graph.replay()
-            recorder.mark("after_replay")
+            recorder.record_point("after_replay")
             assert not recorder.snapshot_run().complete
 
         loaded = MemoryRun.load(bundle_dir, cache_snapshots=False)
@@ -77,7 +76,7 @@ def main() -> None:
             "after_replay",
         )
         timeline = loaded.timeline(
-            attribution=AttributionOptions(
+            attribution=MemoryAttributionOptions(
                 stacks=True,
                 on_missing="error",
                 stack_depth=4,
@@ -87,7 +86,14 @@ def main() -> None:
             output_dir / "timeline-report",
             include_unchanged=False,
         )
-        for name in ("text", "json", "html", "totals", "pools", "pool_streams"):
+        for name in (
+            "text",
+            "json",
+            "html",
+            "allocator_scopes",
+            "pools",
+            "observations",
+        ):
             assert paths[name].is_file(), name
         assert static_state.numel() == 8 * MIB
         assert graph_state.numel() == 12 * MIB

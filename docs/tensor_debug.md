@@ -1,7 +1,11 @@
 # Tensor Debug Guide
 
-`tensor_debug` inserts native print, record, and comparison probes into a
-PyTorch CUDA Graph. This guide explains probe lifecycle and behavior. For exact
+`tensor_debug` inserts native print, record, and check probes into a
+PyTorch CUDA Graph and can compare tensor values across eager execution, graph
+replays, processes, and code revisions. `TensorProbe` is the quick workflow for
+one graph; `TensorRecorder` is the complete workflow for labeled points,
+persistence, and multi-point analysis. Both produce ownerless
+`TensorObservation` leaves through private domain collectors. For exact
 signatures, see the [API reference](api.md#tensor-debug); for runnable programs,
 follow the [Tensor Debug examples](../examples/tensor_debug/README.md).
 
@@ -11,18 +15,19 @@ Import tensor APIs from their domain module:
 
 ```python
 from torch_cudagraph_debug.tensor_debug import (
-    CompareTensor,
-    PrintTensor,
-    RecordTensor,
+    CheckAction,
+    PrintAction,
+    RecordAction,
     TensorProbe,
+    compare_snapshots,
 )
 ```
 
-For most debugging sessions, start with `RecordTensor`: it avoids a CUDA host
+For most debugging sessions, start with `RecordAction`: it avoids a CUDA host
 callback when used alone and keeps inspection in Python after synchronization.
 It still enqueues a device-to-host copy into pinned staging memory for every
 captured invocation, so keep probes limited to tensors needed for debugging.
-Use `PrintTensor` for immediate console output and `CompareTensor` when expected
+Use `PrintAction` for immediate console output and `CheckAction` when expected
 values are already available. Both add CUDA host-callback overhead and can
 create a GPU bubble, so use them selectively.
 
@@ -41,9 +46,9 @@ expected = torch.full((4,), 3.0, device="cpu")
 probe = TensorProbe(
     "mid",
     [
-        PrintTensor(max_items=8),
-        RecordTensor(),
-        CompareTensor(expected),
+        PrintAction(max_items=8),
+        RecordAction(),
+        CheckAction(expected),
     ],
 )
 
@@ -54,20 +59,24 @@ with torch.cuda.graph(graph):
 replay_stream = torch.cuda.current_stream()
 graph.replay()
 
-for snapshot in probe.snapshots(synchronize=replay_stream):
-    print(snapshot.replay_index, snapshot.invocation_index, snapshot.tensor)
+snapshot = probe.snapshot(synchronize=replay_stream)
+print("replay", snapshot.replay_index)
+for observation in snapshot.observations:
+    print(observation.invocation_index, observation.tensor())
 
 # The snapshot query already waited for every node in this replay.
-probe.assert_ok(synchronize=False)
+probe.assert_check_ok(synchronize=False)
 probe.close()
 ```
 
+One `TensorProbeSnapshot` represents one replay and aggregates every invocation
+slot in capture-call order. `snapshot.tensor()` is shorthand for invocation 0.
 The default `when="capture"` makes eager warmup calls transparent no-ops.
 Use `when="always"` only when eager debug side effects are intentional.
 
-## Run-Level Differential Debugging
+## Complete Workflow
 
-`TensorProbe` is the low-level tool for one graph and its latest replay.
+`TensorProbe` is the low-ceremony tool for one graph and its latest replay.
 `TensorRecorder` adds named observations, ordered points, persistence, and
 offline comparison. Use it when the question spans execution modes, replays,
 processes, code revisions, or devices.
@@ -92,7 +101,7 @@ with TensorRecorder(
     name="eager",
     bundle_dir="eager.tcgd-tensor",
 ) as eager_recorder:
-    with eager_recorder.point("forward", synchronize=replay_stream):
+    with eager_recorder.record_point("forward", synchronize=replay_stream):
         eager_output = forward(static_x, eager_recorder)
 
 with TensorRecorder(
@@ -104,7 +113,7 @@ with TensorRecorder(
     with torch.cuda.graph(graph):
         graph_output = forward(static_x, graph_recorder)
 
-    with graph_recorder.point("replay-1", synchronize=replay_stream):
+    with graph_recorder.record_point("replay-1", synchronize=replay_stream):
         graph.replay()
 
 eager = TensorRun.load("eager.tcgd-tensor")
@@ -119,14 +128,14 @@ with the same name become invocation 0, 1, and so on. The stable cross-run key
 is `(probe_name, invocation_index)`; replay index is evidence rather than
 identity.
 
-An eager recorder observes calls only inside `point()`. A CUDA Graph recorder
+An eager recorder observes calls only inside `record_point()`. A CUDA Graph recorder
 ignores eager warmup, uses calls made during graph capture to establish its
-fixed slot layout, and reads those slots when a later `point()` wraps
+fixed slot layout, and reads those slots when a later `record_point()` wraps
 `graph.replay()`. All named CG observations owned by one recorder share one
-internal `RecordTensor` session, one replay counter, and one counter increment
+internal `RecordAction` session, one replay counter, and one counter increment
 kernel. Tensor payload copies still occur once per observed slot.
 
-`point()` applies the same synchronization policy as low-level probe queries.
+`record_point()` applies the same synchronization policy as quick Probe queries.
 Pass the replay or eager execution stream when it is known. `False` is valid
 only after the application has already made every D2H copy host-visible.
 
@@ -157,7 +166,17 @@ min, max, mean, standard deviation, and L2 norm.
 `match`, `mismatch`, and `inconclusive` are distinct report states. A
 comparison is successful only when every aligned observation matches.
 
-### Point, Run, And Series Comparison
+### Point, Run, And Point-Series Comparison
+
+For two standalone Probe snapshots, use either form:
+
+```python
+comparison = probe.compare(before, after)
+comparison = compare_snapshots(eager_snapshot, graph_snapshot)
+```
+
+The method validates same-probe ownership and ordering. The top-level function
+also supports independent probes, including eager-to-CUDA-Graph comparison.
 
 `compare_points(reference, candidate)` is the primitive. It validates shape
 and dtype, then compares values using allclose by default. Missing observations
@@ -166,13 +185,13 @@ and invocations are mismatches. Set `mode="exact"` for raw-value identity or
 promotion.
 
 `compare_runs(reference, candidate)` aligns points by label and reports
-missing points. `compare_series(reference_point, candidate_run)` compares one
-reference against every candidate point in order. Series comparison is intended
+missing points. `compare_point_series(reference_point, candidate_run)` compares one
+reference against every candidate point in order. Point-series comparison is intended
 for replay drift, stale static inputs, and state-update bugs.
 
 Reports identify the first issue in reference execution order and label it as
 `mismatch` or `inconclusive`; a later definite mismatch still makes the overall
-status `mismatch`. They rank the worst value differences by mismatch fraction
+status `mismatch`. They rank the worst value mismatches by mismatch fraction
 and absolute error. Result objects provide text, JSON, CSV, and standalone HTML
 output through `write()`.
 
@@ -180,12 +199,15 @@ The CLI performs the same offline analysis without CUDA or the native extension:
 
 ```bash
 tcgd-tensor summary eager.tcgd-tensor
-tcgd-tensor compare eager.tcgd-tensor cg.tcgd-tensor \
+tcgd-tensor compare-points eager.tcgd-tensor cg.tcgd-tensor \
   --reference-point forward --candidate-point replay-1
 tcgd-tensor compare-runs baseline.tcgd-tensor candidate.tcgd-tensor
-tcgd-tensor compare-series eager.tcgd-tensor cg.tcgd-tensor \
+tcgd-tensor compare-point-series eager.tcgd-tensor cg.tcgd-tensor \
   --reference-point forward --output tensor-report
 ```
+
+Omit the candidate bundle from `compare-points` or `compare-point-series` to
+reuse the reference bundle.
 
 Use `--mode exact`, `--promote-dtypes`, `--rtol`, `--atol`,
 `--equal-nan`, and `--only-changed` to control comparison and presentation.
@@ -197,7 +219,7 @@ and validates payload size and SHA-256 before materialization.
 
 ## Query Synchronization
 
-`snapshots()`, `clear_snapshots()`, `status()`, and `assert_ok()` accept one
+`snapshot()`, `clear_snapshot()`, `check_status()`, and `assert_check_ok()` accept one
 keyword-only `synchronize` argument:
 
 - `True` is the correctness-first default and synchronizes the probe's entire
@@ -247,22 +269,22 @@ assert counter is not None
 print(counter)  # tensor(1, device='cuda:0')
 ```
 
-A `RecordTensor`-only probe does not copy the counter to the host on every
-replay. `snapshots()` is the explicit query point: it reads the current counter
-and attaches that value to every returned capture slot. `PrintTensor` and
-`CompareTensor` need the exact index inside their host callback, so probes using
+A `RecordAction`-only probe does not copy the counter to the host on every
+replay. `snapshot()` is the explicit query point: it reads the current counter
+and attaches that value to the aggregate snapshot. `PrintAction` and
+`CheckAction` need the exact index inside their host callback, so probes using
 those actions add one shared 8-byte counter copy per replay. When recording is
-combined with either callback action, `snapshots()` reuses that pinned-host
+combined with either callback action, `snapshot()` reuses that pinned-host
 counter value instead of performing a second counter transfer.
 
-Each `snapshots()` call copies the latest staged bytes into a new CPU tensor.
-Previously returned snapshots therefore survive later replays without an extra
-`clone()`, but the probe retains only the latest value for each invocation slot,
-not a replay history.
+Each `snapshot()` call copies every invocation's latest staged bytes into new
+CPU tensors and returns one aggregate snapshot. Previously returned snapshots
+therefore survive later replays without an extra `clone()`, but the probe
+retains only the latest value for each invocation slot, not a replay history.
 
 ## Repeated Invocations
 
-`CompareTensor` accepts either one CPU tensor/NumPy array or a sequence. A
+`CheckAction` accepts either one CPU tensor/NumPy array or a sequence. A
 single value corresponds only to invocation 0; it is not broadcast when the
 same probe is called more than once in one capture. For repeated calls, pass
 expected values in invocation order:
@@ -270,7 +292,7 @@ expected values in invocation order:
 ```python
 probe = TensorProbe(
     "layers.hidden",
-    [CompareTensor([expected_layer0, expected_layer1])],
+    [CheckAction([expected_layer0, expected_layer1])],
 )
 ```
 
@@ -278,7 +300,7 @@ Each capture-time call owns a logical slot with its own pinned staging storage.
 One probe may have many slots in one graph, but it may not be reused by a
 different capture session.
 
-`PrintTensor` writes to `stderr`. `max_items` limits the displayed prefix,
+`PrintAction` writes to `stderr`. `max_items` limits the displayed prefix,
 `summary` controls aggregate statistics, and `every=N` prints all captured
 invocations on graph replay indices divisible by N.
 
@@ -320,7 +342,7 @@ The default `non_contiguous="error"` avoids hidden graph-pool allocations.
 ```python
 probe = TensorProbe(
     "view",
-    [RecordTensor()],
+    [RecordAction()],
     non_contiguous="copy",
 )
 ```
@@ -339,9 +361,10 @@ from torch_cudagraph_debug.tensor_debug.postprocess import (
 
 replay_stream = torch.cuda.current_stream()
 graph.replay()
+snapshot = probe.snapshot(synchronize=replay_stream)
 export_snapshots_to_tensorboard(
     writer,
-    probe.snapshots(synchronize=replay_stream),
+    [snapshot],
 )
 ```
 
@@ -360,7 +383,7 @@ is required.
 - Shared staging means one probe's graph must not be replayed concurrently.
 - Keep a probe alive while any graph containing it can replay; call `close()`
   only afterward.
-- Prefer passing the replay stream to snapshot and status queries. The default
+- Prefer passing the replay stream to snapshot and check-status queries. The default
   device-wide synchronization is a correctness fallback when that stream is
   unknown; it is not the recommended performance path.
 

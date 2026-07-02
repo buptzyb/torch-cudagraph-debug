@@ -23,7 +23,7 @@ def test_recorder_finish_is_idempotent_and_freezes_collection() -> None:
         lambda marker: pending.pop(0),
         name="sample",
     )
-    point = recorder.mark("start", metadata={"step": 1})
+    point = recorder.record_point("start", metadata={"step": 1})
     view = recorder.snapshot_run()
 
     assert view.complete is False
@@ -37,7 +37,7 @@ def test_recorder_finish_is_idempotent_and_freezes_collection() -> None:
     assert recorder.result is run
     assert run["start"].metadata == {"step": 1}
     with pytest.raises(MemoryDebugError, match="finished"):
-        recorder.mark("late")
+        recorder.record_point("late")
 
 
 def test_context_manager_exposes_result_after_exit() -> None:
@@ -45,7 +45,7 @@ def test_context_manager_exposes_result_after_exit() -> None:
     with MemoryRecorder._from_snapshot_provider(
         lambda marker: pending.pop(0)
     ) as recorder:
-        recorder.mark("inside")
+        recorder.record_point("inside")
     assert recorder.result.complete is True
 
 
@@ -53,10 +53,10 @@ def test_labels_must_be_nonempty_and_unique() -> None:
     pending = [snapshot(), snapshot()]
     recorder = MemoryRecorder._from_snapshot_provider(lambda marker: pending.pop(0))
     with pytest.raises(ValueError, match="non-empty"):
-        recorder.mark("")
-    recorder.mark("same")
+        recorder.record_point("")
+    recorder.record_point("same")
     with pytest.raises(ValueError, match="already exists"):
-        recorder.mark("same")
+        recorder.record_point("same")
 
 
 def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
@@ -84,7 +84,8 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
     assert manifest["schema"] == "torch-cudagraph-debug/memory-run"
     assert manifest["complete"] is True
     assert manifest["name"] == "json-run"
-    assert set(manifest["points"][0]["groups"][0]) == {
+    assert set(manifest["points"][0]["observations"][0]) == {
+        "order",
         "pool_id",
         "stream",
         "reserved_bytes",
@@ -103,13 +104,20 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
 
     loaded = MemoryRun.load(bundle)
     assert loaded.complete is True
+    observation = loaded["after"].observation((0, 3), 7)
+    assert observation.order == 1
+    assert observation.stats.active_bytes == 20
+    assert loaded["after"].observation_stats[observation.key] == observation.stats
     assert loaded["after"]._snapshot_cache == {}
     assert loaded["after"].raw_snapshot()["segments"][1]["total_size"] == 32
     assert loaded["after"]._snapshot_cache
     comparison = loaded.compare("before", "after")
     assert comparison.lifecycle_available is True
-    assert any(item.after_pool_id == (0, 3) for item in comparison.pools)
-    assert run.compare("before", "after").pool_rows() == comparison.pool_rows()
+    assert any(item.candidate_pool_id == (0, 3) for item in comparison.pool_comparisons)
+    assert (
+        run.compare("before", "after").pool_comparison_rows()
+        == comparison.pool_comparison_rows()
+    )
 
 
 def test_bundle_round_trips_group_identity_and_provenance(tmp_path: Path) -> None:
@@ -176,7 +184,23 @@ def test_load_rejects_missing_manifest_fields(tmp_path: Path) -> None:
         MemoryRun.load(bundle)
 
 
-def test_load_rejects_unknown_group_fields(tmp_path: Path) -> None:
+def test_load_rejects_unknown_point_fields(tmp_path: Path) -> None:
+    bundle = tmp_path / "unknown-point-field.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=1))],
+        bundle_dir=bundle,
+        labels=("point",),
+    )
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["points"][0]["unexpected_field"] = None
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(MemoryBundleError, match=r"invalid fields.*unexpected_field"):
+        MemoryRun.load(bundle)
+
+
+def test_load_rejects_unknown_observation_fields(tmp_path: Path) -> None:
     bundle = tmp_path / "unknown-group-field.tcgd-memory"
     make_run(
         [snapshot(segment(active=1))],
@@ -185,7 +209,7 @@ def test_load_rejects_unknown_group_fields(tmp_path: Path) -> None:
     )
     manifest_path = bundle / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["points"][0]["groups"][0]["unexpected_field"] = None
+    manifest["points"][0]["observations"][0]["unexpected_field"] = None
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(MemoryBundleError, match=r"invalid fields.*unexpected_field"):
@@ -212,7 +236,7 @@ def test_bundle_rejects_unsupported_values_with_path() -> None:
         }
     )
     with pytest.raises(MemoryBundleError, match=r"\$\.snapshot\.bad.*unsupported"):
-        recorder.mark("bad")
+        recorder.record_point("bad")
 
 
 def test_load_rejects_snapshot_path_traversal(tmp_path: Path) -> None:
@@ -232,21 +256,21 @@ def test_load_rejects_snapshot_path_traversal(tmp_path: Path) -> None:
 
 
 def test_run_rejects_foreign_points() -> None:
-    left = make_run(
+    reference = make_run(
         [snapshot(segment(active=10)), snapshot(segment(active=20))],
-        name="left",
+        name="reference",
         labels=("before", "after"),
     )
-    right = make_run(
+    candidate = make_run(
         [snapshot(segment(active=30)), snapshot(segment(active=40))],
-        name="right",
+        name="candidate",
         labels=("before", "after"),
     )
 
     with pytest.raises(MemoryOwnershipError, match="belongs to run"):
-        left.compare(left["before"], right["after"])
+        reference.compare(reference["before"], candidate["after"])
     with pytest.raises(MemoryOwnershipError, match="belongs to run"):
-        left.between(right["before"], left["after"])
+        reference.between(candidate["before"], reference["after"])
 
 
 def test_memory_run_load_does_not_call_recorder_constructor(

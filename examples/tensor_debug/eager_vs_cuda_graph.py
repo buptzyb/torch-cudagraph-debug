@@ -52,7 +52,7 @@ def main() -> None:
         bundle_dir=eager_bundle,
         run_metadata={"scenario": "eager-reference"},
     ) as eager_recorder:
-        with eager_recorder.point("forward", synchronize=replay_stream):
+        with eager_recorder.record_point("forward", synchronize=replay_stream):
             eager_output = observed_forward(static_x, eager_recorder)
     assert eager_output is not None
 
@@ -66,7 +66,7 @@ def main() -> None:
         with torch.cuda.graph(graph):
             graph_output = observed_forward(static_x, graph_recorder)
 
-        with graph_recorder.point("replay-1", synchronize=replay_stream):
+        with graph_recorder.record_point("replay-1", synchronize=replay_stream):
             graph.replay()
         assert graph_output is not None
 

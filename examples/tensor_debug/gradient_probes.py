@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import torch
 
-from torch_cudagraph_debug.tensor_debug import RecordTensor, TensorProbe
+from torch_cudagraph_debug.tensor_debug import RecordAction, TensorProbe
 
 
 class DebugMLP(torch.nn.Module):
@@ -36,7 +36,7 @@ def main() -> None:
     torch.manual_seed(1234)
     static_x = torch.randn(2, 4, device="cuda")
     probes = {
-        name: TensorProbe(name, [RecordTensor()])
+        name: TensorProbe(name, [RecordAction()])
         for name in (
             "activation.value",
             "activation.grad",
@@ -66,11 +66,6 @@ def main() -> None:
         current_stream = torch.cuda.current_stream()
         current_stream.wait_stream(capture_stream)
         current_stream.synchronize()
-        assert all(
-            probe.snapshots(synchronize=False) == []
-            for probe in probes.values()
-        )
-
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.stream(capture_stream):
             model.zero_grad(set_to_none=True)
@@ -88,12 +83,12 @@ def main() -> None:
         replay_stream.synchronize()
 
         for probe in probes.values():
-            snapshots = probe.snapshots(synchronize=False)
-            assert snapshots, f"{probe.name} did not record a replay value"
-            snapshot = snapshots[-1]
+            snapshot = probe.snapshot(synchronize=False)
+            assert snapshot.observations, f"{probe.name} did not record a replay value"
+            observation = snapshot.observation()
             print(
                 f"{snapshot.probe_name}: replay={snapshot.replay_index} "
-                f"shape={snapshot.shape}"
+                f"shape={observation.shape}"
             )
     finally:
         weight_hook.remove()

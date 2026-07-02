@@ -5,7 +5,14 @@ from setuptools import setup
 
 
 def is_metadata_command() -> bool:
-    metadata_commands = {"egg_info", "dist_info", "sdist", "clean", "--name", "--version"}
+    metadata_commands = {
+        "egg_info",
+        "dist_info",
+        "sdist",
+        "clean",
+        "--name",
+        "--version",
+    }
     return any(arg in metadata_commands for arg in sys.argv[1:])
 
 
@@ -34,7 +41,7 @@ def get_extensions():
         csrc / "tensor_debug" / "probe_context.cpp",
         csrc / "tensor_debug" / "replay_counter.cu",
         csrc / "tensor_debug" / "tensor_format.cpp",
-        csrc / "tensor_debug" / "compare.cpp",
+        csrc / "tensor_debug" / "check.cpp",
     ]
 
     extension = CUDAExtension(

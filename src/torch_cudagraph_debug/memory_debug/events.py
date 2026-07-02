@@ -7,10 +7,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._ranges import PoolRangeIndex, build_pool_range_index
-from .summary import (
-    SnapshotInput,
-    TraceEntry,
+from ._pool_ranges import PoolRangeIndex, build_pool_range_index
+from .allocator_snapshot import (
+    AllocatorSnapshotData,
+    AllocatorTraceEntry,
     normalize_device_trace_entries,
     pool_id_label,
     raw_device_trace,
@@ -23,7 +23,7 @@ from .summary import (
 class EventWindow:
     """Events delimited by two recorder metadata markers."""
 
-    entries: tuple[TraceEntry, ...]
+    entries: tuple[AllocatorTraceEntry, ...]
     available: bool
     complete: bool
     warnings: tuple[str, ...]
@@ -50,10 +50,12 @@ class AllocatorEventSummary:
     count: int
     attribution_confidence: str
 
-    def to_row(self, *, before_label: str, after_label: str) -> dict[str, object]:
+    def to_row(
+        self, *, reference_label: str, candidate_label: str
+    ) -> dict[str, object]:
         return {
-            "before_label": before_label,
-            "after_label": after_label,
+            "reference_label": reference_label,
+            "candidate_label": candidate_label,
             "pool_id": pool_id_label(self.pool_id),
             "stream_id": stream_label(self.stream),
             "action": self.action,
@@ -65,7 +67,7 @@ class AllocatorEventSummary:
 
 
 def extract_event_window(
-    entries: Sequence[TraceEntry],
+    entries: Sequence[AllocatorTraceEntry],
     *,
     start_marker: str | None,
     end_marker: str | None,
@@ -92,7 +94,7 @@ def extract_event_window(
 
 
 def extract_event_window_from_snapshot(
-    snapshot: SnapshotInput,
+    snapshot: AllocatorSnapshotData,
     *,
     device_index: int,
     start_marker: str | None,
@@ -174,16 +176,16 @@ def _window_bounds(
 
 
 def summarize_allocator_events(
-    entries: Sequence[TraceEntry],
+    entries: Sequence[AllocatorTraceEntry],
     *,
-    before_segments: Sequence[Mapping[str, Any]],
-    after_segments: Sequence[Mapping[str, Any]],
+    reference_segments: Sequence[Mapping[str, Any]],
+    candidate_segments: Sequence[Mapping[str, Any]],
     stack_depth: int = 2,
     top: int | None = 20,
 ) -> tuple[AllocatorEventSummary, ...]:
     """Aggregate historical events separately from active allocation stacks."""
 
-    ranges = build_pool_range_index(after_segments, before_segments)
+    ranges = build_pool_range_index(candidate_segments, reference_segments)
     totals: dict[tuple[tuple[Any, ...], Any, str, str, str], Counter[str]] = (
         defaultdict(Counter)
     )
@@ -234,7 +236,9 @@ def summarize_allocator_events(
     return rows if top is None else rows[:top]
 
 
-def _last_marker_index(entries: Sequence[TraceEntry], marker: str | None) -> int | None:
+def _last_marker_index(
+    entries: Sequence[AllocatorTraceEntry], marker: str | None
+) -> int | None:
     if not marker:
         return None
     for index in range(len(entries) - 1, -1, -1):

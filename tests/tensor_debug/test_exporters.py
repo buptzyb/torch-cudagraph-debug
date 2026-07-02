@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from torch_cudagraph_debug.tensor_debug import TensorSnapshot
+from ._run_helpers import make_probe_snapshot
 from torch_cudagraph_debug.tensor_debug.postprocess import (
     export_snapshots_to_tensorboard,
 )
@@ -27,13 +27,9 @@ def scalar_value(writer: FakeWriter, tag: str) -> object:
     return matches[0]
 
 
-def test_export_records_writes_default_scalars_with_replay_step() -> None:
+def test_export_snapshots_writes_default_scalars_with_replay_step() -> None:
     writer = FakeWriter()
-    snapshot = TensorSnapshot(
-        probe_name="mid",
-        replay_index=7,
-        tensor=torch.tensor([1.0, 2.0, 3.0]),
-    )
+    snapshot = make_probe_snapshot(torch.tensor([1.0, 2.0, 3.0]), replay_index=7)
 
     export_snapshots_to_tensorboard(writer, [snapshot], tag_prefix="debug/")
 
@@ -47,13 +43,11 @@ def test_export_records_writes_default_scalars_with_replay_step() -> None:
     assert writer.histograms == []
 
 
-def test_export_records_supports_fixed_and_callable_steps() -> None:
+def test_export_snapshots_supports_fixed_and_callable_steps() -> None:
     fixed_writer = FakeWriter()
     callable_writer = FakeWriter()
-    snapshot = TensorSnapshot(
-        probe_name="mid",
-        replay_index=7,
-        tensor=torch.tensor([1, 2, 3], dtype=torch.int32),
+    snapshot = make_probe_snapshot(
+        torch.tensor([1, 2, 3], dtype=torch.int32), replay_index=7
     )
 
     export_snapshots_to_tensorboard(fixed_writer, [snapshot], step=123)
@@ -67,12 +61,10 @@ def test_export_records_supports_fixed_and_callable_steps() -> None:
     assert {step for _, _, step in callable_writer.scalars} == {1007}
 
 
-def test_export_records_writes_histograms_only_when_enabled() -> None:
+def test_export_snapshots_writes_histograms_only_when_enabled() -> None:
     writer = FakeWriter()
-    snapshot = TensorSnapshot(
-        probe_name="mid",
-        replay_index=2,
-        tensor=torch.tensor([[True, False], [True, True]]),
+    snapshot = make_probe_snapshot(
+        torch.tensor([[True, False], [True, True]]), replay_index=2
     )
 
     export_snapshots_to_tensorboard(writer, [snapshot], write_histograms=True)
@@ -85,13 +77,9 @@ def test_export_records_writes_histograms_only_when_enabled() -> None:
     assert torch.equal(values, torch.tensor([[1.0, 0.0], [1.0, 1.0]]))
 
 
-def test_export_records_can_disable_scalars() -> None:
+def test_export_snapshots_can_disable_scalars() -> None:
     writer = FakeWriter()
-    snapshot = TensorSnapshot(
-        probe_name="mid",
-        replay_index=2,
-        tensor=torch.tensor([1.0, 2.0]),
-    )
+    snapshot = make_probe_snapshot(torch.tensor([1.0, 2.0]), replay_index=2)
 
     export_snapshots_to_tensorboard(
         writer,
@@ -104,13 +92,9 @@ def test_export_records_can_disable_scalars() -> None:
     assert len(writer.histograms) == 1
 
 
-def test_export_records_empty_tensor_writes_only_numel() -> None:
+def test_export_snapshots_empty_tensor_writes_only_numel() -> None:
     writer = FakeWriter()
-    snapshot = TensorSnapshot(
-        probe_name="empty",
-        replay_index=3,
-        tensor=torch.empty(0),
-    )
+    snapshot = make_probe_snapshot(torch.empty(0), probe_name="empty", replay_index=3)
 
     export_snapshots_to_tensorboard(writer, [snapshot], write_histograms=True)
 

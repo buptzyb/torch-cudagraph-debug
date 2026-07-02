@@ -121,5 +121,5 @@ def make_run(
     )
     point_labels = labels or tuple(f"point_{index}" for index in range(len(pending)))
     for label in point_labels:
-        recorder.mark(label)
+        recorder.record_point(label)
     return recorder.finish()

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from torch_cudagraph_debug.memory_debug import MemoryRecorder
-from torch_cudagraph_debug.memory_debug import core
+from torch_cudagraph_debug.memory_debug import recording
 
 from ._helpers import segment, snapshot
 
@@ -35,10 +35,10 @@ def test_mark_inside_capture_skips_synchronize(
     monkeypatch.setattr(torch.cuda.memory, "_get_memory_metadata", lambda: "")
     monkeypatch.setattr(torch.cuda.memory, "_set_memory_metadata", lambda value: None)
 
-    point = MemoryRecorder().mark("inside_capture")
+    point = MemoryRecorder().record_point("inside_capture")
 
     assert point.label == "inside_capture"
-    assert point.pools[(0, 0)].active_bytes == 10
+    assert point.pool_stats[(0, 0)].active_bytes == 10
 
 
 def test_mark_outside_capture_synchronizes_by_default(
@@ -56,7 +56,7 @@ def test_mark_outside_capture_synchronizes_by_default(
     monkeypatch.setattr(torch.cuda.memory, "_get_memory_metadata", lambda: "")
     monkeypatch.setattr(torch.cuda.memory, "_set_memory_metadata", lambda value: None)
 
-    MemoryRecorder().mark("outside_capture")
+    MemoryRecorder().record_point("outside_capture")
 
     assert calls == ["sync"]
 
@@ -75,7 +75,7 @@ def test_device_provenance_is_deferred_until_after_real_snapshot(
     monkeypatch.setattr(torch.cuda.memory, "_get_memory_metadata", lambda: "")
     monkeypatch.setattr(torch.cuda.memory, "_set_memory_metadata", lambda value: None)
     monkeypatch.setattr(
-        core,
+        recording,
         "initialized_device_provenance",
         lambda: (
             calls.append("device")
@@ -91,7 +91,7 @@ def test_device_provenance_is_deferred_until_after_real_snapshot(
     recorder = MemoryRecorder()
     assert calls == []
 
-    recorder.mark("point")
+    recorder.record_point("point")
     run = recorder.finish()
 
     assert calls == ["device"]

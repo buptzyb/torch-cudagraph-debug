@@ -7,15 +7,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TYPE_CHECKING, TypeVar
 
-from ._ranges import PoolRangeIndex, build_pool_range_index
+from ._pool_ranges import PoolRangeIndex, build_pool_range_index
 from .errors import MemoryHistoryError
 from .events import (
     extract_event_window,
     extract_event_window_from_snapshot,
 )
-from .summary import (
+from .allocator_snapshot import (
     ACTIVE_STATES,
-    TraceEntry,
+    AllocatorTraceEntry,
     normalize_pool_id,
     normalize_snapshot,
     normalize_trace_entries,
@@ -24,8 +24,10 @@ from .summary import (
 )
 
 if TYPE_CHECKING:
-    from .core import AttributionOptions, MemoryPoint, MemoryRun
-    from .reports import AllocationLifetimeReport
+    from .attribution import MemoryAttributionOptions
+    from .recording import MemoryPoint, MemoryRun
+    from .snapshots import MemoryProbeSnapshot
+    from .reports import MemoryAllocationLifetimeAnalysis
 
 
 LifetimeConfidence = Literal["event_exact", "snapshot_inferred"]
@@ -77,10 +79,10 @@ class CohortSizeBucket:
 
 @dataclass(frozen=True)
 class _CohortTransition:
-    before_index: int
-    after_index: int
-    before_label: str
-    after_label: str
+    start_index: int
+    end_index: int
+    start_label: str
+    end_label: str
     stack_key: str
     confidence: LifetimeConfidence
     size_bytes: int
@@ -88,10 +90,10 @@ class _CohortTransition:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "before_index": self.before_index,
-            "after_index": self.after_index,
-            "before_label": self.before_label,
-            "after_label": self.after_label,
+            "start_index": self.start_index,
+            "end_index": self.end_index,
+            "start_label": self.start_label,
+            "end_label": self.end_label,
             "stack_key": self.stack_key,
             "confidence": self.confidence,
             "size_bytes": self.size_bytes,
@@ -223,6 +225,7 @@ class _BlockObservation:
     state: str
     stack_key: str
 
+
 @dataclass
 class _AllocationInstance:
     device: int | None
@@ -241,9 +244,9 @@ class _AllocationInstance:
 
 @dataclass(frozen=True)
 class _IntervalHistory:
-    before: Any
-    after: Any
-    entries: tuple[TraceEntry, ...]
+    start: Any
+    end: Any
+    entries: tuple[AllocatorTraceEntry, ...]
     pool_ranges: PoolRangeIndex | None
     available: bool
     complete: bool
@@ -257,13 +260,65 @@ def analyze_allocation_lifetimes(
     end: MemoryPoint,
     active_at: MemoryPoint | None,
     born_between: tuple[MemoryPoint, MemoryPoint] | None,
-    options: AttributionOptions,
-) -> AllocationLifetimeReport:
+    options: MemoryAttributionOptions,
+) -> MemoryAllocationLifetimeAnalysis:
+    """Build allocation cohorts for a range in one recorded run."""
+
+    return _analyze_allocation_lifetimes(
+        run.points[start.index : end.index + 1],
+        source_kind="run",
+        source_id=run.run_id,
+        source_name=run.name,
+        start=start,
+        end=end,
+        active_at=active_at,
+        born_between=born_between,
+        options=options,
+    )
+
+
+def analyze_probe_snapshot_lifetimes(
+    reference: MemoryProbeSnapshot,
+    candidate: MemoryProbeSnapshot,
+    *,
+    options: MemoryAttributionOptions,
+) -> MemoryAllocationLifetimeAnalysis:
+    """Build allocation cohorts for two ordered snapshots from one Probe."""
+
+    if reference.probe_id != candidate.probe_id:
+        raise ValueError("probe lifetime endpoints must belong to one MemoryProbe")
+    if candidate.index <= reference.index:
+        raise ValueError("candidate snapshot must follow reference snapshot")
+    return _analyze_allocation_lifetimes(
+        (reference, candidate),
+        source_kind="probe",
+        source_id=reference.probe_id,
+        source_name=reference.probe_name,
+        start=reference,
+        end=candidate,
+        active_at=None,
+        born_between=None,
+        options=options,
+    )
+
+
+def _analyze_allocation_lifetimes(
+    states: Sequence[Any],
+    *,
+    source_kind: Literal["run", "probe"],
+    source_id: str,
+    source_name: str,
+    start: Any,
+    end: Any,
+    active_at: Any | None,
+    born_between: tuple[Any, Any] | None,
+    options: MemoryAttributionOptions,
+) -> MemoryAllocationLifetimeAnalysis:
     """Build an offline allocation-cohort lifetime report."""
 
-    from .reports import AllocationLifetimeReport
+    from .reports import MemoryAllocationLifetimeAnalysis
 
-    points = run.points[start.index : end.index + 1]
+    points = tuple(states)
     observations, histories = _scan_points(
         points,
         events=options.events,
@@ -286,13 +341,13 @@ def analyze_allocation_lifetimes(
     if active_at is not None:
         instances = [item for item in instances if active_at.index in item.observations]
     elif born_between is not None:
-        born_after, born_through = born_between
+        born_start, born_end = born_between
         instances = [
             item
             for item in instances
             if item.birth is not None
-            and item.birth.before_index >= born_after.index
-            and item.birth.after_index <= born_through.index
+            and item.birth.start_index >= born_start.index
+            and item.birth.end_index <= born_end.index
         ]
         if not options.events:
             warnings.append(
@@ -326,8 +381,10 @@ def analyze_allocation_lifetimes(
         born_between=born_between,
         limit=options.limit,
     )
-    return AllocationLifetimeReport(
-        run=run,
+    return MemoryAllocationLifetimeAnalysis(
+        source_kind=source_kind,
+        source_id=source_id,
+        source_name=source_name,
         start=start,
         end=end,
         active_at=active_at,
@@ -342,8 +399,15 @@ def analyze_allocation_lifetimes(
     )
 
 
+def _state_label(state: Any) -> str:
+    label = getattr(state, "label", None)
+    if label is not None:
+        return str(label)
+    return f"{state.probe_name}@snapshot-{state.index}"
+
+
 def _scan_points(
-    points: Sequence[MemoryPoint],
+    points: Sequence[Any],
     *,
     events: bool,
     stack_depth: int,
@@ -353,7 +417,7 @@ def _scan_points(
 ]:
     observations: dict[int, tuple[_BlockObservation, ...]] = {}
     histories: list[_IntervalHistory] = []
-    previous: MemoryPoint | None = None
+    previous: Any | None = None
     previous_segments: tuple[Mapping[str, Any], ...] | None = None
 
     for point in points:
@@ -385,7 +449,7 @@ def _scan_points(
                         device_index=device,
                         start_marker=previous.boundary_marker,
                         end_marker=point.boundary_marker,
-                        start_label=f"{previous.label} on device {device}",
+                        start_label=f"{_state_label(previous)} on device {device}",
                     )
                     for device in devices
                 ]
@@ -395,7 +459,7 @@ def _scan_points(
                         normalize_trace_entries(snapshot),
                         start_marker=previous.boundary_marker,
                         end_marker=point.boundary_marker,
-                        start_label=previous.label,
+                        start_label=_state_label(previous),
                     )
                 ]
             entries = tuple(entry for window in windows for entry in window.entries)
@@ -414,8 +478,8 @@ def _scan_points(
 
         histories.append(
             _IntervalHistory(
-                before=previous,
-                after=point,
+                start=previous,
+                end=point,
                 entries=entries,
                 pool_ranges=pool_ranges,
                 available=available,
@@ -430,7 +494,7 @@ def _scan_points(
 
 
 def _active_blocks_from_segments(
-    point: MemoryPoint,
+    point: Any,
     segments: Sequence[Mapping[str, Any]],
     *,
     stack_depth: int,
@@ -450,7 +514,7 @@ def _active_blocks_from_segments(
             rows.append(
                 _BlockObservation(
                     point_index=point.index,
-                    point_label=point.label,
+                    point_label=_state_label(point),
                     ordinal=ordinal,
                     device=device,
                     pool_id=pool_id,
@@ -469,7 +533,7 @@ def _active_blocks_from_segments(
 
 
 def _track_instances(
-    points: Sequence[MemoryPoint],
+    points: Sequence[Any],
     observations: Mapping[int, Sequence[_BlockObservation]],
     histories: Sequence[_IntervalHistory],
     stack_depth: int,
@@ -536,10 +600,10 @@ def _track_instances(
             size = abs(entry.size_bytes)
             pool_id = _event_pool_id(entry, history.pool_ranges)
             birth = CohortBirth(
-                before_index=history.before.index,
-                after_index=history.after.index,
-                before_label=history.before.label,
-                after_label=history.after.label,
+                start_index=history.start.index,
+                end_index=history.end.index,
+                start_label=_state_label(history.start),
+                end_label=_state_label(history.end),
                 stack_key=stack_key_from_frames(entry.frames, depth=stack_depth),
                 confidence="event_exact",
                 size_bytes=size,
@@ -559,8 +623,8 @@ def _track_instances(
             instances.append(item)
             current[(entry.device_index, entry.addr)] = item
 
-        after_blocks = list(observations.get(history.after.index, ()))
-        exact_blocks, fallback_blocks = _block_indexes(after_blocks)
+        end_blocks = list(observations.get(history.end.index, ()))
+        exact_blocks, fallback_blocks = _block_indexes(end_blocks)
         consumed_after: set[int] = set()
         next_current: dict[tuple[int | None, int], _AllocationInstance] = {}
         for key, instance in current.items():
@@ -576,7 +640,7 @@ def _track_instances(
                     instance.release = _snapshot_release(history, instance)
                     instance.release_order = event_order
                 continue
-            block = after_blocks[block_index]
+            block = end_blocks[block_index]
             consumed_after.add(block_index)
             instance.observations[block.point_index] = block
             _refine_instance_from_block(instance, block)
@@ -590,15 +654,15 @@ def _track_instances(
                 instance.release_order = event_order
         missing_address = []
 
-        for block_index, block in enumerate(after_blocks):
+        for block_index, block in enumerate(end_blocks):
             if block_index in consumed_after:
                 continue
             event_order += 1
             birth = CohortBirth(
-                before_index=history.before.index,
-                after_index=history.after.index,
-                before_label=history.before.label,
-                after_label=history.after.label,
+                start_index=history.start.index,
+                end_index=history.end.index,
+                start_label=_state_label(history.start),
+                end_label=_state_label(history.end),
                 stack_key=block.stack_key,
                 confidence="snapshot_inferred",
                 size_bytes=block.size_bytes,
@@ -676,7 +740,9 @@ def _matching_block_index(
     return fallback[0] if len(fallback) == 1 else None
 
 
-def _event_size_matches(entry: TraceEntry, instance: _AllocationInstance) -> bool:
+def _event_size_matches(
+    entry: AllocatorTraceEntry, instance: _AllocationInstance
+) -> bool:
     return abs(entry.size_bytes) in {
         0,
         instance.size_bytes,
@@ -699,7 +765,7 @@ def _refine_instance_from_block(
 
 
 def _event_pool_id(
-    entry: TraceEntry,
+    entry: AllocatorTraceEntry,
     pool_ranges: PoolRangeIndex | None,
 ) -> tuple[Any, ...]:
     if entry.pool_id is not None:
@@ -712,15 +778,15 @@ def _event_pool_id(
 def _release_from_event(
     history: _IntervalHistory,
     instance: _AllocationInstance,
-    entry: TraceEntry,
+    entry: AllocatorTraceEntry,
     *,
     stack_depth: int,
 ) -> CohortRelease:
     return CohortRelease(
-        before_index=history.before.index,
-        after_index=history.after.index,
-        before_label=history.before.label,
-        after_label=history.after.label,
+        start_index=history.start.index,
+        end_index=history.end.index,
+        start_label=_state_label(history.start),
+        end_label=_state_label(history.end),
         stack_key=stack_key_from_frames(entry.frames, depth=stack_depth),
         confidence="event_exact",
         size_bytes=instance.size_bytes,
@@ -732,10 +798,10 @@ def _snapshot_release(
     history: _IntervalHistory, instance: _AllocationInstance
 ) -> CohortRelease:
     return CohortRelease(
-        before_index=history.before.index,
-        after_index=history.after.index,
-        before_label=history.before.label,
-        after_label=history.after.label,
+        start_index=history.start.index,
+        end_index=history.end.index,
+        start_label=_state_label(history.start),
+        end_label=_state_label(history.end),
         stack_key="<unavailable>",
         confidence="snapshot_inferred",
         size_bytes=instance.size_bytes,
@@ -745,10 +811,10 @@ def _snapshot_release(
 
 def _cohorts(
     instances: Sequence[_AllocationInstance],
-    points: Sequence[MemoryPoint],
+    points: Sequence[Any],
     *,
-    active_at: MemoryPoint | None,
-    born_between: tuple[MemoryPoint, MemoryPoint] | None,
+    active_at: Any | None,
+    born_between: tuple[Any, Any] | None,
     limit: int,
 ) -> tuple[AllocationCohort, ...]:
     grouped: dict[tuple[object, ...], list[_AllocationInstance]] = defaultdict(list)
@@ -769,7 +835,7 @@ def _cohorts(
             point_states.append(
                 CohortPointState(
                     point_index=point.index,
-                    point_label=point.label,
+                    point_label=_state_label(point),
                     active_bytes=sum(item.size_bytes for item in active),
                     requested_bytes=sum(item.requested_bytes for item in active),
                     block_count=len(active),
@@ -831,21 +897,21 @@ def _cohorts(
         else:
             member_births = [member.birth for member in members if member.birth]
             assert member_births
-            first_birth = min(member_births, key=lambda item: item.after_index)
+            first_birth = min(member_births, key=lambda item: item.end_index)
             last_boundary = max(
                 (
-                    member.release.after_index
+                    member.release.end_index
                     if member.release is not None
-                    else member.birth.after_index
+                    else member.birth.end_index
                 )
                 for member in members
                 if member.birth is not None
             )
-            point_labels = {point.index: point.label for point in points}
-            first_seen_index = first_birth.after_index
-            first_seen_label = first_birth.after_label
+            point_labels = {point.index: _state_label(point) for point in points}
+            first_seen_index = first_birth.end_index
+            first_seen_label = first_birth.end_label
             last_seen_index = last_boundary
-            last_seen_label = point_labels.get(last_boundary, first_birth.after_label)
+            last_seen_label = point_labels.get(last_boundary, first_birth.end_label)
         pending.append(
             {
                 "device": device,
@@ -974,10 +1040,10 @@ def _aggregate_transitions(
     examples: dict[tuple[object, ...], TransitionT] = {}
     for transition in transitions:
         key = (
-            transition.before_index,
-            transition.after_index,
-            transition.before_label,
-            transition.after_label,
+            transition.start_index,
+            transition.end_index,
+            transition.start_label,
+            transition.end_label,
             transition.stack_key,
             transition.confidence,
         )
@@ -989,10 +1055,10 @@ def _aggregate_transitions(
         example = examples[key]
         rows.append(
             kind(
-                before_index=example.before_index,
-                after_index=example.after_index,
-                before_label=example.before_label,
-                after_label=example.after_label,
+                start_index=example.start_index,
+                end_index=example.end_index,
+                start_label=example.start_label,
+                end_label=example.end_label,
                 stack_key=example.stack_key,
                 confidence=example.confidence,
                 size_bytes=size_bytes,
@@ -1001,7 +1067,7 @@ def _aggregate_transitions(
         )
     rows.sort(
         key=lambda item: (
-            item.after_index,
+            item.end_index,
             -item.size_bytes,
             item.confidence,
             item.stack_key,

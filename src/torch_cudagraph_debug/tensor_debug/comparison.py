@@ -9,17 +9,24 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 import torch
 
-from .errors import TensorMismatchError
-from .runs import TensorObservation, TensorPoint, TensorRun
+from .errors import TensorComparisonError
+from .recording import (
+    TensorObservation,
+    TensorObservationKey,
+    TensorPoint,
+    TensorRun,
+)
+
+from .snapshots import TensorProbeSnapshot
 
 ComparisonMode = Literal["allclose", "exact"]
 DTypePolicy = Literal["strict", "promote"]
 ComparisonStatus = Literal["match", "mismatch", "inconclusive"]
-DifferenceKind = Literal[
+ObservationComparisonKind = Literal[
     "match",
     "value",
     "metadata",
@@ -32,7 +39,7 @@ REPORT_SCHEMA = "torch-cudagraph-debug/tensor-report"
 
 
 @dataclass(frozen=True)
-class TensorCompareOptions:
+class TensorComparisonOptions:
     """Numerical and metadata policy for offline tensor comparison."""
 
     mode: ComparisonMode = "allclose"
@@ -56,13 +63,13 @@ class TensorCompareOptions:
 
 
 @dataclass(frozen=True)
-class TensorDifference:
+class TensorObservationComparison:
     """Comparison result for one stable (probe name, invocation) key."""
 
     probe_name: str
     invocation_index: int
     status: ComparisonStatus
-    kind: DifferenceKind
+    kind: ObservationComparisonKind
     reason: str
     reference: TensorObservation | None
     candidate: TensorObservation | None
@@ -77,8 +84,8 @@ class TensorDifference:
     candidate_value: bool | int | float | str | None = None
 
     @property
-    def key(self) -> tuple[str, int]:
-        return (self.probe_name, self.invocation_index)
+    def key(self) -> TensorObservationKey:
+        return TensorObservationKey(self.probe_name, self.invocation_index)
 
     @property
     def changed(self) -> bool:
@@ -125,20 +132,22 @@ class TensorDifference:
 
 
 @dataclass(frozen=True)
-class TensorComparison:
-    """Difference between two tensor observation points."""
+class _TensorStateComparison:
+    """Shared comparison behavior for Point and ProbeSnapshot states."""
 
-    reference: TensorPoint
-    candidate: TensorPoint
-    options: TensorCompareOptions
-    differences: tuple[TensorDifference, ...]
+    reference: TensorPoint | TensorProbeSnapshot
+    candidate: TensorPoint | TensorProbeSnapshot
+    options: TensorComparisonOptions
+    _COMPARISON_KIND: ClassVar[str] = "state-comparison"
+    _COMPARISON_TITLE: ClassVar[str] = "Tensor comparison"
+    observation_comparisons: tuple[TensorObservationComparison, ...]
     warnings: tuple[str, ...] = ()
 
     @property
     def status(self) -> ComparisonStatus:
-        if any(item.status == "mismatch" for item in self.differences):
+        if any(item.status == "mismatch" for item in self.observation_comparisons):
             return "mismatch"
-        if any(item.status == "inconclusive" for item in self.differences):
+        if any(item.status == "inconclusive" for item in self.observation_comparisons):
             return "inconclusive"
         return "match"
 
@@ -148,32 +157,38 @@ class TensorComparison:
 
     @property
     def conclusive(self) -> bool:
-        return not any(item.status == "inconclusive" for item in self.differences)
+        return not any(
+            item.status == "inconclusive" for item in self.observation_comparisons
+        )
 
     @property
-    def first_issue(self) -> TensorDifference | None:
-        return next((item for item in self.differences if item.changed), None)
+    def first_issue(self) -> TensorObservationComparison | None:
+        return next(
+            (item for item in self.observation_comparisons if item.changed), None
+        )
 
     @property
     def matched_count(self) -> int:
-        return sum(item.status == "match" for item in self.differences)
+        return sum(item.status == "match" for item in self.observation_comparisons)
 
     @property
     def mismatched_count(self) -> int:
-        return sum(item.status == "mismatch" for item in self.differences)
+        return sum(item.status == "mismatch" for item in self.observation_comparisons)
 
     @property
     def inconclusive_count(self) -> int:
-        return sum(item.status == "inconclusive" for item in self.differences)
+        return sum(
+            item.status == "inconclusive" for item in self.observation_comparisons
+        )
 
-    def worst_differences(
+    def worst_observation_comparisons(
         self,
         *,
         limit: int | None = None,
-    ) -> tuple[TensorDifference, ...]:
+    ) -> tuple[TensorObservationComparison, ...]:
         selected = [
             item
-            for item in self.differences
+            for item in self.observation_comparisons
             if (
                 item.status == "mismatch"
                 and item.kind == "value"
@@ -193,22 +208,24 @@ class TensorComparison:
         if not self.ok:
             issue = self.first_issue
             detail = issue.reason if issue is not None else self.status
-            raise TensorMismatchError(
-                f"tensor comparison {self.reference.label!r} -> "
-                f"{self.candidate.label!r} is {self.status}: {detail}"
+            raise TensorComparisonError(
+                f"{self._COMPARISON_TITLE.lower()} {_state_display(self.reference)} -> "
+                f"{_state_display(self.candidate)} is {self.status}: {detail}"
             )
 
-    def rows(self, *, include_matches: bool = True) -> list[dict[str, object]]:
+    def observation_comparison_rows(
+        self, *, include_unchanged: bool = True
+    ) -> list[dict[str, object]]:
         return [
             item.to_row()
-            for item in self.differences
-            if include_matches or item.changed
+            for item in self.observation_comparisons
+            if include_unchanged or item.changed
         ]
 
-    def to_text(self, *, include_matches: bool = True) -> str:
+    def to_text(self, *, include_unchanged: bool = True) -> str:
         lines = [
-            f"Tensor comparison {self.reference.label!r} -> "
-            f"{self.candidate.label!r}: {self.status}",
+            f"{self._COMPARISON_TITLE} {_state_display(self.reference)} -> "
+            f"{_state_display(self.candidate)}: {self.status}",
             "  "
             f"matched={self.matched_count} mismatched={self.mismatched_count} "
             f"inconclusive={self.inconclusive_count}",
@@ -217,9 +234,9 @@ class TensorComparison:
         issue = self.first_issue
         if issue is not None:
             lines.append(f"  first issue: {_issue_text(issue)}")
-        worst = self.worst_differences()
+        worst = self.worst_observation_comparisons()
         if worst:
-            lines.append("  worst value differences:")
+            lines.append("  worst value mismatches:")
             for item in worst:
                 lines.append(
                     "    "
@@ -228,7 +245,9 @@ class TensorComparison:
                     f"max_abs={item.max_abs_error!r}"
                 )
         selected = [
-            item for item in self.differences if include_matches or item.changed
+            item
+            for item in self.observation_comparisons
+            if include_unchanged or item.changed
         ]
         lines.append("  observations:")
         if not selected:
@@ -259,7 +278,7 @@ class TensorComparison:
     def to_dict(self) -> dict[str, object]:
         return {
             "schema": REPORT_SCHEMA,
-            "kind": "point-comparison",
+            "kind": self._COMPARISON_KIND,
             "status": self.status,
             "conclusive": self.conclusive,
             "reference": self.reference.descriptor(),
@@ -271,15 +290,19 @@ class TensorComparison:
                 "mismatched": self.mismatched_count,
                 "inconclusive": self.inconclusive_count,
             },
-            "worst": [item.to_row() for item in self.worst_differences()],
-            "differences": [item.to_dict() for item in self.differences],
+            "worst_observation_comparisons": [
+                item.to_row() for item in self.worst_observation_comparisons()
+            ],
+            "observation_comparisons": [
+                item.to_dict() for item in self.observation_comparisons
+            ],
         }
 
-    def to_html(self, *, include_matches: bool = True) -> str:
+    def to_html(self, *, include_unchanged: bool = True) -> str:
         return _html_report(
-            f"Tensor comparison {self.reference.label} to {self.candidate.label}",
+            f"{self._COMPARISON_TITLE} {_state_label(self.reference)} to {_state_label(self.candidate)}",
             self.status,
-            self.rows(include_matches=include_matches),
+            self.observation_comparison_rows(include_unchanged=include_unchanged),
             self.warnings,
         )
 
@@ -287,15 +310,35 @@ class TensorComparison:
         self,
         output_dir: str | Path,
         *,
-        include_matches: bool = True,
+        include_unchanged: bool = True,
     ) -> dict[str, Path]:
         return _write_report(
             output_dir,
-            text=self.to_text(include_matches=include_matches),
+            text=self.to_text(include_unchanged=include_unchanged),
             payload=self.to_dict(),
-            html_text=self.to_html(include_matches=include_matches),
-            rows=self.rows(include_matches=include_matches),
+            html_text=self.to_html(include_unchanged=include_unchanged),
+            rows=self.observation_comparison_rows(include_unchanged=include_unchanged),
         )
+
+
+@dataclass(frozen=True)
+class TensorPointComparison(_TensorStateComparison):
+    """Difference between two tensor recording points."""
+
+    reference: TensorPoint
+    candidate: TensorPoint
+    _COMPARISON_KIND: ClassVar[str] = "point-comparison"
+    _COMPARISON_TITLE: ClassVar[str] = "Tensor comparison"
+
+
+@dataclass(frozen=True)
+class TensorSnapshotComparison(_TensorStateComparison):
+    """Difference between two standalone tensor Probe snapshots."""
+
+    reference: TensorProbeSnapshot
+    candidate: TensorProbeSnapshot
+    _COMPARISON_KIND: ClassVar[str] = "snapshot-comparison"
+    _COMPARISON_TITLE: ClassVar[str] = "Tensor snapshot comparison"
 
 
 @dataclass(frozen=True)
@@ -304,7 +347,7 @@ class TensorRunComparison:
 
     reference: TensorRun
     candidate: TensorRun
-    comparisons: tuple[TensorComparison, ...]
+    point_comparisons: tuple[TensorPointComparison, ...]
     reference_only_points: tuple[str, ...] = ()
     candidate_only_points: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -313,9 +356,9 @@ class TensorRunComparison:
     def status(self) -> ComparisonStatus:
         if self.reference_only_points or self.candidate_only_points:
             return "mismatch"
-        if any(item.status == "mismatch" for item in self.comparisons):
+        if any(item.status == "mismatch" for item in self.point_comparisons):
             return "mismatch"
-        if any(item.status == "inconclusive" for item in self.comparisons):
+        if any(item.status == "inconclusive" for item in self.point_comparisons):
             return "inconclusive"
         return "match"
 
@@ -325,11 +368,11 @@ class TensorRunComparison:
 
     @property
     def conclusive(self) -> bool:
-        return not any(not item.conclusive for item in self.comparisons)
+        return not any(not item.conclusive for item in self.point_comparisons)
 
     @property
-    def first_issue(self) -> tuple[str, TensorDifference | None] | None:
-        for comparison in self.comparisons:
+    def first_issue(self) -> tuple[str, TensorObservationComparison | None] | None:
+        for comparison in self.point_comparisons:
             if not comparison.ok:
                 return (comparison.candidate.label, comparison.first_issue)
         if self.reference_only_points:
@@ -338,11 +381,11 @@ class TensorRunComparison:
             return (self.candidate_only_points[0], None)
         return None
 
-    def to_text(self, *, include_matches: bool = True) -> str:
+    def to_text(self, *, include_unchanged: bool = True) -> str:
         lines = [
             f"Tensor run comparison {self.reference.name!r} -> "
             f"{self.candidate.name!r}: {self.status}",
-            f"  compared points={len(self.comparisons)}",
+            f"  compared points={len(self.point_comparisons)}",
         ]
         lines.extend(f"  warning: {warning}" for warning in self.warnings)
         if self.reference_only_points:
@@ -353,7 +396,7 @@ class TensorRunComparison:
             lines.append(
                 f"  candidate-only points: {', '.join(self.candidate_only_points)}"
             )
-        for comparison in self.comparisons:
+        for comparison in self.point_comparisons:
             lines.append(
                 f"  point {comparison.reference.label!r} -> "
                 f"{comparison.candidate.label!r}: {comparison.status} "
@@ -364,13 +407,14 @@ class TensorRunComparison:
             if comparison.first_issue is not None:
                 issue = comparison.first_issue
                 lines.append(f"    first issue: {_issue_text(issue)}")
-            if include_matches:
-                for difference in comparison.differences:
-                    lines.append(
-                        f"    [{difference.status}] "
-                        f"{_key_text(difference.probe_name, difference.invocation_index)}: "
-                        f"{difference.reason}"
-                    )
+            for observation_comparison in comparison.observation_comparisons:
+                if not include_unchanged and not observation_comparison.changed:
+                    continue
+                lines.append(
+                    f"    [{observation_comparison.status}] "
+                    f"{_key_text(observation_comparison.probe_name, observation_comparison.invocation_index)}: "
+                    f"{observation_comparison.reason}"
+                )
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -384,43 +428,51 @@ class TensorRunComparison:
             "reference_only_points": list(self.reference_only_points),
             "candidate_only_points": list(self.candidate_only_points),
             "warnings": list(self.warnings),
-            "comparisons": [item.to_dict() for item in self.comparisons],
+            "point_comparisons": [item.to_dict() for item in self.point_comparisons],
         }
+
+    def to_html(self, *, include_unchanged: bool = True) -> str:
+        return _html_report(
+            f"Tensor run comparison {self.reference.name} to {self.candidate.name}",
+            self.status,
+            _aggregate_rows(
+                self.point_comparisons,
+                include_unchanged=include_unchanged,
+            ),
+            self.warnings,
+        )
 
     def write(
         self,
         output_dir: str | Path,
         *,
-        include_matches: bool = True,
+        include_unchanged: bool = True,
     ) -> dict[str, Path]:
-        rows = _aggregate_rows(self.comparisons, include_matches=include_matches)
+        rows = _aggregate_rows(
+            self.point_comparisons, include_unchanged=include_unchanged
+        )
         return _write_report(
             output_dir,
-            text=self.to_text(include_matches=include_matches),
+            text=self.to_text(include_unchanged=include_unchanged),
             payload=self.to_dict(),
-            html_text=_html_report(
-                f"Tensor run comparison {self.reference.name} to {self.candidate.name}",
-                self.status,
-                rows,
-                self.warnings,
-            ),
+            html_text=self.to_html(include_unchanged=include_unchanged),
             rows=rows,
         )
 
 
 @dataclass(frozen=True)
-class TensorSeriesComparison:
+class TensorPointSeriesComparison:
     """One reference point compared with an ordered candidate point series."""
 
     reference: TensorPoint
     candidate_run: TensorRun
-    comparisons: tuple[TensorComparison, ...]
+    point_comparisons: tuple[TensorPointComparison, ...]
 
     @property
     def status(self) -> ComparisonStatus:
-        if any(item.status == "mismatch" for item in self.comparisons):
+        if any(item.status == "mismatch" for item in self.point_comparisons):
             return "mismatch"
-        if any(item.status == "inconclusive" for item in self.comparisons):
+        if any(item.status == "inconclusive" for item in self.point_comparisons):
             return "inconclusive"
         return "match"
 
@@ -430,21 +482,21 @@ class TensorSeriesComparison:
 
     @property
     def conclusive(self) -> bool:
-        return not any(not item.conclusive for item in self.comparisons)
+        return not any(not item.conclusive for item in self.point_comparisons)
 
     @property
-    def first_issue(self) -> tuple[str, TensorDifference] | None:
-        for comparison in self.comparisons:
+    def first_issue(self) -> tuple[str, TensorObservationComparison] | None:
+        for comparison in self.point_comparisons:
             if comparison.first_issue is not None:
                 return (comparison.candidate.label, comparison.first_issue)
         return None
 
-    def to_text(self, *, include_matches: bool = True) -> str:
+    def to_text(self, *, include_unchanged: bool = True) -> str:
         lines = [
-            f"Tensor series comparison reference={self.reference.label!r} "
+            f"Tensor point-series comparison reference={_state_display(self.reference)} "
             f"candidate_run={self.candidate_run.name!r}: {self.status}"
         ]
-        for comparison in self.comparisons:
+        for comparison in self.point_comparisons:
             lines.append(
                 f"  {comparison.candidate.label}: {comparison.status} "
                 f"(matched={comparison.matched_count}, "
@@ -454,64 +506,121 @@ class TensorSeriesComparison:
             if comparison.first_issue is not None:
                 issue = comparison.first_issue
                 lines.append(f"    first issue: {_issue_text(issue)}")
-            if include_matches:
-                for difference in comparison.differences:
-                    lines.append(
-                        f"    [{difference.status}] "
-                        f"{_key_text(difference.probe_name, difference.invocation_index)}: "
-                        f"{difference.reason}"
-                    )
+            for observation_comparison in comparison.observation_comparisons:
+                if not include_unchanged and not observation_comparison.changed:
+                    continue
+                lines.append(
+                    f"    [{observation_comparison.status}] "
+                    f"{_key_text(observation_comparison.probe_name, observation_comparison.invocation_index)}: "
+                    f"{observation_comparison.reason}"
+                )
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "schema": REPORT_SCHEMA,
-            "kind": "series-comparison",
+            "kind": "point-series-comparison",
             "status": self.status,
             "conclusive": self.conclusive,
             "reference": self.reference.descriptor(),
             "candidate_run": self.candidate_run.descriptor(),
-            "comparisons": [item.to_dict() for item in self.comparisons],
+            "point_comparisons": [item.to_dict() for item in self.point_comparisons],
         }
+
+    def to_html(self, *, include_unchanged: bool = True) -> str:
+        return _html_report(
+            f"Tensor point-series comparison against {_state_label(self.reference)}",
+            self.status,
+            _aggregate_rows(
+                self.point_comparisons,
+                include_unchanged=include_unchanged,
+            ),
+            (),
+        )
 
     def write(
         self,
         output_dir: str | Path,
         *,
-        include_matches: bool = True,
+        include_unchanged: bool = True,
     ) -> dict[str, Path]:
-        rows = _aggregate_rows(self.comparisons, include_matches=include_matches)
+        rows = _aggregate_rows(
+            self.point_comparisons, include_unchanged=include_unchanged
+        )
         return _write_report(
             output_dir,
-            text=self.to_text(include_matches=include_matches),
+            text=self.to_text(include_unchanged=include_unchanged),
             payload=self.to_dict(),
-            html_text=_html_report(
-                f"Tensor replay series against {self.reference.label}",
-                self.status,
-                rows,
-                (),
-            ),
+            html_text=self.to_html(include_unchanged=include_unchanged),
             rows=rows,
         )
+
+
+def compare_snapshots(
+    reference: TensorProbeSnapshot,
+    candidate: TensorProbeSnapshot,
+    *,
+    options: TensorComparisonOptions | None = None,
+) -> TensorSnapshotComparison:
+    """Compare standalone tensor snapshots by probe/invocation key."""
+
+    if (
+        reference.probe_id == candidate.probe_id
+        and candidate.replay_index <= reference.replay_index
+    ):
+        raise ValueError("candidate snapshot must follow reference snapshot")
+    selected = options or TensorComparisonOptions()
+    observation_comparisons, warnings = _compare_observation_sets(
+        reference.observations,
+        candidate.observations,
+        selected,
+    )
+    return TensorSnapshotComparison(
+        reference=reference,
+        candidate=candidate,
+        options=selected,
+        observation_comparisons=observation_comparisons,
+        warnings=warnings,
+    )
 
 
 def compare_points(
     reference: TensorPoint,
     candidate: TensorPoint,
     *,
-    options: TensorCompareOptions | None = None,
-) -> TensorComparison:
+    options: TensorComparisonOptions | None = None,
+) -> TensorPointComparison:
     """Compare two tensor points using stable probe/invocation keys."""
 
-    selected = options or TensorCompareOptions()
-    candidate_by_key = candidate.by_key
-    differences: list[TensorDifference] = []
-    matched_keys: set[tuple[str, int]] = set()
-    for observation in reference.observations:
+    selected = options or TensorComparisonOptions()
+    observation_comparisons, warnings = _compare_observation_sets(
+        reference.observations,
+        candidate.observations,
+        selected,
+    )
+    return TensorPointComparison(
+        reference=reference,
+        candidate=candidate,
+        options=selected,
+        observation_comparisons=observation_comparisons,
+        warnings=warnings,
+    )
+
+
+def _compare_observation_sets(
+    reference: Sequence[TensorObservation],
+    candidate: Sequence[TensorObservation],
+    options: TensorComparisonOptions,
+) -> tuple[tuple[TensorObservationComparison, ...], tuple[str, ...]]:
+    reference_by_key = {item.key: item for item in reference}
+    candidate_by_key = {item.key: item for item in candidate}
+    observation_comparisons: list[TensorObservationComparison] = []
+    matched_keys: set[TensorObservationKey] = set()
+    for observation in reference:
         other = candidate_by_key.get(observation.key)
         if other is None:
-            differences.append(
-                TensorDifference(
+            observation_comparisons.append(
+                TensorObservationComparison(
                     probe_name=observation.probe_name,
                     invocation_index=observation.invocation_index,
                     status="mismatch",
@@ -523,12 +632,14 @@ def compare_points(
             )
             continue
         matched_keys.add(observation.key)
-        differences.append(_compare_observations(observation, other, selected))
-    for observation in candidate.observations:
-        if observation.key in matched_keys or observation.key in reference.by_key:
+        observation_comparisons.append(
+            _compare_observations(observation, other, options)
+        )
+    for observation in candidate:
+        if observation.key in matched_keys or observation.key in reference_by_key:
             continue
-        differences.append(
-            TensorDifference(
+        observation_comparisons.append(
+            TensorObservationComparison(
                 probe_name=observation.probe_name,
                 invocation_index=observation.invocation_index,
                 status="mismatch",
@@ -540,19 +651,13 @@ def compare_points(
         )
 
     warnings: list[str] = []
-    reference_keys = [item.key for item in reference.observations]
-    candidate_keys = [item.key for item in candidate.observations]
+    reference_keys = [item.key for item in reference]
+    candidate_keys = [item.key for item in candidate]
     if set(reference_keys) == set(candidate_keys) and reference_keys != candidate_keys:
         warnings.append(
             "candidate observation order differs from reference; stable keys were matched"
         )
-    return TensorComparison(
-        reference=reference,
-        candidate=candidate,
-        options=selected,
-        differences=tuple(differences),
-        warnings=tuple(warnings),
-    )
+    return tuple(observation_comparisons), tuple(warnings)
 
 
 def compare_runs(
@@ -560,7 +665,7 @@ def compare_runs(
     candidate: TensorRun,
     *,
     point_mapping: Mapping[str, str] | None = None,
-    options: TensorCompareOptions | None = None,
+    options: TensorComparisonOptions | None = None,
 ) -> TensorRunComparison:
     """Compare aligned points from two runs."""
 
@@ -587,7 +692,7 @@ def compare_runs(
                 f"candidate point labels do not exist: {sorted(missing_candidate)!r}"
             )
 
-    comparisons = tuple(
+    point_comparisons = tuple(
         compare_points(
             reference_by_label[reference_label],
             candidate_by_label[candidate_label],
@@ -619,19 +724,19 @@ def compare_runs(
     return TensorRunComparison(
         reference=reference,
         candidate=candidate,
-        comparisons=comparisons,
+        point_comparisons=point_comparisons,
         reference_only_points=reference_only,
         candidate_only_points=candidate_only,
         warnings=tuple(warnings),
     )
 
 
-def compare_series(
+def compare_point_series(
     reference: TensorPoint,
     candidates: TensorRun | Sequence[TensorPoint],
     *,
-    options: TensorCompareOptions | None = None,
-) -> TensorSeriesComparison:
+    options: TensorComparisonOptions | None = None,
+) -> TensorPointSeriesComparison:
     """Compare one reference point against an ordered candidate series."""
 
     points = (
@@ -656,10 +761,10 @@ def compare_series(
             default_payload="full",
             points=tuple(points),
         )
-    return TensorSeriesComparison(
+    return TensorPointSeriesComparison(
         reference=reference,
         candidate_run=candidate_run,
-        comparisons=tuple(
+        point_comparisons=tuple(
             compare_points(reference, point, options=options) for point in points
         ),
     )
@@ -668,24 +773,24 @@ def compare_series(
 def _compare_observations(
     reference: TensorObservation,
     candidate: TensorObservation,
-    options: TensorCompareOptions,
-) -> TensorDifference:
+    options: TensorComparisonOptions,
+) -> TensorObservationComparison:
     if reference.shape != candidate.shape:
-        return _metadata_difference(
+        return _metadata_comparison(
             reference,
             candidate,
             f"shape differs: {reference.shape} -> {candidate.shape}",
         )
     dtype_changed = reference.dtype != candidate.dtype
     if dtype_changed and options.dtype_policy == "strict":
-        return _metadata_difference(
+        return _metadata_comparison(
             reference,
             candidate,
             f"dtype differs: {reference.dtype} -> {candidate.dtype}",
         )
 
     if not dtype_changed and reference.sha256 == candidate.sha256:
-        return TensorDifference(
+        return TensorObservationComparison(
             probe_name=reference.probe_name,
             invocation_index=reference.invocation_index,
             status="match",
@@ -703,7 +808,7 @@ def _compare_observations(
 
     if options.mode == "exact" and not dtype_changed:
         if not reference.has_payload or not candidate.has_payload:
-            return TensorDifference(
+            return TensorObservationComparison(
                 probe_name=reference.probe_name,
                 invocation_index=reference.invocation_index,
                 status="mismatch",
@@ -714,7 +819,7 @@ def _compare_observations(
                 total_count=reference.summary.numel,
             )
     elif not reference.has_payload or not candidate.has_payload:
-        return TensorDifference(
+        return TensorObservationComparison(
             probe_name=reference.probe_name,
             invocation_index=reference.invocation_index,
             status="inconclusive",
@@ -731,12 +836,12 @@ def _compare_observations(
     return _compare_full_payloads(reference, candidate, options)
 
 
-def _metadata_difference(
+def _metadata_comparison(
     reference: TensorObservation,
     candidate: TensorObservation,
     reason: str,
-) -> TensorDifference:
-    return TensorDifference(
+) -> TensorObservationComparison:
+    return TensorObservationComparison(
         probe_name=reference.probe_name,
         invocation_index=reference.invocation_index,
         status="mismatch",
@@ -750,8 +855,8 @@ def _metadata_difference(
 def _compare_full_payloads(
     reference: TensorObservation,
     candidate: TensorObservation,
-    options: TensorCompareOptions,
-) -> TensorDifference:
+    options: TensorComparisonOptions,
+) -> TensorObservationComparison:
     reference_tensor = reference.tensor().reshape(-1)
     candidate_tensor = candidate.tensor().reshape(-1)
     numel = reference_tensor.numel()
@@ -782,18 +887,21 @@ def _compare_full_payloads(
                 != candidate_bytes.reshape(-1, item_size)
             ).any(dim=1)
         else:
-            lhs = candidate_chunk.to(compare_dtype)
-            rhs = reference_chunk.to(compare_dtype)
+            candidate_values = candidate_chunk.to(compare_dtype)
+            reference_values = reference_chunk.to(compare_dtype)
             if options.mode == "exact" or not (
-                lhs.is_floating_point() or rhs.is_floating_point()
+                candidate_values.is_floating_point()
+                or reference_values.is_floating_point()
             ):
-                close = lhs == rhs
-                if options.equal_nan and lhs.is_floating_point():
-                    close = close | (torch.isnan(lhs) & torch.isnan(rhs))
+                close = candidate_values == reference_values
+                if options.equal_nan and candidate_values.is_floating_point():
+                    close = close | (
+                        torch.isnan(candidate_values) & torch.isnan(reference_values)
+                    )
             else:
                 close = torch.isclose(
-                    lhs,
-                    rhs,
+                    candidate_values,
+                    reference_values,
                     rtol=options.rtol,
                     atol=options.atol,
                     equal_nan=options.equal_nan,
@@ -842,7 +950,7 @@ def _compare_full_payloads(
         if status == "match"
         else f"tensor values fail {options.mode} comparison"
     )
-    return TensorDifference(
+    return TensorObservationComparison(
         probe_name=reference.probe_name,
         invocation_index=reference.invocation_index,
         status=status,
@@ -902,14 +1010,26 @@ def _key_text(name: str, invocation: int) -> str:
     return f"{name}[{invocation}]"
 
 
-def _issue_text(issue: TensorDifference) -> str:
+def _state_label(state: TensorPoint | TensorProbeSnapshot) -> str:
+    if isinstance(state, TensorPoint):
+        return state.label
+    return f"{state.probe_name} replay {state.replay_index}"
+
+
+def _state_display(state: TensorPoint | TensorProbeSnapshot) -> str:
+    if isinstance(state, TensorPoint):
+        return repr(state.label)
+    return f"{state.probe_name!r} replay={state.replay_index}"
+
+
+def _issue_text(issue: TensorObservationComparison) -> str:
     return (
         f"{_key_text(issue.probe_name, issue.invocation_index)} "
         f"[{issue.status}/{issue.kind}] {issue.reason}"
     )
 
 
-def _options_dict(options: TensorCompareOptions) -> dict[str, object]:
+def _options_dict(options: TensorComparisonOptions) -> dict[str, object]:
     return {
         "mode": options.mode,
         "rtol": options.rtol,
@@ -921,13 +1041,15 @@ def _options_dict(options: TensorCompareOptions) -> dict[str, object]:
 
 
 def _aggregate_rows(
-    comparisons: Sequence[TensorComparison],
+    point_comparisons: Sequence[TensorPointComparison],
     *,
-    include_matches: bool,
+    include_unchanged: bool,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for comparison in comparisons:
-        for row in comparison.rows(include_matches=include_matches):
+    for comparison in point_comparisons:
+        for row in comparison.observation_comparison_rows(
+            include_unchanged=include_unchanged
+        ):
             rows.append(
                 {
                     "reference_point": comparison.reference.label,

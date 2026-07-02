@@ -1,7 +1,7 @@
 """Experimental low-level allocator snapshot helpers.
 
 These names are public for custom analysis, but may change in minor releases.
-The stable user-facing API lives in torch_cudagraph_debug.memory_debug.
+The high-level user-facing API lives in torch_cudagraph_debug.memory_debug.
 """
 
 from .events import (
@@ -10,8 +10,8 @@ from .events import (
     extract_event_window,
     summarize_allocator_events,
 )
-from .models import MemoryStats
-from .totals import summarize_pools
+from .stats import MemoryStats
+from .aggregation import summarize_pools
 from .stacks import (
     AllocationStackCoverage,
     AllocationStackDelta,
@@ -20,11 +20,11 @@ from .stacks import (
     compare_allocation_stacks,
     summarize_allocation_stacks,
 )
-from .summary import (
-    GroupKey,
-    SnapshotInput,
-    TraceEntry,
-    format_before_after,
+from .allocator_snapshot import (
+    MemoryObservationKey,
+    AllocatorSnapshotData,
+    AllocatorTraceEntry,
+    format_comparison,
     format_bytes,
     format_delta_bytes,
     normalize_pool_id,
@@ -43,14 +43,14 @@ __all__ = [
     "AllocationStackDelta",
     "AllocationStackSummary",
     "EventWindow",
-    "GroupKey",
+    "MemoryObservationKey",
     "MemoryStats",
-    "SnapshotInput",
-    "TraceEntry",
+    "AllocatorSnapshotData",
+    "AllocatorTraceEntry",
     "allocation_stack_coverage",
     "compare_allocation_stacks",
     "extract_event_window",
-    "format_before_after",
+    "format_comparison",
     "format_bytes",
     "format_delta_bytes",
     "normalize_pool_id",

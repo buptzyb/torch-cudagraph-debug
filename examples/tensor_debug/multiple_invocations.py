@@ -8,8 +8,8 @@ from __future__ import annotations
 import torch
 
 from torch_cudagraph_debug.tensor_debug import (
-    CompareTensor,
-    RecordTensor,
+    CheckAction,
+    RecordAction,
     TensorProbe,
 )
 
@@ -24,7 +24,7 @@ def main() -> None:
     )
     probe = TensorProbe(
         "repeated.hidden",
-        [RecordTensor(), CompareTensor(expected, rtol=0.0, atol=0.0)],
+        [RecordAction(), CheckAction(expected, rtol=0.0, atol=0.0)],
     )
     try:
         graph = torch.cuda.CUDAGraph()
@@ -38,22 +38,23 @@ def main() -> None:
         for _ in range(2):
             graph.replay()
 
-        probe.assert_ok(synchronize=replay_stream)
-        snapshots = probe.snapshots(synchronize=False)
-        assert len(snapshots) == 3
-        assert [snapshot.replay_index for snapshot in snapshots] == [2, 2, 2]
-        for snapshot in snapshots:
-            expected_tensor = expected[snapshot.invocation_index]
+        probe.assert_check_ok(synchronize=replay_stream)
+        snapshot = probe.snapshot(synchronize=False)
+        assert snapshot.replay_index == 2
+        assert len(snapshot.observations) == 3
+        for observation in snapshot.observations:
+            tensor = observation.tensor()
+            expected_tensor = expected[observation.invocation_index]
             torch.testing.assert_close(
-                snapshot.tensor,
+                tensor,
                 expected_tensor,
                 rtol=0.0,
                 atol=0.0,
             )
             print(
-                f"invocation={snapshot.invocation_index} "
+                f"invocation={observation.invocation_index} "
                 f"replay={snapshot.replay_index} "
-                f"value={snapshot.tensor.tolist()}"
+                f"value={tensor.tolist()}"
             )
         assert output is not None
     finally:

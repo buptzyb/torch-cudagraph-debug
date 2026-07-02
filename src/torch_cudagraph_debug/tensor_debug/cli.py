@@ -8,13 +8,13 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .comparison import (
-    TensorCompareOptions,
+    TensorComparisonOptions,
     compare_points,
     compare_runs,
-    compare_series,
+    compare_point_series,
 )
 from .errors import TensorDebugError
-from .runs import TensorRun
+from .recording import TensorRun
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,11 +28,17 @@ def build_parser() -> argparse.ArgumentParser:
     summary.add_argument("bundle")
 
     compare = commands.add_parser(
-        "compare",
+        "compare-points",
         help="Compare one reference point with one candidate point",
     )
-    compare.add_argument("reference_bundle")
-    compare.add_argument("candidate_bundle")
+    compare.add_argument(
+        "reference_bundle", help="Bundle containing the reference point"
+    )
+    compare.add_argument(
+        "candidate_bundle",
+        nargs="?",
+        help="Bundle containing the candidate point; defaults to the reference bundle",
+    )
     compare.add_argument("--reference-point", required=True)
     compare.add_argument("--candidate-point", required=True)
     _add_compare_options(compare)
@@ -46,11 +52,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_compare_options(run_compare)
 
     series = commands.add_parser(
-        "compare-series",
+        "compare-point-series",
         help="Compare one reference point against every candidate point",
     )
-    series.add_argument("reference_bundle")
-    series.add_argument("candidate_bundle")
+    series.add_argument(
+        "reference_bundle", help="Bundle containing the reference point"
+    )
+    series.add_argument(
+        "candidate_bundle",
+        nargs="?",
+        help="Candidate run bundle; defaults to the reference bundle",
+    )
     series.add_argument("--reference-point", required=True)
     _add_compare_options(series)
     return parser
@@ -75,8 +87,8 @@ def _add_compare_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", type=Path)
 
 
-def _options(args: argparse.Namespace) -> TensorCompareOptions:
-    return TensorCompareOptions(
+def _options(args: argparse.Namespace) -> TensorComparisonOptions:
+    return TensorComparisonOptions(
         mode=args.mode,
         rtol=args.rtol,
         atol=args.atol,
@@ -96,9 +108,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         reference = TensorRun.load(args.reference_bundle, cache_tensors=False)
-        candidate = TensorRun.load(args.candidate_bundle, cache_tensors=False)
+        candidate = TensorRun.load(
+            args.candidate_bundle or args.reference_bundle, cache_tensors=False
+        )
         options = _options(args)
-        if args.command == "compare":
+        if args.command == "compare-points":
             report = compare_points(
                 reference.point(args.reference_point),
                 candidate.point(args.candidate_point),
@@ -106,8 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "compare-runs":
             report = compare_runs(reference, candidate, options=options)
-        elif args.command == "compare-series":
-            report = compare_series(
+        elif args.command == "compare-point-series":
+            report = compare_point_series(
                 reference.point(args.reference_point),
                 candidate,
                 options=options,
@@ -115,10 +129,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:  # pragma: no cover - argparse guarantees a known command
             parser.error(f"unknown command {args.command!r}")
 
-        include_matches = not args.only_changed
-        print(report.to_text(include_matches=include_matches))
+        include_unchanged = not args.only_changed
+        print(report.to_text(include_unchanged=include_unchanged))
         if args.output is not None:
-            paths = report.write(args.output, include_matches=include_matches)
+            paths = report.write(args.output, include_unchanged=include_unchanged)
             for kind, path in paths.items():
                 print(f"{kind}: {path}")
         return 0 if report.ok else 1
@@ -136,17 +150,8 @@ def _summary_text(run: TensorRun) -> str:
     for point in run.points:
         full = sum(item.payload == "full" for item in point.observations)
         summary = len(point.observations) - full
-        replay_indices = sorted(
-            {
-                item.replay_index
-                for item in point.observations
-                if item.replay_index is not None
-            }
-        )
         replay_text = (
-            ",".join(str(item) for item in replay_indices)
-            if replay_indices
-            else "eager"
+            str(point.replay_index) if point.replay_index is not None else "eager"
         )
         lines.append(
             f"  [{point.index}] {point.label}: "

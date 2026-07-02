@@ -32,11 +32,25 @@ def test_tensor_cli_summary_compare_runs_and_series(
     assert main(["summary", str(reference_bundle)]) == 0
     assert "Tensor run 'reference'" in capsys.readouterr().out
 
+    assert (
+        main(
+            [
+                "compare-points",
+                str(reference_bundle),
+                "--reference-point",
+                "forward",
+                "--candidate-point",
+                "forward",
+            ]
+        )
+        == 0
+    )
+
     output = tmp_path / "point-report"
     assert (
         main(
             [
-                "compare",
+                "compare-points",
                 str(reference_bundle),
                 str(candidate_bundle),
                 "--reference-point",
@@ -54,7 +68,7 @@ def test_tensor_cli_summary_compare_runs_and_series(
     assert (
         main(
             [
-                "compare-series",
+                "compare-point-series",
                 str(reference_bundle),
                 str(candidate_bundle),
                 "--reference-point",

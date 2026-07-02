@@ -30,7 +30,7 @@ struct ExpectedTensorConfig {
     int64_t expected_numel = 0;
 };
 
-struct CompareActionConfig {
+struct CheckActionConfig {
     bool enabled = true;
     std::vector<ExpectedTensorConfig> expected;
     double rtol = 1e-5;
@@ -39,19 +39,19 @@ struct CompareActionConfig {
 };
 
 struct ActionConfig {
-    enum class Kind { Print, Record, Compare };
+    enum class Kind { Print, Record, Check };
 
     Kind kind;
     PrintActionConfig print;
     RecordActionConfig record;
-    CompareActionConfig compare;
+    CheckActionConfig check;
 };
 
 enum class NonContiguousPolicy { Error, Copy };
 
 enum class ProbeMode { Capture, Always };
 
-struct TensorSnapshotRecord {
+struct TensorObservationData {
     std::string probe_name;
     uint64_t replay_index = 0;
     uint64_t invocation_index = 0;
@@ -67,7 +67,7 @@ struct TensorSnapshotRecord {
 struct InvocationSlot {
     void* staging = nullptr;
     size_t staging_nbytes = 0;
-    TensorSnapshotRecord snapshot;
+    TensorObservationData observation;
     std::vector<torch::Tensor> source_owners;
 };
 
@@ -99,9 +99,9 @@ class ProbeContext {
     ProbeContext& operator=(const ProbeContext&) = delete;
 
     torch::Tensor enqueue(const torch::Tensor& tensor);
-    pybind11::list records(std::optional<uint64_t> replay_index);
-    void clear_records();
-    pybind11::dict status();
+    pybind11::list observations(std::optional<uint64_t> replay_index);
+    void clear_observations();
+    pybind11::dict check_status();
     void close();
 
     void on_callback(const CallbackPayload& payload) noexcept;
@@ -110,7 +110,7 @@ class ProbeContext {
   private:
     void ensure_open() const;
     void validate_tensor(const torch::Tensor& tensor) const;
-    void validate_compare_actions(
+    void validate_check_actions(
         const torch::Tensor& tensor,
         uint64_t invocation_index) const;
     uint64_t capture_id_for_stream(cudaStream_t stream) const;
@@ -145,7 +145,7 @@ class ProbeContext {
     cudaEvent_t replay_index_ready_event_ = nullptr;
     NonContiguousPolicy non_contiguous_;
     ProbeMode mode_;
-    bool has_latest_record_actions_ = false;
+    bool has_record_action_ = false;
     bool has_callback_actions_ = false;
 
     std::vector<void*> retired_staging_;
@@ -160,7 +160,7 @@ class ProbeContext {
     uint64_t next_invocation_index_ = 0;
     uint64_t eager_callback_count_ = 0;
 
-    bool compare_failed_ = false;
+    bool check_failed_ = false;
     uint64_t failure_replay_index_ = 0;
     int64_t failure_invocation_index_ = -1;
     std::string failure_message_;

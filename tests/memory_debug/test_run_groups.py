@@ -9,7 +9,7 @@ import pytest
 from torch_cudagraph_debug.memory_debug import (
     MemoryBundleError,
     MemoryRunGroup,
-    compare_group_phases,
+    compare_run_group_phases,
 )
 
 from ._helpers import make_run, segment, snapshot
@@ -64,10 +64,10 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
     assert group[0]["end"]._snapshot_cache == {}
     assert group[0]["end"].raw_snapshot()["segments"]
     assert group[0]["end"]._snapshot_cache == {}
-    assert len(report.rank_points) == 12
+    assert len(report.rank_point_entries) == 12
     end_active = next(
         row
-        for row in report.point_summary
+        for row in report.point_aggregates
         if row["point_label"] == "end"
         and row["scope"] == "all"
         and row["metric"] == "active_bytes"
@@ -84,11 +84,12 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
         "text",
         "json",
         "html",
-        "rank_points",
-        "point_summary",
+        "rank_point_entries",
+        "point_aggregates",
     }
     payload = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert payload["aggregation"] == "per_rank_extrema_no_sum"
+    assert payload["kind"] == "run-group-summary"
 
     cached = MemoryRunGroup.load(root, cache_snapshots=True)
     assert cached[0]["end"].raw_snapshot()["segments"]
@@ -167,7 +168,7 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
         )
     candidate = MemoryRunGroup.from_runs(candidate_runs)
 
-    report = compare_group_phases(
+    report = compare_run_group_phases(
         baseline,
         candidate,
         baseline_start="start",
@@ -177,16 +178,16 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
     )
 
     assert tuple(report.rank_comparisons) == (0, 1)
-    assert len(report.rank_phase) == 30
+    assert len(report.rank_decomposition) == 30
     active = next(
         row
-        for row in report.phase_summary
+        for row in report.phase_aggregates
         if row["scope"] == "all" and row["metric"] == "active_bytes"
     )
-    assert active["end_delta_min_bytes"] == 25
-    assert active["end_delta_max_bytes"] == 30
-    assert active["end_delta_max_rank"] == 1
-    assert active["end_delta_spread_bytes"] == 5
+    assert active["end_gap_min_bytes"] == 25
+    assert active["end_gap_max_bytes"] == 30
+    assert active["end_gap_max_rank"] == 1
+    assert active["end_gap_spread_bytes"] == 5
     assert active["identity_holds"] is True
     assert "not summed across ranks" in report.to_text()
 
@@ -195,7 +196,8 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
         "text",
         "json",
         "html",
-        "rank_phase",
-        "phase_summary",
+        "rank_decomposition",
+        "phase_aggregates",
     }
-    assert paths["rank_phase"].is_file()
+    assert paths["rank_decomposition"].is_file()
+    assert report.to_dict()["kind"] == "run-group-phase-comparison"

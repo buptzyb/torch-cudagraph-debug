@@ -8,7 +8,7 @@
 
 namespace torch_cudagraph_debug::tensor_debug {
 
-struct CompareResult {
+struct CheckResult {
     bool ok = true;
     int64_t mismatch_index = -1;
     double actual = 0.0;
@@ -18,7 +18,7 @@ struct CompareResult {
     std::string message;
 };
 
-CompareResult compare_tensor_bytes(
+CheckResult check_tensor_bytes(
     const void* actual,
     const void* expected,
     int64_t numel,

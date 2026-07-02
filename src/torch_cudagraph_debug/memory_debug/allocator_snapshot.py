@@ -7,32 +7,34 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._identity import (
+from ._pool_identity import (
     DEFAULT_POOL_ID,
+    PoolId,
     UNKNOWN_STREAM,
     normalize_pool_id,
     normalize_stream,
     pool_id_label as pool_id_label,
     stream_label as stream_label,
 )
-from .models import LifecycleDelta, MemoryStats
+from .comparison_models import MemoryLifecycleDelta
+from .stats import MemoryStats
 
-SnapshotInput = Sequence[Mapping[str, Any]] | Mapping[str, Any]
+AllocatorSnapshotData = Sequence[Mapping[str, Any]] | Mapping[str, Any]
 ACTIVE_STATES = frozenset(
     {"active_allocated", "active_awaiting_free", "active_pending_free"}
 )
 
 
 @dataclass(frozen=True)
-class GroupKey:
+class MemoryObservationKey:
     """Stable grouping key for one allocator pool on one CUDA stream."""
 
-    pool_id: tuple[Any, ...]
+    pool_id: PoolId
     stream: Any
 
 
 @dataclass(frozen=True)
-class TraceEntry:
+class AllocatorTraceEntry:
     """Normalized allocator trace event from ``_snapshot()["device_traces"]``."""
 
     device_index: int
@@ -44,9 +46,12 @@ class TraceEntry:
     frames: tuple[Mapping[str, Any], ...]
     time_us: int | None
     user_metadata: str
-    pool_id: tuple[Any, ...] | None = None
+    pool_id: PoolId | None = None
 
-def normalize_snapshot(snapshot: SnapshotInput) -> tuple[Mapping[str, Any], ...]:
+
+def normalize_snapshot(
+    snapshot: AllocatorSnapshotData,
+) -> tuple[Mapping[str, Any], ...]:
     """Return normalized segment dictionaries from a PyTorch snapshot shape."""
 
     segments = _segments_from_snapshot(snapshot)
@@ -91,18 +96,20 @@ def normalize_snapshot(snapshot: SnapshotInput) -> tuple[Mapping[str, Any], ...]
     return tuple(normalized)
 
 
-def normalize_trace_entries(snapshot: SnapshotInput) -> tuple[TraceEntry, ...]:
+def normalize_trace_entries(
+    snapshot: AllocatorSnapshotData,
+) -> tuple[AllocatorTraceEntry, ...]:
     """Flatten ``device_traces`` from a private PyTorch snapshot dict."""
 
     if not isinstance(snapshot, Mapping):
         return ()
-    entries: list[TraceEntry] = []
+    entries: list[AllocatorTraceEntry] = []
     for device_index in trace_device_indices(snapshot):
         entries.extend(normalize_device_trace_entries(snapshot, device_index))
     return tuple(entries)
 
 
-def trace_device_indices(snapshot: SnapshotInput) -> tuple[int, ...]:
+def trace_device_indices(snapshot: AllocatorSnapshotData) -> tuple[int, ...]:
     """Return devices with at least one raw allocator trace entry."""
 
     if not isinstance(snapshot, Mapping):
@@ -121,7 +128,9 @@ def trace_device_indices(snapshot: SnapshotInput) -> tuple[int, ...]:
     )
 
 
-def raw_device_trace(snapshot: SnapshotInput, device_index: int) -> Sequence[object]:
+def raw_device_trace(
+    snapshot: AllocatorSnapshotData, device_index: int
+) -> Sequence[object]:
     """Return one raw device trace without normalizing its entries."""
 
     if not isinstance(snapshot, Mapping) or device_index < 0:
@@ -142,12 +151,12 @@ def raw_device_trace(snapshot: SnapshotInput, device_index: int) -> Sequence[obj
 
 
 def normalize_device_trace_entries(
-    snapshot: SnapshotInput,
+    snapshot: AllocatorSnapshotData,
     device_index: int,
     *,
     start: int = 0,
     end: int | None = None,
-) -> tuple[TraceEntry, ...]:
+) -> tuple[AllocatorTraceEntry, ...]:
     """Normalize a bounded slice of one device trace."""
 
     device_trace = raw_device_trace(snapshot, device_index)
@@ -166,11 +175,11 @@ def normalize_device_trace_entries(
 
 def _normalize_trace_entry(
     raw: Mapping[str, Any], device_index: int, trace_index: int
-) -> TraceEntry:
+) -> AllocatorTraceEntry:
     addr = raw.get("addr")
     if addr is None:
         addr = raw.get("device_free")
-    return TraceEntry(
+    return AllocatorTraceEntry(
         device_index=device_index,
         trace_index=trace_index,
         action=str(raw.get("action", "unknown")),
@@ -188,7 +197,9 @@ def _normalize_trace_entry(
     )
 
 
-def summarize_snapshot(snapshot: SnapshotInput) -> dict[GroupKey, MemoryStats]:
+def summarize_snapshot(
+    snapshot: AllocatorSnapshotData,
+) -> dict[MemoryObservationKey, MemoryStats]:
     """Summarize a snapshot by ``(pool, stream)`` group."""
 
     return summarize_segments(normalize_snapshot(snapshot))
@@ -196,10 +207,10 @@ def summarize_snapshot(snapshot: SnapshotInput) -> dict[GroupKey, MemoryStats]:
 
 def summarize_segments(
     segments: Sequence[Mapping[str, Any]],
-) -> dict[GroupKey, MemoryStats]:
-    grouped: dict[GroupKey, list[Mapping[str, Any]]] = defaultdict(list)
+) -> dict[MemoryObservationKey, MemoryStats]:
+    grouped: dict[MemoryObservationKey, list[Mapping[str, Any]]] = defaultdict(list)
     for segment in segments:
-        key = GroupKey(
+        key = MemoryObservationKey(
             normalize_pool_id(segment.get("segment_pool_id", DEFAULT_POOL_ID)),
             normalize_stream(segment.get("stream", UNKNOWN_STREAM)),
         )
@@ -207,41 +218,49 @@ def summarize_segments(
     return {key: _summarize_group(items) for key, items in grouped.items()}
 
 
-def compare_lifecycle(
-    before_segments: Sequence[Mapping[str, Any]],
-    after_segments: Sequence[Mapping[str, Any]],
-) -> dict[GroupKey, LifecycleDelta]:
+def compare_observation_lifecycle(
+    reference_segments: Sequence[Mapping[str, Any]],
+    candidate_segments: Sequence[Mapping[str, Any]],
+) -> dict[MemoryObservationKey, MemoryLifecycleDelta]:
     """Compare segment/block identities in one pass per snapshot."""
 
-    counters: defaultdict[GroupKey, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
-    before_segment_keys = {_segment_key(segment) for segment in before_segments}
-    after_segment_keys = {_segment_key(segment) for segment in after_segments}
-    for key in after_segment_keys - before_segment_keys:
+    counters: defaultdict[MemoryObservationKey, list[int]] = defaultdict(
+        lambda: [0, 0, 0, 0]
+    )
+    reference_segment_keys = {_segment_key(segment) for segment in reference_segments}
+    candidate_segment_keys = {_segment_key(segment) for segment in candidate_segments}
+    for key in candidate_segment_keys - reference_segment_keys:
         counters[key[0]][0] += key[2]
-    for key in before_segment_keys - after_segment_keys:
+    for key in reference_segment_keys - candidate_segment_keys:
         counters[key[0]][1] += key[2]
 
-    before_blocks = _block_map(before_segments)
-    after_blocks = _block_map(after_segments)
-    for block_key, block in after_blocks.items():
+    reference_blocks = _block_map(reference_segments)
+    candidate_blocks = _block_map(candidate_segments)
+    for block_key, block in candidate_blocks.items():
         if str(block.get("state")) not in ACTIVE_STATES:
             continue
-        previous = before_blocks.get(block_key)
-        previous_state = (
-            str(previous.get("state", "missing")) if previous else "missing"
+        reference_block = reference_blocks.get(block_key)
+        reference_state = (
+            str(reference_block.get("state", "missing"))
+            if reference_block
+            else "missing"
         )
-        if previous_state not in ACTIVE_STATES:
+        if reference_state not in ACTIVE_STATES:
             counters[block_key[0]][2] += _int(block.get("size"))
-    for block_key, block in before_blocks.items():
+    for block_key, block in reference_blocks.items():
         if str(block.get("state")) not in ACTIVE_STATES:
             continue
-        current = after_blocks.get(block_key)
-        current_state = str(current.get("state", "missing")) if current else "missing"
-        if current_state == "inactive":
+        candidate_block = candidate_blocks.get(block_key)
+        candidate_state = (
+            str(candidate_block.get("state", "missing"))
+            if candidate_block
+            else "missing"
+        )
+        if candidate_state == "inactive":
             counters[block_key[0]][3] += _int(block.get("size"))
 
     return {
-        key: LifecycleDelta(
+        key: MemoryLifecycleDelta(
             new_segment_bytes=values[0],
             removed_segment_bytes=values[1],
             newly_active_bytes=values[2],
@@ -288,11 +307,16 @@ def format_delta_bytes(value: int) -> str:
     return format_bytes(value)
 
 
-def format_before_after(before: int, after: int, delta: int) -> str:
-    return f"{format_bytes(before)} -> {format_bytes(after)} (delta {format_delta_bytes(delta)})"
+def format_comparison(reference: int, candidate: int, delta: int) -> str:
+    return (
+        f"{format_bytes(reference)} -> {format_bytes(candidate)} "
+        f"(delta {format_delta_bytes(delta)})"
+    )
 
 
-def _segments_from_snapshot(snapshot: SnapshotInput) -> Sequence[Mapping[str, Any]]:
+def _segments_from_snapshot(
+    snapshot: AllocatorSnapshotData,
+) -> Sequence[Mapping[str, Any]]:
     if isinstance(snapshot, Mapping):
         segments = snapshot.get("segments", [])
     else:
@@ -327,9 +351,11 @@ def _summarize_group(
     )
 
 
-def _segment_key(segment: Mapping[str, Any]) -> tuple[GroupKey, int | None, int]:
+def _segment_key(
+    segment: Mapping[str, Any],
+) -> tuple[MemoryObservationKey, int | None, int]:
     return (
-        GroupKey(
+        MemoryObservationKey(
             normalize_pool_id(segment.get("segment_pool_id")),
             normalize_stream(segment.get("stream")),
         ),
@@ -340,10 +366,10 @@ def _segment_key(segment: Mapping[str, Any]) -> tuple[GroupKey, int | None, int]
 
 def _block_map(
     segments: Sequence[Mapping[str, Any]],
-) -> dict[tuple[GroupKey, int | None, int], Mapping[str, Any]]:
+) -> dict[tuple[MemoryObservationKey, int | None, int], Mapping[str, Any]]:
     result = {}
     for segment in segments:
-        key = GroupKey(
+        key = MemoryObservationKey(
             normalize_pool_id(segment.get("segment_pool_id")),
             normalize_stream(segment.get("stream")),
         )

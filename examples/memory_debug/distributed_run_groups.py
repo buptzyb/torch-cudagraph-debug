@@ -2,7 +2,7 @@
 
 Run with:
   torchrun --standalone --nproc-per-node=2 \
-    examples/memory_debug/distributed_groups.py --output-dir /tmp/tcgd-groups
+    examples/memory_debug/distributed_run_groups.py --output-dir /tmp/tcgd-groups
 """
 
 from __future__ import annotations
@@ -18,9 +18,8 @@ import torch.distributed as dist
 from torch_cudagraph_debug.memory_debug import (
     MemoryRecorder,
     MemoryRunGroup,
-    compare_group_phases,
+    compare_run_group_phases,
 )
-
 
 MIB = 1024 * 1024
 
@@ -47,10 +46,10 @@ def _record_rank_run(
         group_id=group_id,
         world_size=world_size,
         bundle_dir=bundle_dir,
-        run_metadata={"scenario": name, "example": "distributed-groups"},
+        run_metadata={"scenario": name, "example": "distributed-run-groups"},
     )
     static_state = torch.empty(4 * MIB, dtype=torch.uint8, device="cuda")
-    recorder.mark("phase_start", metadata={"rank": rank})
+    recorder.record_point("phase_start", metadata={"rank": rank})
 
     allocation_bytes = (8 + rank) * MIB
     if use_graph_pool:
@@ -71,7 +70,7 @@ def _record_rank_run(
         )
         phase_state.fill_(1)
 
-    recorder.mark("phase_end", metadata={"rank": rank})
+    recorder.record_point("phase_end", metadata={"rank": rank})
     recorder.finish()
     assert static_state.numel() == 4 * MIB
     assert phase_state.numel() == allocation_bytes
@@ -131,7 +130,7 @@ def main() -> None:
             candidate = MemoryRunGroup.load(output_dir / "candidate")
             baseline_summary = baseline.summary()
             candidate_summary = candidate.summary()
-            phase = compare_group_phases(
+            phase = compare_run_group_phases(
                 baseline,
                 candidate,
                 baseline_start="phase_start",
@@ -145,7 +144,7 @@ def main() -> None:
 
             assert baseline.ranks == tuple(range(world_size))
             assert candidate.ranks == tuple(range(world_size))
-            assert all(row["identity_holds"] for row in phase.rank_phase)
+            assert all(row["identity_holds"] for row in phase.rank_decomposition)
             print(baseline_summary.to_text())
             print()
             print(phase.to_text(include_unchanged=False))

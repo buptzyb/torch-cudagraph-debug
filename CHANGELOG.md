@@ -5,11 +5,14 @@
 ### Added
 
 - `memory_debug`, a Python-only CUDA allocator analysis domain built around
-  `MemoryRecorder`, immutable `MemoryRun` and `MemoryPoint` objects, and
-  explicit point ownership.
-- Timeline, same-run two-point, independent-run two-point, and four-point phase
+  low-ceremony `MemoryProbe` snapshots plus complete `MemoryRecorder`,
+  `MemoryRun`, and `MemoryPoint` workflows.
+- Ownerless `MemoryObservation` leaves shared by standalone snapshots and
+  recorded points, with explicit ownership on their containing objects.
+- Snapshot, same-run point, independent-run point, timeline, and four-point phase
   comparison modes with allocator-wide `all`, `default`, and `private`
-  totals.
+  totals. Snapshot and Point comparisons are sibling result types and direct
+  Probe analysis never constructs a synthetic Point or Run.
 - Automatic discovery of every `segment_pool_id` with pool and raw
   `(pool, stream)` state, absolute values, signed deltas, and same-run
   lifecycle observations.
@@ -19,7 +22,8 @@
   attribution with configurable warning or error policies.
 - Allocation cohort lifetime analysis with address-reuse generation splitting,
   size histograms, event-backed birth and release stacks, transient
-  generations, live-byte peaks, and snapshot-inferred confidence.
+  generations, live-byte peaks, snapshot-inferred confidence, and explicit
+  `run` or `probe` source metadata.
 - Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
   summary and rank-paired phase analysis without summing memory across GPUs.
 - Canonical gzip JSON run bundles with atomic writes, exact manifest fields,
@@ -30,16 +34,17 @@
 - Result-owned text, nested JSON, flattened CSV, and standalone HTML reports.
   `include_unchanged=False` consistently filters text, HTML, and CSV while
   JSON remains complete.
-- The `tcgd-memory` CLI with lifetime, timeline, two-run, phase, and
-  multi-rank group commands.
+- The `tcgd-memory` CLI with summary, timeline, allocation-lifetime,
+  point-comparison, phase-comparison, and multi-rank run-group commands.
 - Public experimental allocator helpers under `memory_debug.advanced` using
-  one `Mapping[GroupKey, MemoryStats]` state representation.
-- `TensorProbe` with `PrintTensor`, `RecordTensor`, and `CompareTensor`
-  actions, immutable `TensorProbeStatus`, and typed tensor snapshots.
+  one `Mapping[MemoryObservationKey, MemoryStats]` state representation.
+- `TensorProbe` with `PrintAction`, `RecordAction`, and `CheckAction`
+  actions, immutable `TensorCheckStatus`, and one aggregate
+  `TensorProbeSnapshot` per queried replay.
 - Capture-only and always-active tensor probing, gradient hook handles,
-  invocation-indexed expected values, sticky comparison status, and explicit
+  invocation-indexed expected values, sticky check status, and explicit
   non-contiguous copy mode.
-- A per-probe CUDA `int64` replay counter shared by record, print, compare, and
+- A per-probe CUDA `int64` replay counter shared by record, print, check, and
   status results, with 1-based graph replay indices, explicit device selection,
   bool/stream/device query synchronization, query-time transfer for
   callback-free recording, and callback-counter staging reuse.
@@ -49,11 +54,13 @@
 - Immutable `TensorRun`, `TensorPoint`, and `TensorObservation` models with
   strict content-addressed bundles, full or summary payloads, SHA-256
   verification, numerical summaries, deduplication, and lazy CPU-only loading.
-- Point, same-label run, and replay-series comparison with allclose or exact
-  policies, strict or promoted dtypes, first-divergence and worst-error
-  reporting, and explicit match/mismatch/inconclusive results.
+- Sibling standalone snapshot and point results plus same-label run and
+  replay-series comparisons with allclose or exact policies, strict or promoted dtypes, first-divergence and
+  worst-error reporting, and explicit match/mismatch/inconclusive results.
+- Private domain collectors shared by each domain's Probe and Recorder
+  workflows without introducing a synthetic cross-domain base class.
 - Text, JSON, CSV, and standalone HTML tensor reports plus the `tcgd-tensor`
-  summary, point comparison, run comparison, and series comparison CLI.
+  `summary`, `compare-points`, `compare-runs`, and `compare-point-series` CLI.
 - TensorBoard export through `export_snapshots_to_tensorboard`.
 - Categorized, runnable Tensor Debug, Memory Debug, CLI, distributed, and
   TensorBoard examples with quickstarts and complete synthetic workflows.

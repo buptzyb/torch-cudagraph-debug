@@ -13,12 +13,11 @@ from pathlib import Path
 import torch
 
 from torch_cudagraph_debug.memory_debug import (
-    AttributionOptions,
+    MemoryAttributionOptions,
     MemoryHistoryError,
     MemoryRecorder,
     MemoryRun,
 )
-
 
 MIB = 1024 * 1024
 
@@ -30,7 +29,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def _all_total(comparison):
-    return next(item for item in comparison.totals if item.scope == "all")
+    return next(
+        item for item in comparison.allocator_scope_comparisons if item.scope == "all"
+    )
 
 
 def _snapshot_only(output_dir: Path) -> None:
@@ -43,13 +44,13 @@ def _snapshot_only(output_dir: Path) -> None:
         rank=0,
         bundle_dir=bundle_dir,
     )
-    recorder.mark("before")
+    recorder.record_point("before")
     visible = torch.empty(16 * MIB, dtype=torch.uint8, device="cuda")
-    recorder.mark("after_alloc")
+    recorder.record_point("after_alloc")
     del visible
     gc.collect()
     torch.cuda.synchronize()
-    recorder.mark("after_free")
+    recorder.record_point("after_free")
     recorder.finish()
 
     run = MemoryRun.load(bundle_dir, cache_snapshots=False)
@@ -60,15 +61,15 @@ def _snapshot_only(output_dir: Path) -> None:
     warned = run.compare(
         "before",
         "after_alloc",
-        attribution=AttributionOptions(
+        attribution=MemoryAttributionOptions(
             stacks=True,
             events=True,
             on_missing="warn",
             stack_depth=4,
         ),
     )
-    assert warned.after_stack_coverage is not None
-    assert warned.after_stack_coverage.unattributed_bytes >= 16 * MIB
+    assert warned.candidate_stack_coverage is not None
+    assert warned.candidate_stack_coverage.unattributed_bytes >= 16 * MIB
     assert warned.events_available is False
     assert any("coverage is incomplete" in item for item in warned.warnings)
     assert any("allocator event history" in item for item in warned.warnings)
@@ -79,7 +80,7 @@ def _snapshot_only(output_dir: Path) -> None:
         run.compare(
             "before",
             "after_alloc",
-            attribution=AttributionOptions(
+            attribution=MemoryAttributionOptions(
                 stacks=True,
                 events=True,
                 on_missing="error",
@@ -94,7 +95,7 @@ def _snapshot_only(output_dir: Path) -> None:
     inferred = run.lifetimes(
         born_between=("before", "after_alloc"),
         through="after_free",
-        attribution=AttributionOptions(
+        attribution=MemoryAttributionOptions(
             events=False,
             on_missing="warn",
             stack_depth=4,
@@ -145,23 +146,23 @@ def _full_history(output_dir: Path) -> None:
         rank=0,
         bundle_dir=bundle_dir,
     )
-    recorder.mark("before_work")
+    recorder.record_point("before_work")
 
     persistent = torch.empty(32 * MIB, dtype=torch.uint8, device="cuda")
     transient = torch.empty(16 * MIB, dtype=torch.uint8, device="cuda")
     del transient
     gc.collect()
     torch.cuda.synchronize()
-    recorder.mark("after_work")
+    recorder.record_point("after_work")
 
     del persistent
     gc.collect()
     torch.cuda.synchronize()
-    recorder.mark("after_cleanup")
+    recorder.record_point("after_cleanup")
     recorder.finish()
 
     run = MemoryRun.load(bundle_dir, cache_snapshots=False)
-    options = AttributionOptions(
+    options = MemoryAttributionOptions(
         stacks=True,
         events=True,
         lifetimes=True,
@@ -175,44 +176,57 @@ def _full_history(output_dir: Path) -> None:
         "after_work",
         attribution=options,
     )
-    assert comparison.before_stack_coverage is not None
-    assert comparison.after_stack_coverage is not None
-    assert comparison.after_stack_coverage.attributed_bytes >= 32 * MIB
-    assert comparison.allocation_stacks
+    assert comparison.reference_stack_coverage is not None
+    assert comparison.candidate_stack_coverage is not None
+    assert comparison.candidate_stack_coverage.attributed_bytes >= 32 * MIB
+    assert comparison.allocation_stack_comparisons
     assert comparison.events_available is True
     assert comparison.events_complete is True
     assert comparison.allocator_events
     assert comparison.allocation_lifetimes is not None
     assert comparison.allocation_lifetimes.history_available is True
     assert comparison.allocation_lifetimes.history_complete is True
-    assert sum(
-        item.event_exact_birth_bytes
-        for item in comparison.allocation_lifetimes.cohorts
-    ) >= 48 * MIB
-    assert sum(
-        item.event_exact_release_bytes
-        for item in comparison.allocation_lifetimes.cohorts
-    ) >= 16 * MIB
+    assert (
+        sum(
+            item.event_exact_birth_bytes
+            for item in comparison.allocation_lifetimes.cohorts
+        )
+        >= 48 * MIB
+    )
+    assert (
+        sum(
+            item.event_exact_release_bytes
+            for item in comparison.allocation_lifetimes.cohorts
+        )
+        >= 16 * MIB
+    )
     comparison_paths = comparison.write(output_dir / "full-history-comparison")
     assert comparison_paths["events"].is_file()
     assert comparison_paths["cohorts"].is_file()
 
     timeline = run.timeline(attribution=options)
-    assert len(timeline.adjacent) == 2
+    assert len(timeline.point_comparisons) == 2
     assert all(
-        item.events_available and item.events_complete for item in timeline.adjacent
+        item.events_available and item.events_complete
+        for item in timeline.point_comparisons
     )
     assert timeline.allocation_lifetimes is not None
     assert timeline.allocation_lifetimes.history_available is True
     assert timeline.allocation_lifetimes.history_complete is True
-    assert sum(
-        item.event_exact_birth_bytes
-        for item in timeline.allocation_lifetimes.cohorts
-    ) >= 48 * MIB
-    assert sum(
-        item.event_exact_release_bytes
-        for item in timeline.allocation_lifetimes.cohorts
-    ) >= 48 * MIB
+    assert (
+        sum(
+            item.event_exact_birth_bytes
+            for item in timeline.allocation_lifetimes.cohorts
+        )
+        >= 48 * MIB
+    )
+    assert (
+        sum(
+            item.event_exact_release_bytes
+            for item in timeline.allocation_lifetimes.cohorts
+        )
+        >= 48 * MIB
+    )
     timeline_paths = timeline.write(
         output_dir / "full-history-timeline",
         include_unchanged=False,
