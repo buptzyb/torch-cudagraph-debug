@@ -16,6 +16,80 @@ collection code; both workflows use the same ownerless Observation leaf type.
 The package targets Linux, Python 3.10+, and CUDA-enabled PyTorch 2.6+. Source
 builds use the PyTorch and CUDA toolchain in the target environment.
 
+## Architecture at a Glance
+
+```mermaid
+flowchart TB
+    APP["Application or test code"]
+
+    subgraph DOMAINS["Two symmetric debug domains"]
+        direction LR
+
+        subgraph TENSOR["tensor_debug"]
+            direction TB
+            TP["TensorProbe"]
+            TPS["TensorProbeSnapshot"]
+            TR["TensorRecorder"]
+            TRUN["TensorRun -> TensorPoint"]
+            TO["TensorObservation<br/>ownerless shared leaf"]
+            TC["Private collection<br/>_TensorCollector / _EagerTensorCollector"]
+            TSRC["PyTorch tensors + native C++/CUDA<br/>replay counter, D2H staging, callbacks"]
+            TB["Optional .tcgd-tensor bundle"]
+            TA["Snapshot / point / run / series comparison"]
+
+            TP -->|quick workflow| TPS
+            TPS --> TO
+            TR -->|complete workflow| TRUN
+            TRUN --> TO
+            TRUN --> TB
+            TP -. uses .-> TC
+            TR -. uses .-> TC
+            TC --> TSRC
+            TO --> TA
+            TB --> TA
+        end
+
+        subgraph MEMORY["memory_debug"]
+            direction TB
+            MP["MemoryProbe"]
+            MPS["MemoryProbeSnapshot"]
+            MR["MemoryRecorder"]
+            MRUN["MemoryRun -> MemoryPoint"]
+            MO["MemoryObservation<br/>ownerless shared leaf"]
+            MC["Private collection<br/>_MemoryCollector"]
+            MSRC["PyTorch CUDA allocator<br/>_snapshot() + optional allocator history"]
+            MB["Optional .tcgd-memory bundle"]
+            MA["Snapshot / point / timeline / lifetime /<br/>phase / run-group analysis"]
+
+            MP -->|quick workflow| MPS
+            MPS --> MO
+            MR -->|complete workflow| MRUN
+            MRUN --> MO
+            MRUN --> MB
+            MP -. uses .-> MC
+            MR -. uses .-> MC
+            MC --> MSRC
+            MO --> MA
+            MB --> MA
+        end
+    end
+
+    APP --> TP
+    APP --> TR
+    APP --> MP
+    APP --> MR
+
+    TA --> TOUT["Text / JSON / CSV / HTML<br/>tcgd-tensor + TensorBoard"]
+    MA --> MOUT["Text / JSON / CSV / HTML<br/>tcgd-memory"]
+```
+
+The same vocabulary is used in both domains. `Probe` is the quick, bundle-free
+workflow; `Recorder` owns a complete named run and optional persistence. Both
+reuse private collection code and converge on ownerless `Observation` leaves,
+while snapshot and point comparisons remain sibling result types. See the
+[detailed architecture](docs/architecture.md) for ownership and lifecycle
+rules.
+
 ## Install
 
 Source installation currently builds the native tensor extension for the whole
@@ -241,6 +315,7 @@ Continue with the [Memory Debug guide](docs/memory_debug.md), the
 
 | Resource | Purpose |
 |---|---|
+| [Architecture](docs/architecture.md) | Workflow layers, shared data model, ownership, and Collector boundaries |
 | [Tensor Debug guide](docs/tensor_debug.md) | Quick probes, eager/CG runs, bundles, differential comparison, gradients, TensorBoard |
 | [Memory Debug guide](docs/memory_debug.md) | Quick probes, recording, history policy, timelines, lifetimes, phases, groups, reports, CLI |
 | [API reference](docs/api.md) | Public signatures, result models, errors, and experimental helpers |
