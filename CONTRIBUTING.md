@@ -24,6 +24,7 @@ Run local checks before opening a pull request:
 ```bash
 python -m py_compile $(find src tests examples -name '*.py')
 python -m ruff check src tests examples
+python -m ruff format --check src tests examples
 python -m pytest -q tests
 python -m build --sdist --no-isolation
 python -m twine check dist/*

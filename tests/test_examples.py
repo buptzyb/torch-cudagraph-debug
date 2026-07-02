@@ -37,9 +37,9 @@ def test_example_package_imports_resolve() -> None:
             for alias in node.names:
                 if alias.name == "*":
                     continue
-                assert hasattr(
-                    module, alias.name
-                ), f"{path}: {node.module}.{alias.name} is not exported"
+                assert hasattr(module, alias.name), (
+                    f"{path}: {node.module}.{alias.name} is not exported"
+                )
 
 
 def test_example_index_covers_every_script_once() -> None:
@@ -168,9 +168,9 @@ def test_public_markdown_links_resolve() -> None:
             assert target_path.is_file(), f"{document}: missing link target {target}"
             if separator and anchor:
                 target_text = target_path.read_text(encoding="utf-8")
-                assert anchor in _heading_anchors(
-                    target_text
-                ), f"{document}: missing anchor {target}"
+                assert anchor in _heading_anchors(target_text), (
+                    f"{document}: missing anchor {target}"
+                )
 
 
 def test_api_reference_covers_every_supported_export() -> None:
@@ -178,9 +178,9 @@ def test_api_reference_covers_every_supported_export() -> None:
     modules = (torch_cudagraph_debug, tensor_debug, memory_debug, advanced)
     for module in modules:
         for name in module.__all__:
-            assert (
-                name in reference
-            ), f"docs/api.md does not cover {module.__name__}.{name}"
+            assert name in reference, (
+                f"docs/api.md does not cover {module.__name__}.{name}"
+            )
 
 
 def test_public_markdown_has_balanced_fences() -> None:

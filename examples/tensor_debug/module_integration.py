@@ -79,8 +79,7 @@ def main() -> None:
         )
         assert output is not None
         print(
-            f"recorded {snapshot.probe_name} "
-            f"with shape {snapshot.observation().shape}"
+            f"recorded {snapshot.probe_name} with shape {snapshot.observation().shape}"
         )
     finally:
         probe.close()

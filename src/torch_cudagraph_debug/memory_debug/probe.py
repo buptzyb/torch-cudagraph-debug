@@ -59,8 +59,7 @@ class MemoryProbe:
     ) -> MemoryProbeSnapshot:
         index = self._next_index
         marker = (
-            "torch-cudagraph-debug:memory-probe:"
-            f"{self._probe_id}:{index}:{self.name}"
+            f"torch-cudagraph-debug:memory-probe:{self._probe_id}:{index}:{self.name}"
         )
         capture = self._collector.capture(marker, synchronize=synchronize)
         observations = tuple(
