@@ -25,7 +25,8 @@
 
 ```bash
 python -m py_compile $(find src tests examples -name '*.py')
-bash -n examples/memory_debug/cli_workflows.sh
+bash -n examples/tensor_debug/cli/workflows.sh
+bash -n examples/memory_debug/cli/workflows.sh
 python -m ruff check src tests examples
 python -m ruff format --check src tests examples
 python -m pytest -q tests/test_terminology.py
@@ -108,36 +109,36 @@ Run every supported single-GPU example from the installed package:
 EXAMPLE_ROOT="${TCGD_RUN_ROOT}/examples"
 mkdir -p "${EXAMPLE_ROOT}"
 
-python "${TCGD_REPO_ROOT}/examples/tensor_debug/quickstart.py"
-python "${TCGD_REPO_ROOT}/examples/tensor_debug/snapshot_comparison.py"
-python "${TCGD_REPO_ROOT}/examples/tensor_debug/record_and_check.py"
-python "${TCGD_REPO_ROOT}/examples/tensor_debug/multiple_invocations.py"
-python "${TCGD_REPO_ROOT}/examples/tensor_debug/gradient_probes.py"
-python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe_modes.py"
-python "${TCGD_REPO_ROOT}/examples/tensor_debug/module_integration.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe/quickstart.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe/snapshot_comparison.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe/replay_comparison.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe/actions.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe/gradients.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe/capture_modes.py"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/probe/module_integration.py"
 
-python "${TCGD_REPO_ROOT}/examples/tensor_debug/eager_vs_cuda_graph.py" \
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/recorder/eager_vs_cuda_graph.py" \
   --output-dir "${EXAMPLE_ROOT}/tensor-eager-vs-cg"
-python "${TCGD_REPO_ROOT}/examples/tensor_debug/replay_series.py" \
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/recorder/forward_backward.py" \
+  --output-dir "${EXAMPLE_ROOT}/tensor-forward-backward"
+python "${TCGD_REPO_ROOT}/examples/tensor_debug/recorder/replay_series.py" \
   --output-dir "${EXAMPLE_ROOT}/tensor-series"
-tcgd-tensor summary "${EXAMPLE_ROOT}/tensor-eager-vs-cg/eager.tcgd-tensor"
-tcgd-tensor compare-points \
-  "${EXAMPLE_ROOT}/tensor-eager-vs-cg/eager.tcgd-tensor" \
-  "${EXAMPLE_ROOT}/tensor-eager-vs-cg/cuda-graph.tcgd-tensor" \
-  --reference-point forward --candidate-point replay-1 \
-  --output "${EXAMPLE_ROOT}/tensor-cli-report"
+bash "${TCGD_REPO_ROOT}/examples/tensor_debug/cli/workflows.sh" \
+  "${EXAMPLE_ROOT}/tensor-cli"
 
-python "${TCGD_REPO_ROOT}/examples/memory_debug/quickstart.py"
-python "${TCGD_REPO_ROOT}/examples/memory_debug/snapshot_comparison.py"
-python "${TCGD_REPO_ROOT}/examples/memory_debug/timeline_and_reports.py" \
+python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/quickstart.py"
+python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/snapshot_comparison.py"
+python "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/timeline_and_reports.py" \
   --output-dir "${EXAMPLE_ROOT}/timeline"
-python "${TCGD_REPO_ROOT}/examples/memory_debug/attribution_modes.py" \
-  --output-dir "${EXAMPLE_ROOT}/attribution"
-python "${TCGD_REPO_ROOT}/examples/memory_debug/allocation_lifetimes.py" \
+python "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/history_requirements.py" \
+  --output-dir "${EXAMPLE_ROOT}/history"
+python "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/stack_and_event_attribution.py" \
+  --output-dir "${EXAMPLE_ROOT}/stack-events"
+python "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/allocation_lifetimes.py" \
   --output-dir "${EXAMPLE_ROOT}/lifetimes"
-python "${TCGD_REPO_ROOT}/examples/memory_debug/compare_runs_and_phases.py" \
+python "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/compare_runs_and_phases.py" \
   --output-dir "${EXAMPLE_ROOT}/runs"
-bash "${TCGD_REPO_ROOT}/examples/memory_debug/cli_workflows.sh" \
+bash "${TCGD_REPO_ROOT}/examples/memory_debug/cli/workflows.sh" \
   single "${EXAMPLE_ROOT}/cli-single"
 ```
 
@@ -155,10 +156,10 @@ zero skips, then cover rank-local run groups and the remaining CLI commands:
 TCGD_TEST_INSTALLED=1 TCGD_FAIL_ON_SKIP=1 python -m pytest -q "${TCGD_REPO_ROOT}/tests"
 
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
-  "${TCGD_REPO_ROOT}/examples/memory_debug/distributed_run_groups.py" \
+  "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/distributed_run_groups.py" \
   --output-dir "${EXAMPLE_ROOT}/groups"
 NPROC_PER_NODE=2 bash \
-  "${TCGD_REPO_ROOT}/examples/memory_debug/cli_workflows.sh" \
+  "${TCGD_REPO_ROOT}/examples/memory_debug/cli/workflows.sh" \
   distributed "${EXAMPLE_ROOT}/cli-distributed"
 ```
 

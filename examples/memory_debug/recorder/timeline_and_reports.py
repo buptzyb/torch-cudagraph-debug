@@ -1,7 +1,7 @@
 """Persist a run, reload it, and export a timeline in every report format.
 
 Run with:
-  python examples/memory_debug/timeline_and_reports.py --output-dir /tmp/tcgd-timeline
+  python examples/memory_debug/recorder/timeline_and_reports.py --output-dir /tmp/tcgd-timeline
 """
 
 from __future__ import annotations

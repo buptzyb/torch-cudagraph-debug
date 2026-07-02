@@ -1,6 +1,6 @@
 """Record one tensor from CUDA Graph replay.
 
-Run with: python examples/tensor_debug/quickstart.py
+Run with: python examples/tensor_debug/probe/quickstart.py
 """
 
 from __future__ import annotations

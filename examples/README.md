@@ -1,93 +1,85 @@
 # Examples
 
-The examples are organized by debugging workflow rather than by individual
-classes. Install `torch-cudagraph-debug` into a CUDA-enabled PyTorch
-environment before running them. Every script contains assertions and exits
-nonzero when the demonstrated behavior is unavailable.
+Examples follow the same two workflows as the public API:
 
-Generated bundles, reports, and TensorBoard logs belong outside the source
-checkout. The commands below use `/tmp` for that reason.
+- `Probe` examples provide quick, local inspection without bundles.
+- `Recorder -> Run` examples preserve named points for reports and offline analysis.
+- `CLI` examples generate their own bundles and exercise the complete command surface.
 
-## Tensor Debug Learning Path
+Every script uses a deterministic workload, asserts the behavior it demonstrates,
+and exits nonzero when that behavior is unavailable. Install
+`torch-cudagraph-debug` in a CUDA-enabled PyTorch environment before running
+them. Persistent outputs belong outside the source checkout; commands below use
+`/tmp`.
 
-| Order | Example | Main capability | Requirement |
+## Tensor Debug
+
+Read the [Tensor Debug example guide](tensor_debug/README.md) for lifecycle and
+output details.
+
+### Probe Workflow
+
+| Order | User question | Example | Primary API |
 |---:|---|---|---|
-| 1 | [Tensor quickstart](tensor_debug/quickstart.py) | `RecordAction`, sequential hidden states, stream-scoped query | 1 GPU |
-| 2 | [Snapshot comparison](tensor_debug/snapshot_comparison.py) | eager-to-CUDA-Graph comparison without bundles | 1 GPU |
-| 3 | [Record and check](tensor_debug/record_and_check.py) | snapshots, typed status, successful and failed checks | 1 GPU |
-| 4 | [Multiple invocations](tensor_debug/multiple_invocations.py) | one probe with ordered capture slots | 1 GPU |
-| 5 | [Gradient probes](tensor_debug/gradient_probes.py) | activation and parameter gradient hooks | 1 GPU |
-| 6 | [Probe modes](tensor_debug/probe_modes.py) | capture-only, always-active, non-contiguous error/copy | 1 GPU |
-| 7 | [Module integration](tensor_debug/module_integration.py) | configurable probe inside `torch.nn.Module` | 1 GPU |
-| 8 | [Eager vs CUDA Graph](tensor_debug/eager_vs_cuda_graph.py) | `TensorRecorder`, persisted runs, offline point comparison | 1 GPU |
-| 9 | [Replay series](tensor_debug/replay_series.py) | summary/full payloads, three-state analysis, replay drift | 1 GPU |
+| 1 | What did sequential hidden states contain on the latest replay? | [Quickstart](tensor_debug/probe/quickstart.py) | `TensorProbe`, `RecordAction`, `snapshot()` |
+| 2 | Do eager and graph execution produce the same hidden value? | [Snapshot comparison](tensor_debug/probe/snapshot_comparison.py) | `compare_snapshots()` |
+| 3 | Which values changed between two replays of one graph? | [Replay comparison](tensor_debug/probe/replay_comparison.py) | `TensorProbe.compare()` |
+| 4 | How do online print, record, and expected-value checks behave? | [Probe actions](tensor_debug/probe/actions.py) | `PrintAction`, `RecordAction`, `CheckAction` |
+| 5 | What are an activation gradient and a final parameter gradient? | [Gradients](tensor_debug/probe/gradients.py) | `TensorProbe.watch_grad()` |
+| 6 | When does a probe run, and how are non-contiguous tensors handled? | [Capture modes](tensor_debug/probe/capture_modes.py) | `when`, `non_contiguous` |
+| 7 | Where should a probe be placed in a real module? | [Module integration](tensor_debug/probe/module_integration.py) | `TensorProbe` in `torch.nn.Module` |
 
-Read the [Tensor Debug guide](../docs/tensor_debug.md) for concepts and
-[Tensor Debug examples](tensor_debug/README.md) for expected output.
+### Recorder And Run Workflow
 
-## Memory Debug Learning Path
-
-| Order | Example | Main capability | Requirement |
+| Order | User question | Example | Primary API |
 |---:|---|---|---|
-| 1 | [Memory quickstart](memory_debug/quickstart.py) | `MemoryProbe`, standalone snapshots, direct comparison | 1 GPU |
-| 2 | [Snapshot comparison](memory_debug/snapshot_comparison.py) | independent Probe endpoints and cross-probe comparison | 1 GPU |
-| 3 | [Timeline and reports](memory_debug/timeline_and_reports.py) | persistence, reload, stack attribution, text/JSON/CSV/HTML | 1 GPU |
-| 4 | [Attribution modes](memory_debug/attribution_modes.py) | missing-history policy, snapshot inference, full-history attribution | 1 GPU |
-| 5 | [Allocation lifetimes](memory_debug/allocation_lifetimes.py) | active-at and born-between cohorts with exact events | 1 GPU |
-| 6 | [Compare runs and phases](memory_debug/compare_runs_and_phases.py) | cross-run comparison, private-pool mapping, four-point phase | 1 GPU |
-| 7 | [Distributed run groups](memory_debug/distributed_run_groups.py) | rank-local bundles, group summary, group phase | 2+ GPUs |
-| 8 | [CLI workflows](memory_debug/cli_workflows.sh) | all seven `tcgd-memory` commands | 1 or 2+ GPUs |
+| 1 | Does a complete eager run match a CUDA Graph run? | [Eager vs CUDA Graph](tensor_debug/recorder/eager_vs_cuda_graph.py) | `TensorRecorder`, `compare_points()`, `compare_runs()` |
+| 2 | How are forward activations and backward gradients persisted together? | [Forward and backward](tensor_debug/recorder/forward_backward.py) | `observe()`, `watch_grad()`, `snapshot_run()` |
+| 3 | On which replay did drift first appear? | [Replay series](tensor_debug/recorder/replay_series.py) | summary/full payloads, `compare_point_series()` |
 
-Read the [Memory Debug guide](../docs/memory_debug.md) for concepts and
-[Memory Debug examples](memory_debug/README.md) before enabling allocator
-history in a long-running process.
+### CLI Workflow
+
+| User question | Example | Commands covered |
+|---|---|---|
+| How are persisted tensor runs inspected in automation? | [CLI workflows](tensor_debug/cli/workflows.sh) | all four `tcgd-tensor` commands |
+
+## Memory Debug
+
+Read the [Memory Debug example guide](memory_debug/README.md) before enabling
+allocator history in a long-running process.
+
+### Probe Workflow
+
+| Order | User question | Example | Primary API |
+|---:|---|---|---|
+| 1 | Which pools and streams grew around graph capture and replay? | [Quickstart](memory_debug/probe/quickstart.py) | `MemoryProbe`, `snapshot()`, `compare()` |
+| 2 | How are independently collected allocator endpoints compared? | [Snapshot comparison](memory_debug/probe/snapshot_comparison.py) | `compare_snapshots()` |
+
+### Recorder And Run Workflow
+
+| Order | User question | Example | History mode |
+|---:|---|---|---|
+| 1 | How is a capture timeline persisted, loaded, and exported? | [Timeline and reports](memory_debug/recorder/timeline_and_reports.py) | state |
+| 2 | What remains available when allocator history is disabled? | [History requirements](memory_debug/recorder/history_requirements.py) | disabled |
+| 3 | Which stack and allocator events caused growth? | [Stack and event attribution](memory_debug/recorder/stack_and_event_attribution.py) | all |
+| 4 | Which allocations survived or were born between named points? | [Allocation lifetimes](memory_debug/recorder/allocation_lifetimes.py) | all |
+| 5 | How do baseline and candidate phases differ across private pools? | [Compare runs and phases](memory_debug/recorder/compare_runs_and_phases.py) | disabled |
+| 6 | How are per-rank runs summarized without summing GPU memory? | [Distributed run groups](memory_debug/recorder/distributed_run_groups.py) | disabled, 2+ GPUs |
+
+### CLI Workflow
+
+| User question | Example | Commands covered |
+|---|---|---|
+| How are memory bundles analyzed from shell automation? | [CLI workflows](memory_debug/cli/workflows.sh) | all seven `tcgd-memory` commands |
 
 ## Integrations
 
-| Example | Main capability | Extra dependency |
+| User question | Example | Extra dependency |
 |---|---|---|
-| [TensorBoard export](integrations/tensorboard_export.py) | export synchronized `TensorProbeSnapshot` values | `tensorboard` |
+| How are synchronized probe values exported to TensorBoard? | [TensorBoard export](integrations/tensorboard_export.py) | `tensorboard` |
 
-Read the [integration notes](integrations/README.md) for dependency and output
-ownership.
-
-## Quick Commands
-
-Run these commands from the repository root:
-
-```bash
-python examples/tensor_debug/quickstart.py
-python examples/tensor_debug/snapshot_comparison.py
-python examples/tensor_debug/record_and_check.py
-python examples/tensor_debug/eager_vs_cuda_graph.py \
-  --output-dir /tmp/tcgd-tensor-eager-vs-cg
-python examples/tensor_debug/replay_series.py \
-  --output-dir /tmp/tcgd-tensor-series
-python examples/memory_debug/quickstart.py
-python examples/memory_debug/snapshot_comparison.py
-python examples/memory_debug/timeline_and_reports.py \
-  --output-dir /tmp/tcgd-timeline
-python examples/memory_debug/attribution_modes.py \
-  --output-dir /tmp/tcgd-attribution
-python examples/memory_debug/allocation_lifetimes.py \
-  --output-dir /tmp/tcgd-lifetimes
-python examples/memory_debug/compare_runs_and_phases.py \
-  --output-dir /tmp/tcgd-runs
-
-torchrun --standalone --nproc-per-node=2 \
-  examples/memory_debug/distributed_run_groups.py \
-  --output-dir /tmp/tcgd-groups
-
-bash examples/memory_debug/cli_workflows.sh \
-  single /tmp/tcgd-cli-single
-NPROC_PER_NODE=2 bash examples/memory_debug/cli_workflows.sh \
-  distributed /tmp/tcgd-cli-distributed
-```
-
-The CLI workflow creates its own input bundles. `single` exercises timeline,
-comparison, lifetime, cross-run, and phase commands. `distributed` exercises
-both group summary commands and group phase comparison.
+Read the [integration notes](integrations/README.md) for output ownership.
 
 The experimental `memory_debug.advanced` module intentionally has no release
-example. Its low-level parsers are documented in `docs/api.md`; the examples
-above teach the supported public API and CLI.
+example. Its low-level parsers are documented in `docs/api.md`; examples teach
+the supported user workflows and CLI.

@@ -2,7 +2,7 @@
 
 Run with:
   torchrun --standalone --nproc-per-node=2 \
-    examples/memory_debug/distributed_run_groups.py --output-dir /tmp/tcgd-groups
+    examples/memory_debug/recorder/distributed_run_groups.py --output-dir /tmp/tcgd-groups
 """
 
 from __future__ import annotations

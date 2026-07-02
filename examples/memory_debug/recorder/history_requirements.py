@@ -1,7 +1,7 @@
-"""Compare allocator attribution behavior across history configurations.
+"""Show which analyses remain available without allocator history.
 
 Run with:
-  python examples/memory_debug/attribution_modes.py --output-dir /tmp/tcgd-attribution
+  python examples/memory_debug/recorder/history_requirements.py --output-dir /tmp/tcgd-history
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def _all_total(comparison):
     )
 
 
-def _snapshot_only(output_dir: Path) -> None:
+def _record_without_history(output_dir: Path) -> None:
     bundle_dir = output_dir / "snapshot-only.tcgd-memory"
     torch.cuda.memory._record_memory_history(enabled=None)
     torch.cuda.empty_cache()
@@ -129,119 +129,6 @@ def _snapshot_only(output_dir: Path) -> None:
     print(inferred.to_text())
 
 
-def _full_history(output_dir: Path) -> None:
-    bundle_dir = output_dir / "full-history.tcgd-memory"
-    torch.cuda.memory._record_memory_history(enabled=None)
-    torch.cuda.empty_cache()
-    torch.cuda.memory._record_memory_history(
-        enabled="all",
-        context="all",
-        stacks="python",
-        max_entries=100_000,
-        clear_history=True,
-    )
-
-    recorder = MemoryRecorder(
-        name="full-history-attribution",
-        rank=0,
-        bundle_dir=bundle_dir,
-    )
-    recorder.record_point("before_work")
-
-    persistent = torch.empty(32 * MIB, dtype=torch.uint8, device="cuda")
-    transient = torch.empty(16 * MIB, dtype=torch.uint8, device="cuda")
-    del transient
-    gc.collect()
-    torch.cuda.synchronize()
-    recorder.record_point("after_work")
-
-    del persistent
-    gc.collect()
-    torch.cuda.synchronize()
-    recorder.record_point("after_cleanup")
-    recorder.finish()
-
-    run = MemoryRun.load(bundle_dir, cache_snapshots=False)
-    options = MemoryAttributionOptions(
-        stacks=True,
-        events=True,
-        lifetimes=True,
-        on_missing="error",
-        stack_depth=4,
-        limit=20,
-    )
-
-    comparison = run.compare(
-        "before_work",
-        "after_work",
-        attribution=options,
-    )
-    assert comparison.reference_stack_coverage is not None
-    assert comparison.candidate_stack_coverage is not None
-    assert comparison.candidate_stack_coverage.attributed_bytes >= 32 * MIB
-    assert comparison.allocation_stack_comparisons
-    assert comparison.events_available is True
-    assert comparison.events_complete is True
-    assert comparison.allocator_events
-    assert comparison.allocation_lifetimes is not None
-    assert comparison.allocation_lifetimes.history_available is True
-    assert comparison.allocation_lifetimes.history_complete is True
-    assert (
-        sum(
-            item.event_exact_birth_bytes
-            for item in comparison.allocation_lifetimes.cohorts
-        )
-        >= 48 * MIB
-    )
-    assert (
-        sum(
-            item.event_exact_release_bytes
-            for item in comparison.allocation_lifetimes.cohorts
-        )
-        >= 16 * MIB
-    )
-    comparison_paths = comparison.write(output_dir / "full-history-comparison")
-    assert comparison_paths["events"].is_file()
-    assert comparison_paths["cohorts"].is_file()
-
-    timeline = run.timeline(attribution=options)
-    assert len(timeline.point_comparisons) == 2
-    assert all(
-        item.events_available and item.events_complete
-        for item in timeline.point_comparisons
-    )
-    assert timeline.allocation_lifetimes is not None
-    assert timeline.allocation_lifetimes.history_available is True
-    assert timeline.allocation_lifetimes.history_complete is True
-    assert (
-        sum(
-            item.event_exact_birth_bytes
-            for item in timeline.allocation_lifetimes.cohorts
-        )
-        >= 48 * MIB
-    )
-    assert (
-        sum(
-            item.event_exact_release_bytes
-            for item in timeline.allocation_lifetimes.cohorts
-        )
-        >= 48 * MIB
-    )
-    timeline_paths = timeline.write(
-        output_dir / "full-history-timeline",
-        include_unchanged=False,
-    )
-    assert timeline_paths["events"].is_file()
-    assert timeline_paths["cohorts"].is_file()
-
-    print()
-    print("=== Full allocator history: comparison attribution ===")
-    print(comparison.to_text(include_unchanged=False))
-    print()
-    print("=== Full allocator history: timeline attribution ===")
-    print(timeline.to_text(include_unchanged=False))
-
-
 def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("this example requires CUDA")
@@ -252,8 +139,7 @@ def main() -> None:
     output_dir.mkdir(parents=True)
 
     try:
-        _snapshot_only(output_dir)
-        _full_history(output_dir)
+        _record_without_history(output_dir)
         print()
         print(f"bundles and reports: {output_dir}")
     finally:

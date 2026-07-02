@@ -1,68 +1,71 @@
 # Memory Debug Examples
 
-Read the [Memory Debug guide](../../docs/memory_debug.md) for collection,
-history, attribution, and report semantics.
+Memory examples are separated by workflow. `probe/` answers local two-point
+questions without bundles. `recorder/` preserves named allocator boundaries for
+timelines, attribution, lifetime, cross-run, and distributed analysis. `cli/`
+shows shell automation over persisted bundles.
 
-`quickstart.py` uses one `MemoryProbe` for standalone snapshots and immediate
-two-point comparison. `snapshot_comparison.py` compares endpoints captured by
-independent probes. The remaining examples use `MemoryRecorder` to collect
-labeled points into immutable runs for persistence, timeline, lifetime, phase,
-and multi-rank analysis.
+## Probe Workflow
 
-## Allocator History
+`probe/quickstart.py` records ordinary, capture-time, and post-replay allocator
+state with one `MemoryProbe`. It discovers all pools present in
+`torch.cuda.memory._snapshot()` and performs an immediate same-probe comparison.
 
-The application owns `torch.cuda.memory._record_memory_history()` and must
-choose its overhead explicitly:
+`probe/snapshot_comparison.py` compares endpoints from independent probes. Use
+this pattern when the two snapshots do not share one Probe lifecycle.
 
-| Example | History mode | Information used |
+Neither Probe example requires allocator history.
+
+## Recorder And Run Workflow
+
+Allocator history belongs to the application. Each example enables only the
+mode required by its analysis and disables it during cleanup:
+
+| Example | History mode | Analysis demonstrated |
 |---|---|---|
-| `quickstart.py` | disabled | pool/stream state and same-probe lifecycle |
-| `snapshot_comparison.py` | disabled | cross-probe pool/stream state |
-| `timeline_and_reports.py` | state | live-block allocation stacks |
-| `attribution_modes.py` | disabled, then all | warn/error policy, snapshot inference, and exact events |
-| `allocation_lifetimes.py` | all | allocation/free events and exact lifetime transitions |
-| `compare_runs_and_phases.py` | disabled | compact state and explicit private-pool mapping |
-| `distributed_run_groups.py` | disabled | rank-local state and cross-rank extrema |
+| `timeline_and_reports.py` | state | live allocation stacks, capture points, persistence, all report formats |
+| `history_requirements.py` | disabled | state comparison, warn/error policy, snapshot-inferred lifetimes |
+| `stack_and_event_attribution.py` | all | allocation stacks, exact events, embedded lifetimes |
+| `allocation_lifetimes.py` | all | active-at and born-between cohorts with exact releases |
+| `compare_runs_and_phases.py` | disabled | cross-run point/phase comparison and explicit private-pool mapping |
+| `distributed_run_groups.py` | disabled | rank-local bundles, group extrema, group phase comparison |
 
-History must be enabled before allocations whose stacks or events matter. The
-Probe and Recorder never enable or disable it on the application's behalf.
+History must be enabled before allocations whose stacks or events matter. Probe
+and Recorder never enable or disable it on the application's behalf.
 
-`attribution_modes.py` is the policy guide. Its first bundle shows that state
-comparison still works without history, then contrasts `on_missing="warn"`
-with `on_missing="error"`. It also shows the explicit limitation of
-snapshot-inferred births and releases: allocations that start and end between
-points are invisible. Its second bundle enables full history before the
-workload and requests stacks, events, and embedded lifetimes from ordinary
-`compare()` and `timeline()` calls.
-
-## Output And Reuse
-
-Scripts that persist data require `--output-dir` and refuse to reuse an existing
-path. A bundle is a `*.tcgd-memory` directory. Reports contain text, JSON, CSV,
-and HTML generated from the same result object.
-
-Run the attribution policy comparison with:
+Persistent examples require an absent output directory. They print the absolute
+bundle and report paths they produce. `compare_runs_and_phases.py` also writes an
+explicit private-pool map; raw private-pool IDs are never assumed to match across
+runs.
 
 ```bash
-python examples/memory_debug/attribution_modes.py \
-  --output-dir /tmp/tcgd-attribution
+python examples/memory_debug/recorder/timeline_and_reports.py \
+  --output-dir /tmp/tcgd-timeline
+python examples/memory_debug/recorder/history_requirements.py \
+  --output-dir /tmp/tcgd-history
+python examples/memory_debug/recorder/stack_and_event_attribution.py \
+  --output-dir /tmp/tcgd-stack-events
+python examples/memory_debug/recorder/allocation_lifetimes.py \
+  --output-dir /tmp/tcgd-lifetimes
+python examples/memory_debug/recorder/compare_runs_and_phases.py \
+  --output-dir /tmp/tcgd-runs
 ```
 
-`compare_runs_and_phases.py` writes `pool-map.txt` after discovering the private
-pool created by each scenario. The Python API and CLI examples both consume
-that explicit mapping; identical raw private-pool IDs are never assumed to be
-the same across runs. The example seeds each mapped pool before `phase_start`
-because phase comparison applies the mapping at both start and end points.
+Run the distributed example through `torchrun` on a shared filesystem:
 
-Use `distributed_run_groups.py` through `torchrun` on a shared filesystem. Each
-rank writes one direct child bundle. Group reports retain per-rank values and
-show min/max/spread; they never sum per-GPU memory.
+```bash
+torchrun --standalone --nproc-per-node=2 \
+  examples/memory_debug/recorder/distributed_run_groups.py \
+  --output-dir /tmp/tcgd-groups
+```
 
-## CLI
+## CLI Workflow
 
-`cli_workflows.sh single OUTPUT_ROOT` generates single-rank bundles and runs
-`summary`, `timeline`, `allocation-lifetimes`, `compare-points`, and `compare-phases`.
+`single` covers timeline, summary, lifetime, point, and phase commands.
+`distributed` covers both run-group summaries and group phase comparison.
 
-`cli_workflows.sh distributed OUTPUT_ROOT` launches the group producer with
-`NPROC_PER_NODE` processes and runs `summarize-run-group` for both scenarios plus
-`compare-run-group-phases`.
+```bash
+bash examples/memory_debug/cli/workflows.sh single /tmp/tcgd-memory-cli
+NPROC_PER_NODE=2 bash examples/memory_debug/cli/workflows.sh \
+  distributed /tmp/tcgd-memory-cli-distributed
+```

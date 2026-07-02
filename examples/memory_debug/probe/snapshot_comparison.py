@@ -1,6 +1,6 @@
 """Compare allocator endpoints captured by independent probes.
 
-Run with: python examples/memory_debug/snapshot_comparison.py
+Run with: python examples/memory_debug/probe/snapshot_comparison.py
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """Probe forward activations and activation or parameter gradients.
 
-Run with: python examples/tensor_debug/gradient_probes.py
+Run with: python examples/tensor_debug/probe/gradients.py
 """
 
 from __future__ import annotations

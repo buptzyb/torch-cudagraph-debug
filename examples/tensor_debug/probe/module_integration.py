@@ -1,6 +1,6 @@
 """Insert a configurable probe into an ordinary torch.nn.Module.
 
-Run with: python examples/tensor_debug/module_integration.py
+Run with: python examples/tensor_debug/probe/module_integration.py
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """Trace allocations active at a point and allocations born in an interval.
 
 Run with:
-  python examples/memory_debug/allocation_lifetimes.py --output-dir /tmp/tcgd-life
+  python examples/memory_debug/recorder/allocation_lifetimes.py --output-dir /tmp/tcgd-life
 """
 
 from __future__ import annotations

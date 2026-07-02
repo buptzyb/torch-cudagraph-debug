@@ -205,8 +205,8 @@ summary payloads provide compact exact-digest evidence and explicitly report
 inconclusive allclose results when raw values are unavailable.
 
 See the [eager-vs-CUDA-Graph example]
-(examples/tensor_debug/eager_vs_cuda_graph.py) for the end-to-end workflow.
-The [standalone snapshot example](examples/tensor_debug/snapshot_comparison.py)
+(examples/tensor_debug/recorder/eager_vs_cuda_graph.py) for the end-to-end workflow.
+The [standalone snapshot example](examples/tensor_debug/probe/snapshot_comparison.py)
 shows the bundle-free alternative.
 
 ## Memory Quick Start

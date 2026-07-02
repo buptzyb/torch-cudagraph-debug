@@ -1088,7 +1088,7 @@ one writer; distributed users create one bundle per rank.
 
 ### CLI
 
-The [CLI workflow example](../examples/memory_debug/cli_workflows.sh) creates
+The [CLI workflow example](../examples/memory_debug/cli/workflows.sh) creates
 its own bundles and exercises every command below.
 
 ```text

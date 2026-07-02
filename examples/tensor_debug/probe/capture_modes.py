@@ -1,6 +1,6 @@
 """Choose eager/capture behavior and a non-contiguous input policy.
 
-Run with: python examples/tensor_debug/probe_modes.py
+Run with: python examples/tensor_debug/probe/capture_modes.py
 """
 
 from __future__ import annotations

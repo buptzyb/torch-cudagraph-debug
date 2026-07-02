@@ -1,6 +1,6 @@
 """Capture and compare allocator snapshots without creating a run.
 
-Run with: python examples/memory_debug/quickstart.py
+Run with: python examples/memory_debug/probe/quickstart.py
 """
 
 from __future__ import annotations

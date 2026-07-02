@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RECORDER_DIR="$(cd -- "${SCRIPT_DIR}/../recorder" && pwd)"
 MODE="${1:-}"
 OUTPUT_ROOT="${2:-}"
 PYTHON_BIN="${PYTHON:-python}"
@@ -25,9 +26,9 @@ if [[ "${MODE}" == "single" ]]; then
     SCENARIOS="${OUTPUT_ROOT}/scenarios"
     LIFETIMES="${OUTPUT_ROOT}/lifetimes"
     REPORTS="${OUTPUT_ROOT}/reports"
-    "${PYTHON_BIN}" "${SCRIPT_DIR}/compare_runs_and_phases.py" \
+    "${PYTHON_BIN}" "${RECORDER_DIR}/compare_runs_and_phases.py" \
         --output-dir "${SCENARIOS}" --record-only
-    "${PYTHON_BIN}" "${SCRIPT_DIR}/allocation_lifetimes.py" \
+    "${PYTHON_BIN}" "${RECORDER_DIR}/allocation_lifetimes.py" \
         --output-dir "${LIFETIMES}" --record-only
     POOL_MAP="$(cat "${SCENARIOS}/pool-map.txt")"
 
@@ -63,7 +64,7 @@ else
     NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
     "${PYTHON_BIN}" -m torch.distributed.run \
         --standalone --nproc-per-node="${NPROC_PER_NODE}" \
-        "${SCRIPT_DIR}/distributed_run_groups.py" \
+        "${RECORDER_DIR}/distributed_run_groups.py" \
         --output-dir "${GROUP_ROOT}" --record-only
 
     "${TCGD_MEMORY_BIN}" summarize-run-group "${GROUP_ROOT}/baseline" \

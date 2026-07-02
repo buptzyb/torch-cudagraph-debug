@@ -1,48 +1,66 @@
 # Tensor Debug Examples
 
-Read the [Tensor Debug guide](../../docs/tensor_debug.md) for probe semantics
-and lifecycle details.
+Tensor examples are separated by workflow. Start with `probe/quickstart.py` for
+one-process inspection. Move to `recorder/` when observations must survive the
+process, carry named points, or be compared across executions. Use `cli/` for
+automation over existing bundles.
 
-Start with `quickstart.py`, then follow the order in the parent
-[examples index](../README.md). These scripts use the compiled native extension
-and require Linux, CUDA, and a CUDA-enabled PyTorch build.
+All examples require Linux, CUDA, a CUDA-enabled PyTorch build, and the compiled
+native extension.
 
-The examples deliberately keep the following lifecycle visible:
+## Probe Workflow
 
-1. Create a `TensorProbe` before graph capture.
-2. Eager warmup is a transparent no-op with the default `when="capture"`.
-3. Capture and replay the graph.
-4. Pass the replay stream to `snapshot()` or the first check-status query, then
-   use `synchronize=False` for additional queries covered by that wait.
-5. Observe that all invocation slots from one replay share one 1-based replay
-   index inside one aggregate `TensorProbeSnapshot`.
-6. Keep the probe alive while the graph may replay, then call `close()`.
+Run the Probe examples in this order:
 
-`snapshot_comparison.py` shows the second quick workflow: collect one eager
-snapshot and one CUDA Graph snapshot with independent probes, then compare them
-directly without run metadata or bundles.
+1. `quickstart.py` records two sequential hidden tensors from one replay.
+2. `snapshot_comparison.py` compares independent eager and CUDA Graph probes.
+3. `replay_comparison.py` compares two ordered snapshots owned by one probe.
+4. `actions.py` combines Record, Print, and Check on a changing static input.
+5. `gradients.py` records activation and parameter gradients.
+6. `capture_modes.py` covers eager/capture policy and non-contiguous tensors.
+7. `module_integration.py` places a probe at a real module boundary.
 
-`record_and_check.py` catches one intentional `TensorCheckError` and still
-exits successfully. `probe_modes.py` similarly catches the expected default
-non-contiguous-input error. Those failures demonstrate user-facing diagnostics;
-they are not test failures.
+The normal lifecycle remains visible in every example: create before capture,
+capture, replay, query with the replay stream, stop replaying, then close.
+`PrintAction` and `CheckAction` use CUDA host callbacks and are demonstrated for
+targeted diagnosis; `RecordAction` remains the recommended default.
 
-`non_contiguous="copy"` allocates a debug-only contiguous tensor in the graph
-pool. Use it only when that memory cost is acceptable. `when="always"` enables
-probe work on eager calls and is separate from the default capture-only mode.
+`actions.py` intentionally triggers and catches one `TensorCheckError`.
+`capture_modes.py` intentionally catches the default non-contiguous-input error.
+Both scripts exit successfully after verifying those diagnostics.
 
-## Complete Workflows
+## Recorder And Run Workflow
 
-The quick-workflow examples above teach one probe and one graph. Use
-[`eager_vs_cuda_graph.py`](eager_vs_cuda_graph.py) when values must be compared
-across independent executions. It records the same named observations in eager
-and CUDA Graph modes, loads both bundles, and writes text, JSON, CSV, and HTML
-reports.
+`recorder/eager_vs_cuda_graph.py` records semantically aligned `forward` points,
+loads both bundles, calls point and run comparison, and writes text, JSON, CSV,
+and HTML reports.
 
-[`replay_series.py`](replay_series.py) records two graph replays against one
-eager reference. Summary-only input and hidden observations demonstrate
-`inconclusive` allclose results, while the full output payload provides a
-conclusive mismatch and first-divergence evidence.
+`recorder/forward_backward.py` captures one training step and persists the
+activation, loss, activation gradient, and final weight gradient in one point.
+It also shows an incomplete `snapshot_run()` before `finish()`.
 
-Both workflows require absent or empty output directories because bundle
-writers never overwrite an existing nonempty bundle.
+`recorder/replay_series.py` compares two graph replays with one eager reference.
+Summary-only inputs demonstrate limited payload storage; the full output keeps
+the intentional second-replay mismatch conclusive.
+
+Recorder examples require an absent output directory because bundle writers do
+not overwrite nonempty bundles:
+
+```bash
+python examples/tensor_debug/recorder/eager_vs_cuda_graph.py \
+  --output-dir /tmp/tcgd-tensor-eager-vs-cg
+python examples/tensor_debug/recorder/forward_backward.py \
+  --output-dir /tmp/tcgd-tensor-forward-backward
+python examples/tensor_debug/recorder/replay_series.py \
+  --output-dir /tmp/tcgd-tensor-series
+```
+
+## CLI Workflow
+
+The CLI workflow creates matching eager/graph runs and an intentionally drifting
+replay series, then executes every `tcgd-tensor` command. Exit status `1` from
+the series comparison is expected and checked by the script.
+
+```bash
+bash examples/tensor_debug/cli/workflows.sh /tmp/tcgd-tensor-cli
+```

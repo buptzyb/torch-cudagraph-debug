@@ -1,7 +1,7 @@
 """Compare independent graph pools and decompose two phase ranges.
 
 Run with:
-  python examples/memory_debug/compare_runs_and_phases.py --output-dir /tmp/tcgd-runs
+  python examples/memory_debug/recorder/compare_runs_and_phases.py --output-dir /tmp/tcgd-runs
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """Compare eager and CUDA Graph values without creating run bundles.
 
-Run with: python examples/tensor_debug/snapshot_comparison.py
+Run with: python examples/tensor_debug/probe/snapshot_comparison.py
 """
 
 from __future__ import annotations
