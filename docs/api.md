@@ -94,7 +94,7 @@ the same source tensor:
   graph references its address. Eager copies are recorded on the owning stream
   and are not retained by the probe after queued work completes.
 
-A probe is owned by the first CUDA graph capture session that uses it. Multiple
+A probe is owned by the first CUDA Graph capture session that uses it. Multiple
 calls in that capture create logical slots in invocation order. Reusing the
 probe in another capture is an error. The GPU counter advances once per graph
 replay, not once per invocation, so all slots in one replay share a 1-based
@@ -182,8 +182,8 @@ class TensorCheckStatus:
 ```
 
 `check_status()` synchronizes callback-backed check state before returning it.
-`assert_check_ok()` delegates to `check_status()` and therefore synchronizes at most once;
-it raises `TensorCheckError` when the sticky check state is not OK.
+`assert_check_ok()` delegates to `check_status()` and therefore synchronizes at
+most once; it raises `TensorCheckError` when the sticky check state is not OK.
 
 `watch_grad()` registers an autograd hook. The hook probes the gradient for its
 side effect and returns the original gradient. It obeys the probe's `when`
@@ -221,9 +221,9 @@ CheckAction(
 )
 ```
 
-All enabled actions accept contiguous CUDA tensors with `float16`, `bfloat16`,
-`float32`, `float64`, `uint8`, `int8`, `int16`, `int32`, `int64`, or `bool`
-dtype. Other dtypes are rejected.
+When debug work is active, an enabled probe supports contiguous CUDA tensors
+with `float16`, `bfloat16`, `float32`, `float64`, `uint8`, `int8`, `int16`,
+`int32`, `int64`, or `bool` dtype. Other dtypes are rejected.
 
 `PrintAction` writes to `stderr` from a native CUDA host callback. `max_items`
 limits the displayed value prefix, `summary=False` omits aggregate statistics,
@@ -245,8 +245,8 @@ invocation in capture-call order.
 A check mismatch is sticky until the probe is destroyed. The first mismatch
 records the replay and invocation indices.
 
-Print and Check process tensor elements on the CUDA host-callback thread. Their
-latency grows with payload size and also depends on dtype, formatting,
+`PrintAction` and `CheckAction` process tensor elements on a CUDA host callback.
+Their latency grows with payload size and also depends on dtype, formatting,
 tolerance checks, host CPU, and runtime, so there is no portable byte cutoff.
 Keep callback-backed probes small and targeted. For large tensors or
 latency-sensitive paths, use `RecordAction`, synchronize outside replay, and
@@ -271,7 +271,8 @@ snapshot.descriptor() -> dict
 
 Every `snapshot()` call materializes new CPU tensor copies from the latest
 pinned staging bytes and records the probe's current replay counter. One
-snapshot represents one replay; its observations represent invocation slots in
+snapshot represents one query point; after a graph replay, its replay index
+identifies that replay. Its observations represent invocation slots in
 capture-call order. Returned snapshots remain unchanged across later replays,
 so an additional `clone()` is not required for retention. A snapshot queried
 after capture but before its first replay uses index 0; after replay, captured
@@ -330,11 +331,11 @@ transparent no-ops.
 
 All observations must be supported CUDA tensors on the recorder device.
 `non_contiguous` has the same error/copy behavior as `TensorProbe`. One
-recorder-wide native `RecordAction` session owns every CUDA Graph observation,
+recorder-wide native `RecordAction` session collects every CUDA Graph observation,
 so logical names do not create one replay counter kernel each.
 
-`record_point()` labels must be nonempty and unique and point contexts cannot nest.
-Its synchronization target inherits the recorder default when omitted.
+`record_point()` labels must be nonempty and unique, and point contexts cannot
+nest. Its synchronization target inherits the recorder default when omitted.
 Interrupted contexts do not append a point.
 
 `finish()` is idempotent, writes `complete=True`, and rejects later points. It
@@ -379,9 +380,9 @@ A foreign point passed to `run.point()` raises `TensorOwnershipError`.
 `TensorObservation` is an ownerless leaf shared by Probe snapshots and Recorder
 points. It records local order, name, invocation, shape, stride, dtype, source
 device, payload kind, nbytes, SHA-256, and a `TensorValueSummary`.
-`observation.tensor()` lazily returns a CPU tensor for
-a full payload and validates blob size and digest. It raises
-`TensorPayloadUnavailableError` for a summary-only observation.
+`observation.tensor()` lazily returns a CPU tensor for a full payload and
+validates blob size and digest. It raises `TensorPayloadUnavailableError` for a
+summary-only observation.
 
 ### Offline Tensor Comparison
 
@@ -421,13 +422,13 @@ Missing keys, shape changes, and strict dtype changes are mismatches.
 Allclose uses the reference tensor in
 `atol + rtol * abs(reference)`. Integer and bool values compare exactly.
 `dtype_policy="promote"` explicitly converts both values with
-`torch.promote_types()`. Exact comparison uses per-element raw bytes when
-dtypes match.
+`torch.promote_types()`. Exact comparison uses raw value bytes when dtypes
+match.
 
-`TensorObservationComparison` contains status, reason, both observation descriptors,
-mismatch count and fraction, max absolute and relative error, mean absolute
-error, and the first mismatching coordinate and values when full payloads make
-those metrics available.
+`TensorObservationComparison` contains status, reason, both observation
+descriptors, mismatch count and fraction, max absolute and relative error, mean
+absolute error, and the first mismatching coordinate and values when full
+payloads make those metrics available.
 
 `TensorSnapshotComparison`, `TensorPointComparison`, `TensorRunComparison`,
 and `TensorPointSeriesComparison` expose `status`, `ok`, `conclusive`, `to_text()`,
@@ -605,7 +606,7 @@ report uses `source_kind="run"`. Neither path fabricates the other workflow.
 
 `MemoryProbeSnapshot` is not persisted and does not belong to a run. Use
 `MemoryRecorder` when labels, a timeline, phases, bundles, run groups, or other
-complete-workflow features are needed.
+run-scoped features are needed.
 
 ### MemoryRecorder
 
@@ -630,9 +631,9 @@ When `rank=None`, a numeric `RANK` environment variable is used if present.
 must be in `[0, world_size)`.
 
 When `bundle_dir` is set, the directory must be absent or empty. Construction
-creates an incomplete manifest, every `record_point()` writes one gzip JSON snapshot
-and updates that manifest, and `finish()` marks it complete. A nonempty target
-directory raises `FileExistsError`.
+creates an incomplete manifest. Every `record_point()` writes one gzip JSON
+snapshot and updates that manifest; `finish()` marks it complete. A nonempty
+target directory raises `FileExistsError`.
 
 The synchronization contract matches the tensor domain. `True` synchronizes
 the current CUDA device, a CUDA stream synchronizes only that stream, a CUDA
@@ -658,9 +659,10 @@ recorder.record_point(
 ) -> MemoryPoint
 ```
 
-Labels must be nonempty and unique. Outside CUDA capture, `record_point()` synchronizes
-according to the Recorder default or its per-call override. During current-stream
-capture it skips requested synchronization and snapshots immediately.
+Labels must be nonempty and unique. Outside CUDA capture, `record_point()`
+synchronizes according to the Recorder default or its per-call override. During
+current-stream capture it skips requested synchronization and snapshots
+immediately.
 
 The recorder temporarily sets a PyTorch allocator metadata marker around the
 snapshot when those private APIs are available. This marker delimits same-run
@@ -670,7 +672,7 @@ Snapshot and metadata values must be JSON-compatible: null, string, bool,
 finite number, list/tuple, or a mapping with string keys. Validation errors
 include the path to the unsupported value.
 
-#### lifecycle
+#### Lifecycle
 
 ```python
 recorder.snapshot_run() -> MemoryRun
@@ -775,7 +777,8 @@ class MemoryRange:
 memory_range.compare(*, attribution=None) -> MemoryPointComparison
 ```
 
-`run.between()` validates that both points belong to the run and that `end` follows `start`. `MemoryRange.compare()` is equivalent to calling
+`run.between()` validates that both points belong to the run and that `end`
+follows `start`. `MemoryRange.compare()` is equivalent to calling
 `run.compare(memory_range.start, memory_range.end, ...)`. Phase comparison
 accepts one baseline range and one candidate range.
 
@@ -795,8 +798,8 @@ MemoryAttributionOptions(
 The application, not the recorder, controls
 `torch.cuda.memory._record_memory_history()`.
 
-- No history: state and lifecycle work; allocation stacks and events are
-  generally unavailable.
+- No history: allocator state and snapshot-inferred lifecycle analysis remain
+  available; allocation stacks and historical events are generally unavailable.
 - `enabled="state", context="state", stacks="python"`: live block allocation
   stacks are available.
 - `enabled="all", context="all", stacks="python"`: live block stacks and
@@ -880,9 +883,9 @@ the same address and shape entirely between two points.
 
 Calling `run.lifetimes()` without explicit options defaults to stack depth 4,
 event attribution, warning on missing history, and the top 20 cohorts. Use
-`MemoryAttributionOptions(events=False, ...)` for snapshot-only analysis. Cohorts are
-ranked by bytes born for `born_between`, by bytes active at an anchor, or by
-peak-to-minimum impact when there is no selection.
+`MemoryAttributionOptions(events=False, ...)` for snapshot-only analysis.
+Cohorts are ranked by bytes born for `born_between`, by bytes active at an
+anchor, or by peak-to-minimum impact when there is no selection.
 
 This API reports allocator-block evidence. It does not recover Python tensor
 names, object identity, dtype, shape, or higher-level ownership unless those
@@ -891,13 +894,13 @@ details are inferable from the recorded call stacks and allocation sizes.
 ### Timeline
 
 `run.timeline()` reports absolute state and a delta for every observed pool
-and `(pool, stream)` observation at every point. The first point is relative to zero.
-If a pool disappears, the current state is zero and its negative delta remains
-visible. Unchanged rows are retained by default.
+and `(pool, stream)` observation at every point. The first point is relative to
+zero. If a pool disappears, the current state is zero and its negative delta
+remains visible. Unchanged rows are retained by default.
 
 The default timeline is manifest-only and does not read raw snapshots;
-`timeline.point_comparisons` is empty. Requesting stack or event attribution streams each
-point once and stores attributed same-run comparisons in `timeline.point_comparisons`.
+`timeline.point_comparisons` is empty. Requesting stack or event attribution
+streams each point once and stores attributed same-run point comparisons.
 
 With `lifetimes=True`, one full-run cohort report is attached as
 `timeline.allocation_lifetimes`. Adjacent comparisons do not repeat the same
@@ -923,7 +926,8 @@ matching is conservative:
 2. Private pools match only through a one-to-one `pool_mapping`; every mapped
    reference and candidate must exist at the selected points.
 3. Identical raw private IDs are still unmatched without that mapping.
-4. Streams are never matched across runs; all pool/stream observations are reference-only or candidate-only.
+4. Streams are never matched across runs; every pool/stream observation is
+   reference-only or candidate-only.
 5. Address lifecycle is disabled.
 6. `events=True` is rejected.
 7. `lifetimes=True` is rejected.
@@ -946,9 +950,9 @@ compare_phases(
 ```
 
 The result contains `baseline_change`, `candidate_change`, `start_gap`,
-`end_gap`, an entry in `pool_decomposition` for each matched pool and metric, and a
-`allocator_scope_decomposition` for each `all`/`default`/`private` scope. Every row
-verifies:
+`end_gap`, one `pool_decomposition` entry for each matched pool and metric, and
+one `allocator_scope_decomposition` entry for each `all`, `default`, and
+`private` scope. Every row verifies:
 
 ```text
 end_gap = start_gap + candidate_change - baseline_change
@@ -961,8 +965,8 @@ that pool.
 
 Event attribution applies to the two same-run change comparisons. Start/end
 cross-run comparisons never compare events.
-Lifetime attribution follows the same rule: each change range owns its cohort
-report, while start/end cross-run comparisons do not.
+Lifetime attribution follows the same rule: each change range contains its
+cohort report, while start/end cross-run comparisons do not.
 
 ### Multi-Rank Run Groups
 
@@ -997,14 +1001,16 @@ decompressed raw snapshots across ranks or points; set
 raw payloads.
 
 `MemoryRunGroupSummary` emits per-rank point/scope states plus min, max, spread,
-and worst rank. `MemoryRunGroupPhaseComparison` pairs common ranks and aggregates the
-per-rank four-point total equations. Neither API sums GPU memory across ranks.
+and worst rank. `MemoryRunGroupPhaseComparison` pairs common ranks and
+aggregates the per-rank four-point equations. Neither API sums GPU memory across
+ranks.
 
 ### Result Objects
 
 `MemorySnapshotComparison`, `MemoryPointComparison`, `MemoryTimeline`,
 `MemoryPhaseComparison`, `MemoryAllocationLifetimeAnalysis`,
-`MemoryRunGroupSummary`, and `MemoryRunGroupPhaseComparison` own rendering. Their main programmatic fields are:
+`MemoryRunGroupSummary`, and `MemoryRunGroupPhaseComparison` provide rendering
+and serialization. Their main programmatic fields are:
 
 - `MemorySnapshotComparison` and `MemoryPointComparison`: sibling result types
   with `reference`, `candidate`, `allocator_scope_comparisons`,
@@ -1050,18 +1056,20 @@ CSV flattens these as `reference_allocated_bytes`,
 
 Every `write()` creates `report.txt`, `report.json`, and `report.html`.
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
-`observations.csv`, with optional `allocation_stack_comparisons.csv`, `events.csv`,
-`pool_decomposition.csv`, and `allocator_scope_decomposition.csv`.
+`observations.csv`, with optional `allocation_stack_comparisons.csv`,
+`events.csv`, `pool_decomposition.csv`, and
+`allocator_scope_decomposition.csv`.
 
-`MemoryAllocationLifetimeAnalysis`, and pool-oriented results that embed one, create
-`cohorts.csv`, `cohort_points.csv`, and `size_histograms.csv`. They add
+`MemoryAllocationLifetimeAnalysis` and pool-oriented results that embed one
+create `cohorts.csv`, `cohort_points.csv`, and `size_histograms.csv`. They add
 `birth_stacks.csv` or `release_stacks.csv` when those observations exist.
 Lifetime JSON keeps point states, histograms, birth/release confidence,
 point/event peaks, and exact/inferred/still-active totals nested under each
 cohort.
 
-Group summaries create `rank_point_entries.csv` and `point_aggregates.csv`. Group phase
-reports create `rank_decomposition.csv` and `phase_aggregates.csv`.
+Group summaries create `rank_point_entries.csv` and `point_aggregates.csv`.
+Group phase reports create `rank_decomposition.csv` and
+`phase_aggregates.csv`.
 
 ### Bundle Format
 
@@ -1070,9 +1078,10 @@ plain JSON manifest and `snapshots/NNNN.json.gz` files. Writes use a temporary
 file followed by atomic replacement. Snapshot paths are validated to remain
 inside the bundle.
 
-Manifest, point, and observation objects have canonical required fields. Observation rows
-store only the seven base `MemoryStats` fields; inactive and fragmentation
-values are derived after loading. Missing or unknown fields are rejected.
+Manifest, point, and observation objects have canonical required fields.
+Observation rows store only the seven base `MemoryStats` fields; inactive and
+fragmentation values are derived after loading. Missing or unknown fields are
+rejected.
 
 Loading reads only manifest summaries and never executes pickle. A bundle has
 one writer; distributed users create one bundle per rank.
@@ -1103,14 +1112,17 @@ tcgd-memory compare-run-group-phases BASELINE_GROUP CANDIDATE_GROUP \
 Omitting `CANDIDATE_BUNDLE` from `compare-points` compares two ordered points
 in the reference run; `--pool-map` is valid only across independent runs.
 
-The report-producing commands accept `--stacks`, `--events`, `--lifetimes`,
+`timeline`, `compare-points`, `compare-phases`, and
+`compare-run-group-phases` accept the common attribution and presentation
+options: `--stacks`, `--events`, `--lifetimes`,
 `--on-missing {warn,error}`, `--stack-depth`, `--limit`, and `--only-changed`.
-`summary` accepts one bundle. `summarize-run-group` accepts one group directory
-and `--output`. The dedicated `allocation-lifetimes` command always groups by
-allocation stack, enables events by default, and uses stack depth 4;
-`--no-events` requests snapshot-only inference.
-Cross-run event and lifetime requests are rejected. Pool IDs use
-comma-separated components, for example `--pool-map 0,1=0,4`.
+`allocation-lifetimes` accepts the same options, always groups by allocation
+stack, enables events by default, and uses stack depth 4; `--no-events`
+requests snapshot-only inference. `summary` accepts one bundle and writes to
+standard output. `summarize-run-group` accepts one group directory plus
+`--output`, without attribution options. Cross-run event and lifetime requests
+are rejected. Pool IDs use comma-separated components, for example
+`--pool-map 0,1=0,4`.
 
 ## Experimental Advanced API
 
@@ -1119,8 +1131,9 @@ from torch_cudagraph_debug.memory_debug import advanced
 ```
 
 The advanced facade is intended for custom snapshot analysis and may change in
-a minor release. Use the high-level facade above for normal recorder, run, point, observation, and
-comparison workflows. Advanced exports are grouped below.
+a minor release. Use the high-level facade above for normal Recorder, Run,
+Point, Observation, and comparison workflows. Advanced exports are grouped
+below.
 
 Snapshot and state types:
 

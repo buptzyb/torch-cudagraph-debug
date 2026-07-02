@@ -84,6 +84,54 @@ def test_root_readme_delegates_domain_details() -> None:
     assert "### Allocator History Is Application-Owned" not in readme
 
 
+def test_workflow_docs_separate_control_flow_from_containment() -> None:
+    documents = (
+        ROOT / "README.md",
+        ROOT / "docs" / "architecture.md",
+        ROOT / "docs" / "tensor_debug.md",
+        ROOT / "docs" / "memory_debug.md",
+    )
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in documents)
+    normalized = re.sub(r"\s+", " ", combined.replace("`", ""))
+
+    forbidden = (
+        "Probe -> ProbeSnapshot -> Observation",
+        "Run -> Point -> Observation",
+        "Recorder -> Run -> Point -> Observation",
+        "Both public workflows use the same domain hierarchy",
+    )
+    for phrase in forbidden:
+        assert phrase not in normalized
+
+    readme = documents[0].read_text(encoding="utf-8")
+    assert "A `Probe` returns a" in readme
+    assert "A `Recorder` produces a `Run`" in readme
+    assert "`ProbeSnapshot` and `Point` both contain" in readme
+
+
+def test_mermaid_edges_name_their_relationships() -> None:
+    documents = (
+        ROOT / "README.md",
+        ROOT / "docs" / "architecture.md",
+    )
+    for document in documents:
+        in_mermaid = False
+        for line in document.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped == "```mermaid":
+                in_mermaid = True
+                continue
+            if in_mermaid and stripped == "```":
+                in_mermaid = False
+                continue
+            if not in_mermaid or ("-->" not in line and ".->" not in line):
+                continue
+            if "-->" in line:
+                assert "-->|" in line, f"{document}: unlabeled edge: {stripped}"
+            else:
+                assert "-.->" not in line, f"{document}: unlabeled edge: {stripped}"
+
+
 def test_cli_workflow_uses_configured_python_for_torchrun() -> None:
     script = (EXAMPLES / "memory_debug" / "cli_workflows.sh").read_text(
         encoding="utf-8"

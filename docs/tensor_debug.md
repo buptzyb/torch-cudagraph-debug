@@ -2,11 +2,13 @@
 
 `tensor_debug` inserts native print, record, and check probes into a
 PyTorch CUDA Graph and can compare tensor values across eager execution, graph
-replays, processes, and code revisions. `TensorProbe` is the quick workflow for
-one graph; `TensorRecorder` is the complete workflow for labeled points,
-persistence, and multi-point analysis. Both produce ownerless
-`TensorObservation` leaves through private domain collectors. For exact
-signatures, see the [API reference](api.md#tensor-debug); for runnable programs,
+replays, processes, and code revisions. `TensorProbe` instruments one graph,
+and `snapshot()` returns a standalone `TensorProbeSnapshot` for its latest
+observations. `TensorRecorder` produces a `TensorRun` for labeled points,
+persistence, and multi-point analysis. Probe snapshots and Recorder points
+contain the same ownerless `TensorObservation` leaves; both workflows use
+private domain collectors. See the [API reference](api.md#tensor-debug) for
+exact signatures; for runnable programs,
 follow the [Tensor Debug examples](../examples/tensor_debug/README.md).
 
 ## Core Usage
@@ -72,8 +74,9 @@ probe.assert_check_ok(synchronize=False)
 probe.close(synchronize=False)
 ```
 
-One `TensorProbeSnapshot` represents one replay and aggregates every invocation
-slot in capture-call order. `snapshot.tensor()` is shorthand for invocation 0.
+One `TensorProbeSnapshot` aggregates every invocation slot visible at one query
+point in capture-call order. After a graph replay, its `replay_index` identifies
+that replay. `snapshot.tensor()` is shorthand for invocation 0.
 The default `when="capture"` makes eager warmup calls transparent no-ops.
 Use `when="always"` only when eager debug side effects are intentional. Its
 first eager call locks one CUDA stream; calls from another eager stream fail.
@@ -134,16 +137,16 @@ with the same name become invocation 0, 1, and so on. The stable cross-run key
 is `(probe_name, invocation_index)`; replay index is evidence rather than
 identity.
 
-An eager recorder observes calls only inside `record_point()`. A CUDA Graph recorder
-ignores eager warmup, uses calls made during graph capture to establish its
-fixed slot layout, and reads those slots when a later `record_point()` wraps
-`graph.replay()`. All named CG observations owned by one recorder share one
-internal `RecordAction` session, one replay counter, and one counter increment
-kernel. Tensor payload copies still occur once per observed slot.
+An eager recorder observes calls only inside `record_point()`. A CUDA Graph
+recorder ignores eager warmup, uses calls made during graph capture to establish
+its fixed slot layout, and reads those slots when a later `record_point()` wraps
+`graph.replay()`. All named CUDA Graph observations owned by one recorder share
+one internal `RecordAction` session, one replay counter, and one counter
+increment kernel. Tensor payload copies still occur once per observed slot.
 
 `record_point()` applies the same synchronization policy as quick Probe queries.
 Pass the replay or eager execution stream when it is known. `False` is valid
-only after the application has already made every D2H copy host-visible.
+only after the application has synchronized every relevant D2H copy.
 
 Normal recorder context exit freezes a `complete=True` run. If the body raises,
 the recorder instead freezes and persists the collected points as a terminal
@@ -197,9 +200,9 @@ and invocations are mismatches. Set `mode="exact"` for raw-value identity or
 promotion.
 
 `compare_runs(reference, candidate)` aligns points by label and reports
-missing points. `compare_point_series(reference_point, candidate_run)` compares one
-reference against every candidate point in order. Point-series comparison is intended
-for replay drift, stale static inputs, and state-update bugs.
+missing points. `compare_point_series(reference_point, candidate_run)` compares
+one reference against every candidate point in order. Point-series comparison
+is intended for replay drift, stale static inputs, and state-update bugs.
 
 Reports identify the first issue in reference execution order and label it as
 `mismatch` or `inconclusive`; a later definite mismatch still makes the overall
@@ -241,8 +244,9 @@ and validates payload size and SHA-256 before materialization.
   choice when the graph replay stream is known.
 - A `torch.device` explicitly requests device-wide synchronization and must
   identify the probe's device.
-- `False` performs no explicit synchronization. Use it only after another query
-  or an application-owned stream dependency has made the results host-visible.
+- `False` performs no explicit synchronization. Use it only after a previous
+  synchronized probe query or after the application has synchronized all
+  relevant CUDA work.
 
 Only those three types are accepted; strings, integer device indices, and
 `None` are rejected. A stream or device from another CUDA device is also an
@@ -401,19 +405,19 @@ is required.
   tensor probes.
 - Every enabled probe adds one small device counter allocation and one
   single-thread increment kernel to its captured graph.
-- Print and Check host callbacks can create large GPU bubbles and are intended
-  for targeted correctness debugging, not performance measurement. Their cost
-  scales with payload and has no hardware-independent byte threshold; prefer
-  Record plus offline analysis for large tensors.
+- `PrintAction` and `CheckAction` host callbacks can create large GPU bubbles
+  and are intended for targeted correctness debugging, not performance
+  measurement. Their cost scales with payload and has no hardware-independent
+  byte threshold; prefer `RecordAction` plus offline analysis for large tensors.
 - Shared staging means one probe's graph must not be replayed concurrently.
 - Eager `when="always"` use is also single-stream, and a probe cannot return to
   eager use after its capture.
 - Keep a probe alive while any graph containing it can replay; call `close()`
-  only afterward. Close accepts the same bool/stream/device synchronization
+  only afterward. `close()` accepts the same bool/stream/device synchronization
   targets as queries; an enabled probe rejects close during capture.
-- Prefer passing the replay stream to snapshot and check-status queries. The default
-  device-wide synchronization is a correctness fallback when that stream is
-  unknown; it is not the recommended performance path.
+- Prefer passing the replay stream to snapshot and check-status queries. The
+  default device-wide synchronization is a correctness fallback when that
+  stream is unknown; it is not the recommended performance path.
 
 ## Further Reading
 

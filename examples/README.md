@@ -46,7 +46,7 @@ history in a long-running process.
 
 | Example | Main capability | Extra dependency |
 |---|---|---|
-| [TensorBoard export](integrations/tensorboard_export.py) | export synchronized `TensorProbeSnapshot` records | `tensorboard` |
+| [TensorBoard export](integrations/tensorboard_export.py) | export synchronized `TensorProbeSnapshot` values | `tensorboard` |
 
 Read the [integration notes](integrations/README.md) for dependency and output
 ownership.

@@ -57,34 +57,34 @@ flowchart TB
     MP -->|returns| MPS
     MR -->|produces| MRun
 
-    TPS --> TI["Direct inspection or snapshot comparison"]
-    MPS --> MI["Direct inspection or snapshot comparison"]
-    TRun --> TA["Point, run, and series analysis"]
-    MRun --> MA["Point, timeline, phase, and run-group analysis"]
+    TPS -->|supports| TI["Direct inspection or snapshot comparison"]
+    MPS -->|supports| MI["Direct inspection or snapshot comparison"]
+    TRun -->|supports| TA["Point, run, and series analysis"]
+    MRun -->|supports| MA["Point, timeline, phase, and run-group analysis"]
 
     TC -. "same role; no cross-domain base class" .-> MC
     ETC -. "tensor-specific eager path" .-> TC
 ```
 
-## Recorded Data Model
+## Shared Observation Model
 
-Both public workflows use the same domain hierarchy:
+The workflows use different containers but converge on the same domain leaf:
 
 ```mermaid
 flowchart LR
-    TProbe["TensorProbe"] --> TS["TensorProbeSnapshot"]
-    TS -->|1:N| TO["TensorObservation"]
-    TR["TensorRecorder"] --> TRun["TensorRun"]
-    TRun -->|1:N| TPoint["TensorPoint"]
-    TPoint -->|1:N| TO
-    TO --> TC["Tensor comparisons and reports"]
+    TProbe["TensorProbe"] -->|returns| TS["TensorProbeSnapshot"]
+    TS -->|contains 1:N| TO["TensorObservation"]
+    TR["TensorRecorder"] -->|produces| TRun["TensorRun"]
+    TRun -->|contains 1:N| TPoint["TensorPoint"]
+    TPoint -->|contains 1:N| TO
+    TO -->|analyzed by| TC["Tensor comparisons and reports"]
 
-    MProbe["MemoryProbe"] --> MS["MemoryProbeSnapshot"]
-    MS -->|1:N| MO["MemoryObservation"]
-    MR["MemoryRecorder"] --> MRun["MemoryRun"]
-    MRun -->|1:N| MPoint["MemoryPoint"]
-    MPoint -->|1:N| MO
-    MO --> MC["Memory comparisons and reports"]
+    MProbe["MemoryProbe"] -->|returns| MS["MemoryProbeSnapshot"]
+    MS -->|contains 1:N| MO["MemoryObservation"]
+    MR["MemoryRecorder"] -->|produces| MRun["MemoryRun"]
+    MRun -->|contains 1:N| MPoint["MemoryPoint"]
+    MPoint -->|contains 1:N| MO
+    MO -->|analyzed by| MC["Memory comparisons and reports"]
 ```
 
 An Observation has no `probe_id`, `run_id`, point index, replay index, label,
@@ -94,11 +94,11 @@ without pretending a standalone snapshot belongs to a run.
 
 `SnapshotComparison` and `PointComparison` are sibling public result types in
 both domains. They share private state-comparison behavior, but direct Probe
-comparison consumes `ProbeSnapshot -> Observation` data as-is; it never
-constructs a synthetic Point or Run. Memory lifetime reports identify their
-real source with `source_kind`, `source_id`, and `source_name`.
+comparison consumes the observations contained by a `ProbeSnapshot` directly;
+it never constructs a synthetic Point or Run. Memory lifetime reports identify
+their real source with `source_kind`, `source_id`, and `source_name`.
 
-The hierarchy has domain-specific meaning:
+The leaf data has domain-specific meaning:
 
 - A tensor observation identifies one named probe invocation and its tensor
   payload or summary.
@@ -111,16 +111,16 @@ The Probe path deliberately omits run identity and persistence:
 
 ```mermaid
 flowchart LR
-    P["Probe"] --> C["Private Collector"]
-    C --> A["ProbeSnapshot A"]
-    C --> B["ProbeSnapshot B"]
-    A --> D["Inspect or compare"]
-    B --> D
+    P["Probe"] -->|calls| C["Private Collector"]
+    C -->|returns| A["ProbeSnapshot A"]
+    C -->|returns| B["ProbeSnapshot B"]
+    A -->|input to| D["Inspect or compare"]
+    B -->|input to| D
 ```
 
 Probe snapshots may be retained and compared directly, but they do not carry a
-`run_id`, point label, bundle path, or recording-session lifecycle. Users move
-to Recorder when those capabilities are needed.
+`run_id`, point label, bundle path, or recording-session lifecycle. Use a
+Recorder when those capabilities are needed.
 
 ## Lifecycle Rules
 
@@ -151,8 +151,9 @@ runs instead.
    collection uses `_EagerTensorCollector`.
 2. Recorder does not instantiate the public Probe API. Shared behavior belongs
    in the private collection layer.
-3. Probe returns standalone `ProbeSnapshot` values; Recorder produces
-   `Run -> Point -> Observation` data.
+3. Probe returns standalone `ProbeSnapshot` values; Recorder produces `Run`
+   values. A Run contains Points, while ProbeSnapshot and Point both contain
+   ownerless Observations.
 4. Tensor and memory Collectors have matching responsibilities but no synthetic
    common base class. Their execution and synchronization mechanisms remain
    domain-specific.

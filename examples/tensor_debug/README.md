@@ -44,5 +44,5 @@ eager reference. Summary-only input and hidden observations demonstrate
 `inconclusive` allclose results, while the full output payload provides a
 conclusive mismatch and first-divergence evidence.
 
-Both workflows require fresh output directories because bundle writers never
-overwrite an existing nonempty bundle.
+Both workflows require absent or empty output directories because bundle
+writers never overwrite an existing nonempty bundle.

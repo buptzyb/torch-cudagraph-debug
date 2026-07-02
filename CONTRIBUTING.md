@@ -14,7 +14,7 @@ python -m pip install pytest build twine ruff
 python -m pip install --no-build-isolation -e .
 ```
 
-CPU-only environments can run Python-level tests. CUDA graph behavior requires a
+CPU-only environments can run Python-level tests. CUDA Graph behavior requires a
 CUDA-enabled PyTorch runtime and a GPU.
 
 ## Checks

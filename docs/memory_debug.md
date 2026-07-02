@@ -1,11 +1,12 @@
 # Memory Debug Guide
 
 `memory_debug` captures CUDA allocator state and analyzes default and
-non-default pools, including CUDA Graph private pools. `MemoryProbe` is the
-quick workflow for standalone snapshots and direct two-point comparison;
-`MemoryRecorder` is the complete workflow for labeled points, persistence,
-timelines, phases, and run groups. Both reuse the private memory collector and
-produce ownerless `MemoryObservation` leaves. This guide covers collection,
+non-default pools, including CUDA Graph private pools. `MemoryProbe.snapshot()`
+returns a standalone `MemoryProbeSnapshot` for direct two-point comparison.
+`MemoryRecorder` produces a `MemoryRun` whose labeled points support
+persistence, timelines, phases, and run groups. Probe snapshots and Recorder
+points contain the same ownerless `MemoryObservation` leaves; both workflows
+reuse the private memory collector. This guide covers collection,
 allocator-history ownership, comparisons, lifetimes, reports, bundles, and
 multi-rank workflows. For exact signatures, see the
 [API reference](api.md#memory-debug); for runnable programs, follow the
@@ -50,14 +51,15 @@ present in the snapshot; users do not pass pool handles. `pool[0,0]` is the
 default allocator pool, and other `segment_pool_id` values are private pools
 such as CUDA Graph pools.
 
-The two public lifecycles share the same leaf type:
+The control-flow and containment relationships are distinct:
 
 ```text
-MemoryProbe -> MemoryProbeSnapshot -> MemoryObservation
-MemoryRecorder -> MemoryRun -> MemoryPoint -> MemoryObservation
+MemoryProbe --returns--> MemoryProbeSnapshot
+MemoryRecorder --produces--> MemoryRun --contains--> MemoryPoint
+MemoryProbeSnapshot and MemoryPoint --contain--> MemoryObservation
 ```
 
-Each snapshot or point owns one ordered observation for every `(pool_id,
+Each snapshot or point contains one ordered observation for every `(pool_id,
 stream)` pair. Its `pool_stats` and `allocator_scope_stats` are derived views.
 Ownership and workflow metadata live on the snapshot or point, not on an
 observation.
@@ -217,16 +219,16 @@ phase_range = run.between("before_capture", "after_capture")
 ```
 
 The default timeline is manifest-only: it computes absolute state and deltas
-without decompressing raw snapshots, and `timeline.point_comparisons` is empty. Passing
-`MemoryAttributionOptions(stacks=True)` or `events=True` streams one raw snapshot per
-point and attaches attributed adjacent comparisons.
+without decompressing raw snapshots, and `timeline.point_comparisons` is empty.
+Passing `MemoryAttributionOptions(stacks=True)` or `events=True` streams one raw
+snapshot per point and attaches attributed adjacent comparisons.
 
 Every point and comparison also exposes allocator-wide `all`, `default`, and
 `private` totals. These totals include unmatched private pools, so a cross-run
 headline does not silently become a default-pool-only number. Pool and
-pool/stream rows remain available for drill-down.
+pool/stream rows remain available for detailed inspection.
 
-Allocation cohort lifetimes are an optional same-run drill-down, not a
+Allocation cohort lifetimes are an optional focused same-run analysis, not a
 replacement for those modes. To answer "what was live here, and when did it
 go away?", anchor the analysis at the point of interest:
 
@@ -367,21 +369,22 @@ snapshot access is worth the additional host memory.
 
 ## Reports And Bundles
 
-Every timeline, comparison, and phase result owns:
+Every report result provides:
 
 - `to_text(include_unchanged=True)`
 - `to_dict()`
 - `to_html(include_unchanged=True)`
 - `write(output_dir, include_unchanged=True)`
 
-`write()` creates `report.txt`, `report.json`, `report.html`, `allocator_scopes.csv`,
-`pools.csv`, and `observations.csv`. Attribution adds
-`allocation_stack_comparisons.csv` or `events.csv`; phase reports add `pool_decomposition.csv` and
-`allocator_scope_decomposition.csv`.
-Lifetime reports add `cohorts.csv`, `cohort_points.csv`,
-`size_histograms.csv`, and, when present, `birth_stacks.csv` and
-`release_stacks.csv`. Group reports add `rank_point_entries.csv` plus
-`point_aggregates.csv`, or `rank_decomposition.csv` plus `phase_aggregates.csv`.
+`write()` always creates `report.txt`, `report.json`, and `report.html`.
+Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
+`observations.csv`. Attribution can add `allocation_stack_comparisons.csv` or
+`events.csv`; phase reports add `pool_decomposition.csv` and
+`allocator_scope_decomposition.csv`. Lifetime reports add `cohorts.csv`,
+`cohort_points.csv`, `size_histograms.csv`, and, when present,
+`birth_stacks.csv` and `release_stacks.csv`. Group reports add either
+`rank_point_entries.csv` and `point_aggregates.csv`, or `rank_decomposition.csv`
+and `phase_aggregates.csv`.
 Timeline HTML includes allocated, reserved, and optional cohort charts.
 `include_unchanged=False` filters zero-change rows from text, HTML, and CSV;
 JSON always retains the complete result.
@@ -439,13 +442,16 @@ tcgd-memory compare-run-group-phases baseline candidate \
 Omitting the candidate bundle from `compare-points` compares two ordered points
 in the reference run; `--pool-map` is valid only across independent runs.
 
-The report-producing commands support `--stacks`, `--events`, `--lifetimes`,
-`--on-missing`, `--stack-depth`, `--limit`, and `--only-changed`. `summary`
-accepts only one bundle. `summarize-run-group` accepts one group directory and
-`--output`. `allocation-lifetimes` always groups cohorts by allocation stack and enables
-allocator events by default; pass `--no-events` for snapshot-only inference. Cross-run
-event and lifetime requests are rejected
-because allocator addresses and histories have no cross-run identity.
+`timeline`, `compare-points`, `compare-phases`, and
+`compare-run-group-phases` accept the common attribution and presentation
+options: `--stacks`, `--events`, `--lifetimes`, `--on-missing`,
+`--stack-depth`, `--limit`, and `--only-changed`. `allocation-lifetimes`
+accepts the same options, groups cohorts by allocation stack, and enables
+allocator events by default; pass `--no-events` for snapshot-only inference.
+`summary` accepts one bundle and writes to standard output.
+`summarize-run-group` accepts one group directory plus `--output`, without
+attribution options. Cross-run event and lifetime requests are rejected because
+allocator addresses and histories have no cross-run identity.
 
 Low-level snapshot parsers and attribution helpers are available under
 `torch_cudagraph_debug.memory_debug.advanced`. They are experimental and may

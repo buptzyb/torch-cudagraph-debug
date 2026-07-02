@@ -5,9 +5,9 @@ history, attribution, and report semantics.
 
 `quickstart.py` uses one `MemoryProbe` for standalone snapshots and immediate
 two-point comparison. `snapshot_comparison.py` compares endpoints captured by
-independent probes. The remaining examples use `MemoryRecorder` to collect labeled
-points into immutable runs for persistence, timeline, lifetime, phase, and
-multi-rank analysis.
+independent probes. The remaining examples use `MemoryRecorder` to collect
+labeled points into immutable runs for persistence, timeline, lifetime, phase,
+and multi-rank analysis.
 
 ## Allocator History
 
@@ -16,7 +16,7 @@ choose its overhead explicitly:
 
 | Example | History mode | Information used |
 |---|---|---|
-| `quickstart.py` | disabled | pool/stream state and same-run lifecycle |
+| `quickstart.py` | disabled | pool/stream state and same-probe lifecycle |
 | `snapshot_comparison.py` | disabled | cross-probe pool/stream state |
 | `timeline_and_reports.py` | state | live-block allocation stacks |
 | `attribution_modes.py` | disabled, then all | warn/error policy, snapshot inference, and exact events |
@@ -54,9 +54,9 @@ that explicit mapping; identical raw private-pool IDs are never assumed to be
 the same across runs. The example seeds each mapped pool before `phase_start`
 because phase comparison applies the mapping at both start and end points.
 
-Use `distributed_run_groups.py` through `torchrun` on a shared filesystem. Each rank
-writes one direct child bundle. Group reports retain per-rank values and show
-min/max/spread; they never sum per-GPU memory.
+Use `distributed_run_groups.py` through `torchrun` on a shared filesystem. Each
+rank writes one direct child bundle. Group reports retain per-rank values and
+show min/max/spread; they never sum per-GPU memory.
 
 ## CLI
 

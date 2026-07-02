@@ -7,11 +7,13 @@ Focused debugging tools for PyTorch CUDA Graphs:
 - `memory_debug` records allocator snapshots and analyzes default and
   non-default pools, including CUDA Graph private pools.
 
-Both domains expose a low-ceremony `Probe -> ProbeSnapshot` workflow for local
-inspection and two-point comparison. Complete experiments use `Recorder -> Run
--> Point -> Observation` for named points, persistence, timelines, and cross-run
-analysis. Probe and Recorder are sibling clients of private, domain-specific
-collection code; both workflows use the same ownerless Observation leaf type.
+Both domains expose two public collection workflows. A `Probe` returns a
+standalone `ProbeSnapshot` for immediate inspection and direct two-point
+comparison. A `Recorder` produces a `Run` for named points, metadata, optional
+persistence, and structured multi-point or cross-run analysis. A Run contains
+`Point` objects; `ProbeSnapshot` and `Point` both contain the same ownerless
+`Observation` leaf type. Probe and Recorder are sibling clients of private,
+domain-specific collection code.
 
 The package targets Linux, Python 3.10+, and CUDA-enabled PyTorch 2.6+. Source
 builds use the PyTorch and CUDA toolchain in the target environment.
@@ -30,23 +32,25 @@ flowchart TB
             TP["TensorProbe"]
             TPS["TensorProbeSnapshot"]
             TR["TensorRecorder"]
-            TRUN["TensorRun -> TensorPoint"]
+            TRUN["TensorRun"]
+            TPOINT["TensorPoint"]
             TO["TensorObservation<br/>ownerless shared leaf"]
             TC["Private collection<br/>_TensorCollector / _EagerTensorCollector"]
             TSRC["PyTorch tensors + native C++/CUDA<br/>replay counter, D2H staging, callbacks"]
             TB["Optional .tcgd-tensor bundle"]
             TA["Snapshot / point / run / series comparison"]
 
-            TP -->|quick workflow| TPS
-            TPS --> TO
-            TR -->|complete workflow| TRUN
-            TRUN --> TO
-            TRUN --> TB
+            TP -->|returns| TPS
+            TPS -->|contains| TO
+            TR -->|produces| TRUN
+            TRUN -->|contains| TPOINT
+            TPOINT -->|contains| TO
+            TRUN -->|persists as| TB
             TP -. uses .-> TC
             TR -. uses .-> TC
-            TC --> TSRC
-            TO --> TA
-            TB --> TA
+            TC -->|reads/copies| TSRC
+            TO -->|analyzed by| TA
+            TB -->|loaded by| TA
         end
 
         subgraph MEMORY["memory_debug"]
@@ -54,39 +58,42 @@ flowchart TB
             MP["MemoryProbe"]
             MPS["MemoryProbeSnapshot"]
             MR["MemoryRecorder"]
-            MRUN["MemoryRun -> MemoryPoint"]
+            MRUN["MemoryRun"]
+            MPOINT["MemoryPoint"]
             MO["MemoryObservation<br/>ownerless shared leaf"]
             MC["Private collection<br/>_MemoryCollector"]
             MSRC["PyTorch CUDA allocator<br/>_snapshot() + optional allocator history"]
             MB["Optional .tcgd-memory bundle"]
             MA["Snapshot / point / timeline / lifetime /<br/>phase / run-group analysis"]
 
-            MP -->|quick workflow| MPS
-            MPS --> MO
-            MR -->|complete workflow| MRUN
-            MRUN --> MO
-            MRUN --> MB
+            MP -->|returns| MPS
+            MPS -->|contains| MO
+            MR -->|produces| MRUN
+            MRUN -->|contains| MPOINT
+            MPOINT -->|contains| MO
+            MRUN -->|persists as| MB
             MP -. uses .-> MC
             MR -. uses .-> MC
-            MC --> MSRC
-            MO --> MA
-            MB --> MA
+            MC -->|reads| MSRC
+            MO -->|analyzed by| MA
+            MB -->|loaded by| MA
         end
     end
 
-    APP --> TP
-    APP --> TR
-    APP --> MP
-    APP --> MR
+    APP -->|uses| TP
+    APP -->|uses| TR
+    APP -->|uses| MP
+    APP -->|uses| MR
 
-    TA --> TOUT["Text / JSON / CSV / HTML<br/>tcgd-tensor + TensorBoard"]
-    MA --> MOUT["Text / JSON / CSV / HTML<br/>tcgd-memory"]
+    TA -->|renders| TOUT["Text / JSON / CSV / HTML<br/>tcgd-tensor + TensorBoard"]
+    MA -->|renders| MOUT["Text / JSON / CSV / HTML<br/>tcgd-memory"]
 ```
 
 The same vocabulary is used in both domains. `Probe` is the quick, bundle-free
-workflow; `Recorder` owns a complete named run and optional persistence. Both
-reuse private collection code and converge on ownerless `Observation` leaves,
-while snapshot and point comparisons remain sibling result types. See the
+entry point; `Recorder` manages a named recording session and optional
+persistence. Both reuse private collection code and converge on ownerless
+`Observation` leaves, while snapshot and point comparisons remain sibling
+result types. See the
 [detailed architecture](docs/architecture.md) for ownership and lifecycle
 rules.
 
@@ -190,9 +197,10 @@ Continue with the [Tensor Debug guide](docs/tensor_debug.md), the
 For a one-off eager-to-CUDA-Graph check, collect independent Probe snapshots and
 call `compare_snapshots()`. Use `TensorRecorder` when the investigation spans
 multiple points, processes, code revisions, or devices and needs persisted named
-observations in `.tcgd-tensor` bundles. `compare_points()` locates the first divergent probe,
-`compare_runs()` aligns same-labeled points, and `compare_point_series()` checks one
-reference against every replay. Full payloads provide numerical error metrics;
+observations in `.tcgd-tensor` bundles. `compare_points()` locates the first
+divergent observation, `compare_runs()` aligns same-labeled points, and
+`compare_point_series()` checks one reference against every recorded candidate point. Full
+payloads provide numerical error metrics;
 summary payloads provide compact exact-digest evidence and explicitly report
 inconclusive allclose results when raw values are unavailable.
 
@@ -267,8 +275,8 @@ Read the report top-down:
 3. `requested` is the original active allocation request, `allocated` is
    allocator-owned allocated space, `active` is space not yet reusable, and
    `reserved` is the full segment capacity held by the caching allocator.
-4. `pools` identifies which pool changed; `pool/stream observations` records that
-   pool state to individual CUDA streams.
+4. `pools` identifies which pool changed; `pool/stream observations` records
+   the state associated with each CUDA stream in that pool.
 
 The main signal here is `total[private]`: graph capture added a 16 MiB active
 allocation in a private pool. The small default-pool change is separate
@@ -320,7 +328,7 @@ Continue with the [Memory Debug guide](docs/memory_debug.md), the
 | Resource | Purpose |
 |---|---|
 | [Architecture](docs/architecture.md) | Workflow layers, shared data model, ownership, and Collector boundaries |
-| [Tensor Debug guide](docs/tensor_debug.md) | Quick probes, eager/CG runs, bundles, differential comparison, gradients, TensorBoard |
+| [Tensor Debug guide](docs/tensor_debug.md) | Quick probes, eager/CUDA Graph runs, bundles, differential comparison, gradients, TensorBoard |
 | [Memory Debug guide](docs/memory_debug.md) | Quick probes, recording, history policy, timelines, lifetimes, phases, groups, reports, CLI |
 | [API reference](docs/api.md) | Public signatures, result models, errors, and experimental helpers |
 | [Examples](examples/README.md) | Ordered runnable workflows and integration examples |

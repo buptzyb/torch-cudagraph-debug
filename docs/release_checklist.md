@@ -14,7 +14,7 @@
   post-capture rules, unified replay and invocation indexing, device matching,
   callback overhead, non-contiguous copy cost, and synchronization-aware close
   are documented.
-- Confirm tensor run point boundaries, eager/CG observation alignment,
+- Confirm tensor run point boundaries, eager/CUDA Graph observation alignment,
   full/summary payload semantics, clean versus incomplete terminal runs,
   three-state comparison, raw blob format, and CPU-only offline loading are
   documented.
@@ -79,9 +79,8 @@ Tensor coverage must include:
   queued replay visibility, and retained snapshot indices;
 - callback-free query-time counter transfer, callback-counter staging reuse,
   bool/stream/device query synchronization, print cadence, exact check
-  failure indices, explicit device selection, and device mismatch errors.
-- same-Probe and cross-Probe aggregate snapshot comparison;
-
+  failure indices, explicit device selection, and device mismatch errors;
+- same-probe and cross-probe aggregate snapshot comparison;
 - eager repeated named observations and CUDA Graph logical-name slot mapping;
 - one shared recorder session and replay counter across many named observations;
 - full and summary bundles, content-addressed deduplication, every supported
@@ -100,7 +99,7 @@ Memory coverage must include:
 - default and graph-private pool discovery;
 - start/during/end capture points;
 - replay-stable state;
-- same-Probe and cross-Probe standalone snapshot comparison;
+- same-probe and cross-probe standalone snapshot comparison;
 - gzip JSON persistence and `MemoryRun.load()` round trip.
 
 Run every supported single-GPU example from the installed package:
