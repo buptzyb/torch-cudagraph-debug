@@ -161,6 +161,12 @@ with MemoryRecorder(name="capture") as recorder:
 run = recorder.result
 ```
 
+A normal exit sets `run.complete=True`. If the body raises, the recorder keeps
+the points already collected, sets `finished_at`, writes a terminal
+`complete=False` manifest when persistence is enabled, and blocks later
+collection. The application exception still propagates, and
+`recorder.result` remains available for postmortem analysis.
+
 ## Allocator History Is Application-Owned
 
 Neither workflow calls `torch.cuda.memory._record_memory_history()`. Pool,

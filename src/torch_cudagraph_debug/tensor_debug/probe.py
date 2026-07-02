@@ -203,14 +203,19 @@ class TensorProbe:
         if not check_status.ok:
             raise TensorCheckError(check_status.message or "tensor check failed")
 
-    def close(self) -> None:
-        """Release native resources.
+    def close(
+        self,
+        *,
+        synchronize: SynchronizeTarget = True,
+    ) -> None:
+        """Synchronize as requested, then release native resources.
 
-        The caller must guarantee that no CUDA graph which captured this probe can replay again.
+        The caller must guarantee that no CUDA graph which captured this probe
+        can replay again.
         """
 
         if not self._closed:
-            self._collector.close()
+            self._collector.close(synchronize=synchronize)
             self._closed = True
 
     def _ensure_open(self) -> None:

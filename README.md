@@ -145,7 +145,8 @@ for observation in snapshot.observations:
         f"replay={snapshot.replay_index} "
         f"invocation={observation.invocation_index}: {observation.tensor()}"
     )
-probe.close()
+# snapshot() already synchronized replay_stream, so cleanup needs no second wait.
+probe.close(synchronize=False)
 ```
 
 Output:
@@ -172,7 +173,10 @@ recommended stream-scoped behavior, or `synchronize=False` after arranging
 ordering yourself.
 
 Other actions are available when needed. Both unavoidably add CUDA host-callback
-overhead and can create a GPU bubble, so use them only at targeted probe sites:
+overhead and can create a GPU bubble, so use them only at small, targeted probe
+sites. Cost grows with payload and depends on dtype, formatting/comparison work,
+host CPU, and runtime; there is no portable byte threshold. For large tensors,
+prefer `RecordAction` plus offline inspection or comparison:
 
 - `PrintAction` prints replay values immediately from a native host callback.
 - `CheckAction` checks replay values against expected CPU tensors.

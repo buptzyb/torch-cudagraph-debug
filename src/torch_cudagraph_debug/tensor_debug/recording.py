@@ -770,7 +770,9 @@ class TensorRecorder:
                 self._active_point = None
 
     def snapshot_run(self) -> TensorRun:
-        return self._build_run(complete=self._result is not None)
+        if self._result is not None:
+            return self._result
+        return self._build_run(complete=False)
 
     def finish(self) -> TensorRun:
         if self._result is not None:
@@ -782,21 +784,36 @@ class TensorRecorder:
         self._write_manifest(complete=True)
         return self._result
 
+    def _abort(self) -> TensorRun:
+        if self._result is not None:
+            return self._result
+        if self._active_point is not None:
+            self._abort_point(self._active_point)
+        self._finished_at = time.time()
+        self._result = self._build_run(complete=False)
+        self._write_manifest(complete=False)
+        return self._result
+
     @property
     def result(self) -> TensorRun:
         if self._result is None:
             raise TensorDebugError("tensor recorder has not been finished")
         return self._result
 
-    def close(self) -> None:
+    def close(
+        self,
+        *,
+        synchronize: SynchronizeTarget = True,
+    ) -> None:
         """Release native resources after the captured graph can no longer replay."""
 
         if self._closed:
             return
+        _validate_synchronize_target(synchronize)
         if self._active_point is not None:
             raise TensorDebugError("cannot close while a tensor point is active")
         if self._collector is not None:
-            self._collector.close()
+            self._collector.close(synchronize=synchronize)
             self._collector = None
         self._closed = True
 
@@ -806,9 +823,12 @@ class TensorRecorder:
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         try:
-            self.finish()
+            if exc_type is None:
+                self.finish()
+            else:
+                self._abort()
         finally:
-            self.close()
+            self.close(synchronize=self.synchronize)
 
     def _next_eager_invocation(self, name: str) -> int:
         assert self._active_point is not None

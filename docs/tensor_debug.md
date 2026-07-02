@@ -28,8 +28,11 @@ callback when used alone and keeps inspection in Python after synchronization.
 It still enqueues a device-to-host copy into pinned staging memory for every
 captured invocation, so keep probes limited to tensors needed for debugging.
 Use `PrintAction` for immediate console output and `CheckAction` when expected
-values are already available. Both add CUDA host-callback overhead and can
-create a GPU bubble, so use them selectively.
+values are already available. Both process tensor elements on the CUDA
+host-callback thread, so cost grows with payload size and depends on dtype,
+formatting or tolerance work, host CPU, and runtime. There is no portable byte
+cutoff. Keep callback-backed probes small and targeted; use `RecordAction` plus
+offline inspection or comparison for large tensors and latency-sensitive paths.
 
 Active actions support contiguous CUDA tensors with `float16`, `bfloat16`,
 `float32`, `float64`, `uint8`, `int8`, `int16`, `int32`, `int64`, or `bool`
@@ -66,13 +69,16 @@ for observation in snapshot.observations:
 
 # The snapshot query already waited for every node in this replay.
 probe.assert_check_ok(synchronize=False)
-probe.close()
+probe.close(synchronize=False)
 ```
 
 One `TensorProbeSnapshot` represents one replay and aggregates every invocation
 slot in capture-call order. `snapshot.tensor()` is shorthand for invocation 0.
 The default `when="capture"` makes eager warmup calls transparent no-ops.
-Use `when="always"` only when eager debug side effects are intentional.
+Use `when="always"` only when eager debug side effects are intentional. Its
+first eager call locks one CUDA stream; calls from another eager stream fail.
+Eager calls may run before the probe's capture, but not after capture has
+established the fixed slot layout.
 
 ## Complete Workflow
 
@@ -138,6 +144,12 @@ kernel. Tensor payload copies still occur once per observed slot.
 `record_point()` applies the same synchronization policy as quick Probe queries.
 Pass the replay or eager execution stream when it is known. `False` is valid
 only after the application has already made every D2H copy host-visible.
+
+Normal recorder context exit freezes a `complete=True` run. If the body raises,
+the recorder instead freezes and persists the collected points as a terminal
+`complete=False` run, blocks later collection, closes its native resources,
+and lets the application exception propagate. `result` remains available for
+postmortem analysis in either case.
 
 ### Full And Summary Payloads
 
@@ -219,8 +231,8 @@ and validates payload size and SHA-256 before materialization.
 
 ## Query Synchronization
 
-`snapshot()`, `clear_snapshot()`, `check_status()`, and `assert_check_ok()` accept one
-keyword-only `synchronize` argument:
+`snapshot()`, `clear_snapshot()`, `check_status()`, `assert_check_ok()`, and
+`close()` accept one keyword-only `synchronize` argument:
 
 - `True` is the correctness-first default and synchronizes the probe's entire
   CUDA device. It may wait for unrelated streams and increases exposure to
@@ -235,12 +247,20 @@ keyword-only `synchronize` argument:
 Only those three types are accepted; strings, integer device indices, and
 `None` are rejected. A stream or device from another CUDA device is also an
 error. A synchronization-enabled query during CUDA Graph capture raises an
-error. Defer host queries until after capture; `False` skips synchronization but
-does not make in-capture host reads meaningful.
+error. Defer host queries until after capture; `False` skips synchronization
+but does not make in-capture host reads meaningful. Closing an enabled probe is
+rejected during capture even with `False` because destroying captured resources
+is never valid.
 
 When several queries follow one replay, synchronize once and use `False` for
 the rest. This avoids repeated waits while preserving explicit ownership of the
 ordering.
+
+`close()` defaults to the same correctness-first device synchronization. Pass
+the replay stream to avoid waiting on unrelated streams, or pass `False` only
+after a prior stream-scoped query/synchronization has completed all probe work.
+An unsynchronized close reports pending eager callbacks instead of freeing
+their payloads.
 
 ## Replay And Invocation Indices
 
@@ -347,8 +367,11 @@ probe = TensorProbe(
 )
 ```
 
-The copy consumes graph-pool memory, approximately one tensor payload per
-captured probe site.
+During capture, the copy consumes graph-pool memory, approximately one tensor
+payload per captured probe site, and remains owned until close because the graph
+references its address. In eager `when="always"` use, the temporary copy is
+recorded on the probe's owning stream and is released after queued work
+completes rather than retained for the probe lifetime.
 
 ## TensorBoard
 
@@ -378,11 +401,16 @@ is required.
   tensor probes.
 - Every enabled probe adds one small device counter allocation and one
   single-thread increment kernel to its captured graph.
-- Probe nodes can create large GPU bubbles and are intended for correctness
-  debugging, not performance measurement.
+- Print and Check host callbacks can create large GPU bubbles and are intended
+  for targeted correctness debugging, not performance measurement. Their cost
+  scales with payload and has no hardware-independent byte threshold; prefer
+  Record plus offline analysis for large tensors.
 - Shared staging means one probe's graph must not be replayed concurrently.
+- Eager `when="always"` use is also single-stream, and a probe cannot return to
+  eager use after its capture.
 - Keep a probe alive while any graph containing it can replay; call `close()`
-  only afterward.
+  only afterward. Close accepts the same bool/stream/device synchronization
+  targets as queries; an enabled probe rejects close during capture.
 - Prefer passing the replay stream to snapshot and check-status queries. The default
   device-wide synchronization is a correctness fallback when that stream is
   unknown; it is not the recommended performance path.

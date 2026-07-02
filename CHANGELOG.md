@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 - 2026-07-01
+## v0.2.0 - Unreleased
 
 ### Added
 
@@ -65,6 +65,22 @@
 - Categorized, runnable Tensor Debug, Memory Debug, CLI, distributed, and
   TensorBoard examples with quickstarts and complete synthetic workflows.
 - Concise root quick starts with dedicated Tensor Debug and Memory Debug guides.
+
+### Changed
+
+- `TensorProbe.close()` and `TensorRecorder.close()` now accept the same
+  bool/stream/device synchronization target as tensor result queries. Closing
+  an enabled probe is rejected during CUDA Graph capture.
+- Eager `when="always"` probes lock one CUDA stream, allow eager work before
+  capture, and reject eager work after capture establishes graph ownership.
+
+### Fixed
+
+- Reclaim eager callback payloads, non-contiguous eager source temporaries, and
+  replaced pinned staging instead of retaining them for the full Probe
+  lifetime. Unsynchronized close now reports pending eager callbacks.
+- Preserve exceptional TensorRecorder and MemoryRecorder sessions as terminal,
+  loadable `complete=False` runs instead of marking partial data complete.
 
 ## v0.1.0 - 2026-05-12
 

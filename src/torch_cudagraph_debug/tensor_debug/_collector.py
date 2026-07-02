@@ -210,6 +210,7 @@ class _TensorCollector:
         if self._replay_index is None:
             raise RuntimeError("enabled tensor collector is missing its replay counter")
         self.synchronize(synchronize)
+        self._handle._reclaim_retired_staging()
         current_replay_index = (
             None if self.callback_enabled else int(self._replay_index.item())
         )
@@ -235,6 +236,7 @@ class _TensorCollector:
         if self._handle is None or not self.record_enabled:
             return
         self.synchronize(synchronize)
+        self._handle._reclaim_retired_staging()
         self._handle.clear_observations()
 
     def check_status(
@@ -253,6 +255,7 @@ class _TensorCollector:
             }
         if self.callback_enabled:
             self.synchronize(synchronize)
+            self._handle._reclaim_retired_staging()
         return self._handle.check_status()
 
     def synchronize(self, synchronize: SynchronizeTarget) -> None:
@@ -260,10 +263,20 @@ class _TensorCollector:
             raise RuntimeError("enabled tensor collector is missing its CUDA device")
         synchronize_tensor_results(self._device, synchronize)
 
-    def close(self) -> None:
+    def close(
+        self,
+        *,
+        synchronize: SynchronizeTarget = True,
+    ) -> None:
         if self._closed:
             return
+        validate_synchronize_target(synchronize)
         if self._handle is not None:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "cannot close tensor collector during CUDA graph capture"
+                )
+            self.synchronize(synchronize)
             self._handle.close()
         self._handle = None
         self._replay_index = None

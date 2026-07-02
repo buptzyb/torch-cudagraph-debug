@@ -80,14 +80,19 @@ index is accepted. Every active source tensor must be on the same device.
 `probe(tensor)` returns the exact input tensor object. In
 `when="capture"`, calls outside CUDA stream capture perform no validation,
 allocation, copy, callback, print, record, or check work. In
-`when="always"`, eager calls execute debug work too.
+`when="always"`, eager calls execute debug work too. The first eager call
+locks one CUDA stream; an eager call from another stream is rejected. Eager
+calls may precede the probe's one graph capture, but eager calls after capture
+are rejected.
 
 The non-contiguous policy is probe-wide because all actions on one probe inspect
 the same source tensor:
 
 - `"error"`: reject a non-contiguous tensor when debug work is active.
-- `"copy"`: create and retain an internal contiguous CUDA copy for the debug
-  path while returning the original tensor.
+- `"copy"`: create an internal contiguous CUDA copy for the debug path while
+  returning the original tensor. Captured slots retain that source because the
+  graph references its address. Eager copies are recorded on the owning stream
+  and are not retained by the probe after queued work completes.
 
 A probe is owned by the first CUDA graph capture session that uses it. Multiple
 calls in that capture create logical slots in invocation order. Reusing the
@@ -128,7 +133,10 @@ probe.watch_grad(
     *,
     strict: bool = False,
 ) -> torch.utils.hooks.RemovableHandle | None
-probe.close() -> None
+probe.close(
+    *,
+    synchronize: bool | torch.cuda.Stream | torch.device = True,
+) -> None
 ```
 
 `replay_index` returns a detached GPU clone of the internal scalar. Mutating
@@ -136,15 +144,17 @@ it cannot change the probe. Reading the property performs no device-to-host
 copy; printing it, calling `.item()`, or moving it to CPU materializes the
 value through PyTorch. It is `None` for an all-disabled probe.
 
-The query methods share one synchronization contract. `True` synchronizes the
-probe's entire CUDA device and is the correctness-first default. It can wait
-for unrelated streams and broaden cross-stream deadlock risk. Passing a
-`torch.cuda.Stream` synchronizes only that stream and is the recommended path
-when the replay stream is known. Passing a `torch.device` explicitly requests
-device-wide synchronization. `False` skips explicit synchronization. A stream
-or device must match the probe device. Strings, integer device indices, `None`,
-and CPU devices are rejected. Synchronization-enabled queries are invalid
-during CUDA Graph capture.
+The query methods and `close()` share one synchronization contract. `True`
+synchronizes the probe's entire CUDA device and is the correctness-first
+default. It can wait for unrelated streams and broaden cross-stream deadlock
+risk. Passing a `torch.cuda.Stream` synchronizes only that stream and is the
+recommended path when the replay stream is known. Passing a `torch.device`
+explicitly requests device-wide synchronization. `False` skips explicit
+synchronization and requires caller-owned ordering. A stream or device must
+match the probe device. Strings, integer device indices, `None`, and CPU
+devices are rejected. Synchronization-enabled queries are invalid during CUDA
+Graph capture; for an enabled probe, `close()` is invalid during capture for
+every synchronization setting.
 
 `snapshot()` returns one aggregate `TensorProbeSnapshot` containing the latest
 value of every capture-time invocation slot. Capture installs copy nodes but
@@ -181,9 +191,12 @@ policy, so default capture-only probes do no work during eager backward. The
 method returns a removable hook handle. If `tensor.requires_grad` is false, it
 returns `None`; with `strict=True`, it raises `RuntimeError`.
 
-`close()` releases native resources. Do not close a probe while a graph that
+`close()` first performs the requested synchronization, reclaims retired host
+staging, and releases native resources. An unsynchronized close fails while an
+eager host callback is still pending. Do not close a probe while a graph that
 captured it may still replay. `TensorProbe` is also a context manager whose exit
-calls `close()`; use that form only when every replay occurs inside the context.
+uses the correctness-first default close; use that form only when every replay
+occurs inside the context.
 
 ### Actions
 
@@ -231,6 +244,13 @@ invocation in capture-call order.
 
 A check mismatch is sticky until the probe is destroyed. The first mismatch
 records the replay and invocation indices.
+
+Print and Check process tensor elements on the CUDA host-callback thread. Their
+latency grows with payload size and also depends on dtype, formatting,
+tolerance checks, host CPU, and runtime, so there is no portable byte cutoff.
+Keep callback-backed probes small and targeted. For large tensors or
+latency-sensitive paths, use `RecordAction`, synchronize outside replay, and
+perform comparison or formatting offline.
 
 ### TensorProbeSnapshot
 
@@ -295,7 +315,10 @@ recorder.record_point(
 recorder.snapshot_run() -> TensorRun
 recorder.finish() -> TensorRun
 recorder.result -> TensorRun
-recorder.close() -> None
+recorder.close(
+    *,
+    synchronize: bool | torch.cuda.Stream | torch.device = True,
+) -> None
 ```
 
 `execution` is explicit because eager execution and graph replay have
@@ -314,10 +337,15 @@ so logical names do not create one replay counter kernel each.
 Its synchronization target inherits the recorder default when omitted.
 Interrupted contexts do not append a point.
 
-`finish()` is idempotent, writes a complete manifest, and rejects later
-points. It does not release captured native storage. `close()` releases that
-storage and requires that the graph can no longer replay. Context-manager exit
-calls `finish()` and then `close()`.
+`finish()` is idempotent, writes `complete=True`, and rejects later points. It
+does not release captured native storage. `close()` releases that storage after
+the requested bool/stream/device synchronization and requires that the graph
+can no longer replay. A normal context-manager exit calls `finish()` and then
+`close()` with the recorder's configured synchronization target. If the block
+raises, the recorder instead freezes and persists its partial result with
+`complete=False`, blocks later collection, closes resources, and does not
+suppress the application exception. `result` and `snapshot_run()` expose that
+same terminal incomplete run.
 
 ```python
 @dataclass(frozen=True)
@@ -651,12 +679,13 @@ recorder.result -> MemoryRun
 ```
 
 `snapshot_run()` returns an immutable incomplete view without stopping
-collection. `finish()` is idempotent, makes later `record_point()` calls invalid,
-writes a complete manifest, and returns an immutable run. `result` is
-available only after finish.
-
-As a context manager, the recorder calls `finish()` on exit and does not
-suppress exceptions.
+collection. `finish()` is idempotent, makes later `record_point()` calls
+invalid, writes `complete=True`, and returns an immutable run. On an exception,
+context-manager exit instead freezes the collected points, writes a terminal
+`complete=False` manifest, makes later collection invalid, and does not
+suppress the application exception. `result` is available after either normal
+or exceptional context exit; `snapshot_run()` and a later idempotent `finish()`
+return that same terminal result.
 
 For tests only, `MemoryRecorder._from_snapshot_provider(...)` injects synthetic
 snapshots without exposing a provider in the public constructor.

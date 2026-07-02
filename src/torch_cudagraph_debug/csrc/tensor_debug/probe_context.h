@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 #include <cuda_runtime_api.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -81,7 +82,6 @@ struct CallbackPayload {
     std::string device;
     int64_t numel = 0;
     bool captured = false;
-    torch::Tensor source_owner;
 };
 
 class ProbeContext {
@@ -102,6 +102,8 @@ class ProbeContext {
     pybind11::list observations(std::optional<uint64_t> replay_index);
     void clear_observations();
     pybind11::dict check_status();
+    pybind11::dict debug_resource_counts() const;
+    void reclaim_retired_staging();
     void close();
 
     void on_callback(const CallbackPayload& payload) noexcept;
@@ -114,6 +116,7 @@ class ProbeContext {
         const torch::Tensor& tensor,
         uint64_t invocation_index) const;
     uint64_t capture_id_for_stream(cudaStream_t stream) const;
+    void validate_eager_stream(cudaStream_t stream);
     uint64_t next_invocation_index(bool is_capturing, uint64_t capture_id);
     torch::Tensor source_tensor_for_enqueue(const torch::Tensor& tensor) const;
     InvocationSlot& ensure_invocation_slot(
@@ -121,9 +124,8 @@ class ProbeContext {
         size_t nbytes,
         uint64_t invocation_index,
         bool is_capturing);
-    CallbackPayload* add_payload(
+    std::unique_ptr<CallbackPayload> make_payload(
         const torch::Tensor& tensor,
-        const torch::Tensor& source,
         void* staging,
         size_t nbytes,
         uint64_t invocation_index,
@@ -149,8 +151,9 @@ class ProbeContext {
     bool has_callback_actions_ = false;
 
     std::vector<void*> retired_staging_;
-    std::vector<std::unique_ptr<CallbackPayload>> payloads_;
+    std::vector<std::unique_ptr<CallbackPayload>> captured_payloads_;
     std::vector<InvocationSlot> invocation_slots_;
+    std::atomic<uint64_t> eager_callbacks_in_flight_{0};
 
     mutable std::mutex mutex_;
     bool closed_ = false;
@@ -159,6 +162,7 @@ class ProbeContext {
     uint64_t captured_capture_id_ = 0;
     uint64_t next_invocation_index_ = 0;
     uint64_t eager_callback_count_ = 0;
+    std::optional<cudaStream_t> eager_stream_;
 
     bool check_failed_ = false;
     uint64_t failure_replay_index_ = 0;

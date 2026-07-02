@@ -122,6 +122,27 @@ Probe snapshots may be retained and compared directly, but they do not carry a
 `run_id`, point label, bundle path, or recording-session lifecycle. Users move
 to Recorder when those capabilities are needed.
 
+## Lifecycle Rules
+
+A Recorder has one terminal result. Normal `finish()` or normal context exit
+sets `complete=True`. Exceptional context exit preserves collected points,
+sets `finished_at`, persists `complete=False`, and freezes further collection;
+it does not relabel a partial investigation as complete. `snapshot_run()` is a
+nonterminal view before exit and returns the terminal result afterward.
+
+Tensor collectors own CUDA-visible storage. `snapshot()`, status queries,
+clear, and `close()` accept the same bool/stream/device synchronization
+contract. Closing an enabled collector is invalid during capture and is valid
+only after every graph that references the collector can no longer replay.
+Captured callback payload addresses remain stable for the graph lifetime;
+eager callback payloads are destroyed when they fire. `when="always"` eager
+collection is single-stream, and eager use is rejected after that collector has
+participated in capture.
+
+Memory collectors have no persistent native graph resources to close. Their
+Probe and Recorder semantics are expressed by immutable snapshots and terminal
+runs instead.
+
 ## Architectural Boundaries
 
 1. Probe and Recorder are sibling public entry points over a private,

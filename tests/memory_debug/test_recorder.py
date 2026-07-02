@@ -289,3 +289,28 @@ def test_memory_run_load_does_not_call_recorder_constructor(
     monkeypatch.setattr(MemoryRecorder, "__init__", fail_init)
     loaded = MemoryRun.load(bundle)
     assert loaded["point"].label == "point"
+
+
+def test_context_exception_persists_incomplete_terminal_run(tmp_path: Path) -> None:
+    bundle = tmp_path / "aborted.tcgd-memory"
+    pending = [snapshot(segment(active=10))]
+    recorder = MemoryRecorder._from_snapshot_provider(
+        lambda marker: pending.pop(0),
+        name="aborted",
+        bundle_dir=bundle,
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with recorder:
+            recorder.record_point("inside")
+            raise RuntimeError("boom")
+
+    assert recorder.result.complete is False
+    assert recorder.result.finished_at is not None
+    assert recorder.snapshot_run() is recorder.result
+    assert recorder.finish() is recorder.result
+    loaded = MemoryRun.load(bundle)
+    assert loaded.complete is False
+    assert [point.label for point in loaded.points] == ["inside"]
+    with pytest.raises(MemoryDebugError, match="finished"):
+        recorder.record_point("late")

@@ -10,12 +10,14 @@
   serialized formats shipped in this repository.
 - Confirm the root README stays limited to concise quick starts and links to
   the dedicated Tensor Debug and Memory Debug guides.
-- Confirm tensor lifecycle, single-capture ownership, unified replay and
-  invocation indexing, device matching, callback overhead, and non-contiguous
-  copy cost are documented.
+- Confirm tensor lifecycle, single-capture ownership, eager single-stream and
+  post-capture rules, unified replay and invocation indexing, device matching,
+  callback overhead, non-contiguous copy cost, and synchronization-aware close
+  are documented.
 - Confirm tensor run point boundaries, eager/CG observation alignment,
-  full/summary payload semantics, three-state comparison, raw blob format, and
-  CPU-only offline loading are documented.
+  full/summary payload semantics, clean versus incomplete terminal runs,
+  three-state comparison, raw blob format, and CPU-only offline loading are
+  documented.
 - Confirm memory ownership, history policy, cross-run matching, JSON bundle
   format, and one-bundle-per-rank rule are documented.
 
@@ -25,6 +27,7 @@
 python -m py_compile $(find src tests examples -name '*.py')
 bash -n examples/memory_debug/cli_workflows.sh
 python -m ruff check src tests examples
+python -m ruff format --check src tests examples
 python -m pytest -q tests/test_terminology.py
 python -m pytest -q
 python -m build --sdist --no-isolation
@@ -67,6 +70,11 @@ Tensor coverage must include:
 - default non-contiguous rejection and explicit copy mode;
 - single-capture ownership rejection;
 - callback and side-stream staging behavior;
+- bounded eager callback payload ownership, eager non-contiguous source
+  release, retired pinned-staging reclamation, and pending-callback close
+  protection;
+- eager single-stream ownership, eager-before-capture support, post-capture
+  eager rejection, and close rejection during capture;
 - 1-based replay advancement, one shared index across repeated invocations,
   queued replay visibility, and retained snapshot indices;
 - callback-free query-time counter transfer, callback-counter staging reuse,
@@ -154,6 +162,18 @@ NPROC_PER_NODE=2 bash \
   "${TCGD_REPO_ROOT}/examples/memory_debug/cli_workflows.sh" \
   distributed "${EXAMPLE_ROOT}/cli-distributed"
 ```
+
+## PyTorch Compatibility Gate
+
+Memory Debug depends on private PyTorch allocator interfaces and schemas:
+`torch.cuda.memory._snapshot()`, allocator metadata markers, block `frames`, and
+`device_traces`. For every newly supported PyTorch minor or NVIDIA container
+release, repeat the exact-sdist installed-package GPU gate with
+`TCGD_FAIL_ON_SKIP=1`. Confirm state-only snapshots with history disabled,
+allocation frames with state history, marker-delimited events with full
+history, graph-private pool IDs, and capture-time snapshot behavior. Treat a
+schema or warning-policy change as a compatibility issue to fix or document;
+do not accept a skipped test as coverage.
 
 ## Public Ref Gate
 

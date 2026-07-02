@@ -156,6 +156,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::arg("replay_index") = py::none())
         .def("clear_observations", &torch_cudagraph_debug::tensor_debug::ProbeContext::clear_observations)
         .def("check_status", &torch_cudagraph_debug::tensor_debug::ProbeContext::check_status)
+        .def(
+            "_debug_resource_counts",
+            &torch_cudagraph_debug::tensor_debug::ProbeContext::debug_resource_counts)
+        .def(
+            "_reclaim_retired_staging",
+            &torch_cudagraph_debug::tensor_debug::ProbeContext::reclaim_retired_staging)
         .def("close", &torch_cudagraph_debug::tensor_debug::ProbeContext::close);
 
     m.def(

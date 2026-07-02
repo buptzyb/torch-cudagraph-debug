@@ -610,7 +610,9 @@ class MemoryRecorder:
     def snapshot_run(self) -> MemoryRun:
         """Return an immutable view of points collected so far."""
 
-        return self._build_run(complete=self._result is not None)
+        if self._result is not None:
+            return self._result
+        return self._build_run(complete=False)
 
     def finish(self) -> MemoryRun:
         """Finish collection and return the immutable run; idempotent."""
@@ -620,6 +622,14 @@ class MemoryRecorder:
         self._finished_at = time.time()
         self._result = self._build_run(complete=True)
         self._write_manifest(complete=True)
+        return self._result
+
+    def _abort(self) -> MemoryRun:
+        if self._result is not None:
+            return self._result
+        self._finished_at = time.time()
+        self._result = self._build_run(complete=False)
+        self._write_manifest(complete=False)
         return self._result
 
     def _build_run(self, *, complete: bool) -> MemoryRun:
@@ -648,7 +658,10 @@ class MemoryRecorder:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        self.finish()
+        if exc_type is None:
+            self.finish()
+        else:
+            self._abort()
 
     def _write_snapshot(self, index: int, snapshot: AllocatorSnapshotData) -> Path:
         assert self.bundle_dir is not None

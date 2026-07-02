@@ -8,8 +8,10 @@ import torch
 
 from torch_cudagraph_debug.tensor_debug import (
     TensorBundleError,
+    TensorDebugError,
     TensorOwnershipError,
     TensorPayloadUnavailableError,
+    TensorRecorder,
     TensorRun,
 )
 
@@ -186,3 +188,35 @@ def test_load_normalizes_invalid_modes_to_bundle_errors(tmp_path: Path) -> None:
 
     with pytest.raises(TensorBundleError, match="invalid tensor bundle mode"):
         TensorRun.load(bundle)
+
+
+def test_recorder_exception_exit_persists_incomplete_terminal_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "aborted.tcgd-tensor"
+    recorder: TensorRecorder | None = None
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with TensorRecorder(
+            execution="eager",
+            name="aborted",
+            bundle_dir=bundle,
+        ) as recorder:
+            with recorder.record_point("kept"):
+                pass
+            with recorder.record_point("discarded"):
+                raise RuntimeError("boom")
+
+    assert recorder is not None
+    assert recorder.result.complete is False
+    assert recorder.result.finished_at is not None
+    loaded = TensorRun.load(bundle)
+    assert loaded.complete is False
+    assert [point.label for point in loaded.points] == ["kept"]
+    assert recorder.snapshot_run() is recorder.result
+    assert recorder.finish() is recorder.result
+    with pytest.raises(TensorDebugError, match="closed"):
+        with recorder.record_point("late"):
+            pass

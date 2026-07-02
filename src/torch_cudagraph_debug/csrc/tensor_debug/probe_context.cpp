@@ -6,6 +6,7 @@
 #include "tensor_debug/tensor_format.h"
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime_api.h>
 #include <pybind11/stl.h>
@@ -119,7 +120,9 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
     }
 
     c10::cuda::CUDAGuard device_guard(tensor.device());
-    cudaStream_t stream = c10::cuda::getCurrentCUDAStream(tensor.get_device()).stream();
+    const c10::cuda::CUDAStream current_stream =
+        c10::cuda::getCurrentCUDAStream(tensor.get_device());
+    cudaStream_t stream = current_stream.stream();
     cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
     TCGD_CUDA_CHECK(cudaStreamIsCapturing(stream, &capture_status));
     const bool is_capturing = capture_status != cudaStreamCaptureStatusNone;
@@ -127,6 +130,9 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
         return tensor;
     }
 
+    if (!is_capturing) {
+        validate_eager_stream(stream);
+    }
     const uint64_t capture_id = is_capturing ? capture_id_for_stream(stream) : 0;
     const uint64_t invocation_index = next_invocation_index(is_capturing, capture_id);
 
@@ -138,8 +144,12 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
 
     InvocationSlot& slot =
         ensure_invocation_slot(tensor, nbytes, invocation_index, is_capturing);
-    if (!tensor.is_contiguous()) {
+    if (!tensor.is_contiguous() && is_capturing) {
         slot.source_owners.push_back(source);
+    } else if (!tensor.is_contiguous()) {
+        c10::cuda::CUDACachingAllocator::recordStream(
+            source.storage().data_ptr(),
+            current_stream);
     }
 
     if (is_capturing && invocation_index == 0) {
@@ -169,14 +179,28 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
             TCGD_CUDA_CHECK(cudaStreamWaitEvent(
                 stream, replay_index_ready_event_, 0));
         }
-        CallbackPayload* payload = add_payload(
+        std::unique_ptr<CallbackPayload> payload = make_payload(
             tensor,
-            source,
             slot.staging,
             nbytes,
             invocation_index,
             is_capturing);
-        TCGD_CUDA_CHECK(cudaLaunchHostFunc(stream, &ProbeContext::host_callback, payload));
+        if (is_capturing) {
+            CallbackPayload* raw = payload.get();
+            TCGD_CUDA_CHECK(
+                cudaLaunchHostFunc(stream, &ProbeContext::host_callback, raw));
+            captured_payloads_.push_back(std::move(payload));
+        } else {
+            CallbackPayload* raw = payload.release();
+            eager_callbacks_in_flight_.fetch_add(1, std::memory_order_release);
+            const cudaError_t status =
+                cudaLaunchHostFunc(stream, &ProbeContext::host_callback, raw);
+            if (status != cudaSuccess) {
+                eager_callbacks_in_flight_.fetch_sub(1, std::memory_order_release);
+                payload.reset(raw);
+                TCGD_CUDA_CHECK(status);
+            }
+        }
     }
     return tensor;
 }
@@ -247,17 +271,55 @@ pybind11::dict ProbeContext::check_status() {
     return result;
 }
 
+pybind11::dict ProbeContext::debug_resource_counts() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    size_t source_owner_count = 0;
+    for (const InvocationSlot& slot : invocation_slots_) {
+        source_owner_count += slot.source_owners.size();
+    }
+
+    pybind11::dict result;
+    result["captured_payloads"] = captured_payloads_.size();
+    result["eager_callbacks_in_flight"] =
+        eager_callbacks_in_flight_.load(std::memory_order_acquire);
+    result["source_owners"] = source_owner_count;
+    result["retired_staging"] = retired_staging_.size();
+    return result;
+}
+
+void ProbeContext::reclaim_retired_staging() {
+    std::vector<void*> retired;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        retired.swap(retired_staging_);
+    }
+    for (void* ptr : retired) {
+        if (ptr != nullptr) {
+            TCGD_CUDA_CHECK(cudaFreeHost(ptr));
+        }
+    }
+}
+
 void ProbeContext::close() {
     {
         std::lock_guard<std::mutex> guard(mutex_);
         if (closed_) {
             return;
         }
+        const uint64_t in_flight =
+            eager_callbacks_in_flight_.load(std::memory_order_acquire);
+        if (in_flight != 0) {
+            std::ostringstream oss;
+            oss << "cannot close tensor debug probe " << name_
+                << " while " << in_flight
+                << " eager callback(s) are pending; synchronize first";
+            throw std::runtime_error(oss.str());
+        }
         closed_ = true;
     }
 
     release_resources_noexcept();
-    payloads_.clear();
+    captured_payloads_.clear();
     invocation_slots_.clear();
     replay_index_ = torch::Tensor();
     unregister_context(id_);
@@ -422,6 +484,26 @@ uint64_t ProbeContext::capture_id_for_stream(cudaStream_t stream) const {
 #endif
 }
 
+void ProbeContext::validate_eager_stream(cudaStream_t stream) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (captured_once_) {
+        throw std::runtime_error(
+            "tensor debug probe " + name_ +
+            " has already been captured by a CUDA graph; eager calls after "
+            "capture are unsupported");
+    }
+    if (!eager_stream_.has_value()) {
+        eager_stream_ = stream;
+        return;
+    }
+    if (*eager_stream_ != stream) {
+        throw std::runtime_error(
+            "tensor debug probe " + name_ +
+            " already owns a different eager CUDA stream; create one probe "
+            "per eager stream");
+    }
+}
+
 uint64_t ProbeContext::next_invocation_index(bool is_capturing, uint64_t capture_id) {
     std::lock_guard<std::mutex> guard(mutex_);
 
@@ -492,9 +574,8 @@ InvocationSlot& ProbeContext::ensure_invocation_slot(
     return slot;
 }
 
-CallbackPayload* ProbeContext::add_payload(
+std::unique_ptr<CallbackPayload> ProbeContext::make_payload(
     const torch::Tensor& tensor,
-    const torch::Tensor& source,
     void* staging,
     size_t nbytes,
     uint64_t invocation_index,
@@ -509,13 +590,7 @@ CallbackPayload* ProbeContext::add_payload(
     payload->device = tensor.device().str();
     payload->numel = tensor.numel();
     payload->captured = is_capturing;
-    if (!tensor.is_contiguous()) {
-        payload->source_owner = source;
-    }
-
-    CallbackPayload* raw = payload.get();
-    payloads_.push_back(std::move(payload));
-    return raw;
+    return payload;
 }
 
 void ProbeContext::set_failure(
@@ -558,8 +633,17 @@ void ProbeContext::release_resources_noexcept() {
 }
 
 void CUDART_CB ProbeContext::host_callback(void* user_data) {
-    const auto* payload = static_cast<const CallbackPayload*>(user_data);
-    payload->owner->on_callback(*payload);
+    auto* payload = static_cast<CallbackPayload*>(user_data);
+    ProbeContext* owner = payload->owner;
+    if (payload->captured) {
+        owner->on_callback(*payload);
+        return;
+    }
+
+    std::unique_ptr<CallbackPayload> owned(payload);
+    owner->on_callback(*owned);
+    owned.reset();
+    owner->eager_callbacks_in_flight_.fetch_sub(1, std::memory_order_release);
 }
 
 std::shared_ptr<ProbeContext> make_probe_context(

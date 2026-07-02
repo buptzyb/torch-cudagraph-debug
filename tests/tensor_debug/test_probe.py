@@ -17,6 +17,15 @@ from torch_cudagraph_debug.tensor_debug import (
 from torch_cudagraph_debug.tensor_debug import _collector as collector_module
 
 
+@pytest.fixture(autouse=True)
+def _default_to_not_capturing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        collector_module.torch.cuda,
+        "is_current_stream_capturing",
+        lambda: False,
+    )
+
+
 def test_require_native_reports_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_native, "_EXTENSION", None)
     monkeypatch.setattr(
@@ -62,6 +71,9 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
                 "replay_index": 0,
                 "invocation_index": -1,
             }
+
+        def _reclaim_retired_staging(self) -> None:
+            pass
 
         def close(self) -> None:
             self.closed = True
@@ -111,7 +123,7 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
     assert observation.source_device == "cuda:0"
     assert torch.equal(observation.tensor(), torch.tensor([1.0, 2.0]))
     probe.assert_check_ok()
-    probe.close()
+    probe.close(synchronize=False)
 
     with pytest.raises(RuntimeError, match="closed"):
         probe.snapshot()
@@ -126,6 +138,9 @@ def test_assert_check_ok_raises_check_error(monkeypatch: pytest.MonkeyPatch) -> 
                 "replay_index": 3,
                 "invocation_index": 1,
             }
+
+        def _reclaim_retired_staging(self) -> None:
+            pass
 
         def close(self) -> None:
             pass
@@ -172,8 +187,20 @@ def test_probe_validates_when() -> None:
         )
 
 
+def test_probe_close_validates_synchronization_target() -> None:
+    probe = TensorProbe("disabled", [PrintAction(enabled=False)])
+
+    with pytest.raises(TypeError, match="bool, torch.cuda.Stream, or torch.device"):
+        probe.close(synchronize="cuda:0")  # type: ignore[arg-type]
+
+    probe.close(synchronize=False)
+
+
 def test_probe_filters_disabled_actions(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeHandle:
+        def _reclaim_retired_staging(self) -> None:
+            pass
+
         def close(self) -> None:
             pass
 
@@ -205,7 +232,7 @@ def test_probe_filters_disabled_actions(monkeypatch: pytest.MonkeyPatch) -> None
             PrintAction(max_items=3, enabled=True),
         ],
     )
-    probe.close()
+    probe.close(synchronize=False)
 
 
 def test_all_disabled_probe_is_noop_without_native(
@@ -240,7 +267,7 @@ def test_all_disabled_probe_is_noop_without_native(
     )
     probe.assert_check_ok()
     probe.clear_snapshot()
-    probe.close()
+    probe.close(synchronize=False)
 
     with pytest.raises(RuntimeError, match="closed"):
         probe(tensor)
@@ -310,6 +337,9 @@ def test_replay_index_property_returns_an_independent_tensor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeHandle:
+        def _reclaim_retired_staging(self) -> None:
+            pass
+
         def close(self) -> None:
             pass
 
@@ -341,7 +371,7 @@ def test_replay_index_property_returns_an_independent_tensor(
     assert current is not None
     assert current.item() == 0
 
-    probe.close()
+    probe.close(synchronize=False)
     with pytest.raises(RuntimeError, match="closed"):
         _ = probe.replay_index
 
@@ -373,6 +403,9 @@ def test_snapshot_reuses_callback_counter_staging(
                 "replay_index": 0,
                 "invocation_index": -1,
             }
+
+        def _reclaim_retired_staging(self) -> None:
+            pass
 
         def close(self) -> None:
             pass
@@ -423,7 +456,7 @@ def test_snapshot_reuses_callback_counter_staging(
     synchronize_calls.clear()
     probe.assert_check_ok()
     assert synchronize_calls == [(torch.device("cuda:0"), True)]
-    probe.close()
+    probe.close(synchronize=False)
 
 
 def test_synchronization_target_accepts_only_bool_stream_or_device(

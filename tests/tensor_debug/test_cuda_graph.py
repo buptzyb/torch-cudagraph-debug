@@ -25,6 +25,14 @@ def replay_index_value(probe: TensorProbe) -> int:
     return int(replay_index.item())
 
 
+def debug_resource_counts(probe: TensorProbe) -> dict[str, int]:
+    handle = probe._collector._handle
+    assert handle is not None
+    return {
+        str(key): int(value) for key, value in handle._debug_resource_counts().items()
+    }
+
+
 def test_check_inside_cuda_graph() -> None:
     if not torch.cuda.is_available() or not _native.extension_available():
         pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
@@ -879,3 +887,172 @@ def test_probe_device_must_match_active_tensor_device() -> None:
     with pytest.raises(RuntimeError, match="created on cuda:0.*cuda:1"):
         probe(x)
     probe.close()
+
+
+def test_eager_callback_payloads_do_not_accumulate() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    value = torch.arange(16, device="cuda", dtype=torch.float32)
+    probe = TensorProbe(
+        "bounded-eager-callbacks",
+        actions=[CheckAction(value.detach().cpu(), rtol=0.0, atol=0.0)],
+        when="always",
+    )
+
+    for _ in range(256):
+        probe(value)
+
+    stream = torch.cuda.current_stream()
+    probe.assert_check_ok(synchronize=stream)
+    counts = debug_resource_counts(probe)
+    assert counts["captured_payloads"] == 0
+    assert counts["eager_callbacks_in_flight"] == 0
+    assert counts["source_owners"] == 0
+    probe.close(synchronize=False)
+
+
+def test_eager_non_contiguous_temporaries_and_retired_staging_are_reclaimed() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    base = torch.arange(64 * 64, device="cuda", dtype=torch.float32).reshape(64, 64)
+    probe = TensorProbe(
+        "bounded-eager-copy",
+        actions=[RecordAction()],
+        non_contiguous="copy",
+        when="always",
+    )
+
+    latest = None
+    for size in (8, 16, 32, 48, 64):
+        latest = base[:size, :size].t()
+        assert not latest.is_contiguous()
+        probe(latest)
+
+    assert latest is not None
+    stream = torch.cuda.current_stream()
+    snapshot = probe.snapshot(synchronize=stream)
+    torch.testing.assert_close(snapshot.tensor(), latest.detach().cpu().contiguous())
+    counts = debug_resource_counts(probe)
+    assert counts["retired_staging"] == 0
+    assert counts["source_owners"] == 0
+    assert counts["eager_callbacks_in_flight"] == 0
+    probe.close(synchronize=False)
+
+
+def test_always_mode_rejects_a_second_eager_stream() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    value = torch.arange(4, device="cuda", dtype=torch.float32)
+    probe = TensorProbe(
+        "single-eager-stream",
+        actions=[RecordAction()],
+        when="always",
+    )
+    first_stream = torch.cuda.current_stream()
+    probe(value)
+
+    second_stream = torch.cuda.Stream()
+    with torch.cuda.stream(second_stream):
+        with pytest.raises(RuntimeError, match="different eager CUDA stream"):
+            probe(value)
+
+    first_stream.synchronize()
+    probe.close(synchronize=False)
+
+
+def test_always_mode_rejects_eager_calls_after_capture() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    value = torch.arange(4, device="cuda", dtype=torch.float32)
+    probe = TensorProbe(
+        "eager-then-capture",
+        actions=[RecordAction()],
+        when="always",
+    )
+    probe(value)
+    torch.cuda.current_stream().synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probe(value + 1)
+    graph.replay()
+    torch.cuda.current_stream().synchronize()
+
+    with pytest.raises(RuntimeError, match="eager calls after capture"):
+        probe(value)
+    probe.close(synchronize=False)
+
+
+def test_capture_callback_payload_count_is_fixed_per_invocation() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    value = torch.arange(4, device="cuda", dtype=torch.float32)
+    expected = [value.detach().cpu(), (value + 1).detach().cpu()]
+    probe = TensorProbe(
+        "fixed-capture-payloads",
+        actions=[CheckAction(expected, rtol=0.0, atol=0.0)],
+    )
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probe(value)
+        probe(value + 1)
+
+    assert debug_resource_counts(probe)["captured_payloads"] == 2
+    for _ in range(3):
+        graph.replay()
+    stream = torch.cuda.current_stream()
+    probe.assert_check_ok(synchronize=stream)
+    counts = debug_resource_counts(probe)
+    assert counts["captured_payloads"] == 2
+    assert counts["eager_callbacks_in_flight"] == 0
+    probe.close(synchronize=False)
+
+
+def test_close_without_synchronization_rejects_pending_eager_callback() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    first = torch.arange(4, device="cuda", dtype=torch.float32)
+    second = torch.arange(8, device="cuda", dtype=torch.float32)
+    probe = TensorProbe(
+        "pending-eager-callback",
+        actions=[PrintAction(every=1_000_000, summary=False)],
+        when="always",
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        torch.cuda._sleep(1_000_000_000)
+        probe(first)
+        probe(second)
+
+    before = debug_resource_counts(probe)
+    assert before["eager_callbacks_in_flight"] == 2
+    assert before["retired_staging"] == 1
+    with pytest.raises(RuntimeError, match="eager callback.*pending"):
+        probe.close(synchronize=False)
+    after = debug_resource_counts(probe)
+    assert after["eager_callbacks_in_flight"] == 2
+    assert after["retired_staging"] == 1
+    probe.close(synchronize=stream)
+
+
+def test_close_is_rejected_during_capture() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    value = torch.arange(4, device="cuda", dtype=torch.float32)
+    probe = TensorProbe("close-during-capture", actions=[RecordAction()])
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probe(value)
+        with pytest.raises(RuntimeError, match="during CUDA graph capture"):
+            probe.close(synchronize=False)
+
+    torch.cuda.synchronize()
+    probe.close(synchronize=False)
