@@ -1,4 +1,4 @@
-"""Record one tensor from CUDA Graph replay.
+"""Record named tensors from CUDA Graph replay.
 
 Run with: python examples/tensor_debug/probe/quickstart.py
 """
@@ -23,9 +23,9 @@ def main() -> None:
         with torch.cuda.graph(graph):
             # One probe can record multiple intermediate tensors in one graph.
             first_source = static_x * 2
-            first_hidden = probe(first_source)
+            first_hidden = probe(first_source, name="after_scale")
             second_source = torch.relu(first_hidden - 5)
-            second_hidden = probe(second_source)
+            second_hidden = probe(second_source, name="after_relu")
             output = second_hidden.square()
 
         replay_stream = torch.cuda.current_stream()
@@ -33,13 +33,17 @@ def main() -> None:
 
         # The query waits only for the stream that launched this replay.
         snapshot = probe.snapshot(synchronize=replay_stream)
-        assert [item.invocation_index for item in snapshot.observations] == [0, 1]
+        assert [
+            (item.name, item.invocation_index, item.order)
+            for item in snapshot.observations
+        ] == [("after_scale", 0, 0), ("after_relu", 0, 1)]
         for observation, expected_tensor in zip(snapshot.observations, expected):
             tensor = observation.tensor()
             torch.testing.assert_close(tensor, expected_tensor)
             print(
                 f"replay={snapshot.replay_index} "
-                f"invocation={observation.invocation_index}: {tensor}"
+                f"name={observation.name} invocation={observation.invocation_index} "
+                f"order={observation.order}: {tensor}"
             )
         assert first_hidden is first_source
         assert second_hidden is second_source

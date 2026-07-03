@@ -44,7 +44,7 @@ def export_snapshots_to_tensorboard(
         global_step = _resolve_step(snapshot, step)
         multiple = len(snapshot.observations) > 1
         for observation in snapshot.observations:
-            base_tag = f"{tag_prefix}{observation.probe_name}"
+            base_tag = f"{tag_prefix}{observation.name}"
             if multiple:
                 base_tag += f"/invocation_{observation.invocation_index}"
             tensor = observation.tensor().detach()

@@ -54,7 +54,10 @@ def test_bundle_round_trips_every_supported_dtype_and_loads_lazily(
     assert manifest["schema"] == "torch-cudagraph-debug/tensor-run"
     assert manifest["complete"] is True
     assert manifest["execution"] == "eager"
-    assert manifest["points"][0]["observations"][0]["blob_file"].startswith("blobs/")
+    observation = manifest["points"][0]["observations"][0]
+    assert observation["name"] == str(dtypes[0])
+    assert "probe_name" not in observation
+    assert observation["blob_file"].startswith("blobs/")
 
     loaded = TensorRun.load(bundle)
     for dtype in dtypes:
@@ -142,6 +145,47 @@ def test_scalar_and_empty_tensor_round_trip(tmp_path: Path) -> None:
     assert loaded["point"].observation("scalar").tensor().shape == ()
     assert loaded["point"].observation("scalar").tensor().item() == 3.5
     assert loaded["point"].observation("empty").tensor().shape == (0, 3)
+
+
+def test_load_rejects_removed_probe_name_field(tmp_path: Path) -> None:
+    bundle = tmp_path / "old-field.tcgd-tensor"
+    make_tensor_run(
+        [("point", [("x", torch.ones(1), "full")])],
+        bundle_dir=bundle,
+    )
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    observation = manifest["points"][0]["observations"][0]
+    observation["probe_name"] = observation.pop("name")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(TensorBundleError, match="invalid fields"):
+        TensorRun.load(bundle)
+
+
+def test_load_rejects_noncontiguous_per_name_invocations(tmp_path: Path) -> None:
+    bundle = tmp_path / "invalid-invocation.tcgd-tensor"
+    make_tensor_run(
+        [("point", [("x", torch.ones(1), "full")])],
+        bundle_dir=bundle,
+    )
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["points"][0]["observations"][0]["invocation_index"] = 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(TensorBundleError, match="independently per name"):
+        TensorRun.load(bundle)
+
+
+def test_recorder_watch_grad_validates_observation_name_at_registration() -> None:
+    recorder = TensorRecorder(execution="eager")
+    tensor = torch.ones(1, requires_grad=True)
+
+    with pytest.raises(ValueError, match="observation name must be non-empty"):
+        recorder.watch_grad("", tensor)
+
+    recorder.close()
 
 
 def test_extreme_finite_values_keep_manifest_json_valid(tmp_path: Path) -> None:

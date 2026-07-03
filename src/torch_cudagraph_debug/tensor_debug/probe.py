@@ -20,7 +20,11 @@ from ._collector import (
 )
 from .actions import NonContiguousPolicy
 from .errors import TensorCheckError, TensorDebugError, TensorOwnershipError
-from .recording import TensorObservation, _summarize_tensor
+from .recording import (
+    TensorObservation,
+    _summarize_tensor,
+    _validate_observation_name,
+)
 from .snapshots import TensorCheckStatus, TensorProbeSnapshot
 
 if TYPE_CHECKING:
@@ -51,6 +55,7 @@ class TensorProbe:
         )
         self.non_contiguous = self._collector.non_contiguous
         self.when = self._collector.when
+        self._capture_invocation_counts: dict[str, int] = {}
 
     @property
     def replay_index(self) -> torch.Tensor | None:
@@ -58,20 +63,36 @@ class TensorProbe:
 
         return self._collector.replay_index
 
-    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Return ``tensor`` unchanged while enqueueing debug work on the current stream."""
+    def __call__(
+        self,
+        tensor: torch.Tensor,
+        *,
+        name: str | None = None,
+    ) -> torch.Tensor:
+        """Return ``tensor`` unchanged while enqueueing one named observation."""
 
-        return self._collector.enqueue(tensor)
+        resolved_name = _validate_observation_name(self.name if name is None else name)
+        invocation_index = self._next_capture_invocation(
+            tensor,
+            resolved_name,
+        )
+        return self._collector.enqueue(
+            tensor,
+            name=resolved_name,
+            invocation_index=invocation_index,
+        )
 
     def watch_grad(
         self,
         tensor: torch.Tensor,
         *,
+        name: str | None = None,
         strict: bool = False,
     ) -> RemovableHandle | None:
         """Register an autograd hook that probes the tensor's backward gradient."""
 
         self._ensure_open()
+        resolved_name = _validate_observation_name(self.name if name is None else name)
         if not tensor.requires_grad:
             if strict:
                 raise RuntimeError(
@@ -82,7 +103,7 @@ class TensorProbe:
         def hook(grad: torch.Tensor | None) -> torch.Tensor | None:
             if grad is None:
                 return None
-            self(grad)
+            self(grad, name=resolved_name)
             return grad
 
         return tensor.register_hook(hook)
@@ -113,13 +134,13 @@ class TensorProbe:
                 "recorded tensor invocations reported different replay indices"
             )
         observations = []
-        for order, item in enumerate(collected):
+        for item in collected:
             tensor = item.tensor.detach().contiguous().cpu()
             raw = tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
             observations.append(
                 TensorObservation(
-                    order=order,
-                    probe_name=item.probe_name,
+                    order=item.order,
+                    name=item.name,
                     invocation_index=item.invocation_index,
                     shape=item.shape,
                     stride=tuple(tensor.stride()),
@@ -185,10 +206,13 @@ class TensorProbe:
 
         self._ensure_open()
         native_check_status = self._collector.check_status(synchronize=synchronize)
+        raw_name = native_check_status.get("name")
         return TensorCheckStatus(
             ok=bool(native_check_status.get("ok", False)),
             message=str(native_check_status.get("message", "")),
             replay_index=int(native_check_status.get("replay_index", 0)),
+            order=int(native_check_status.get("order", -1)),
+            name=None if raw_name is None else str(raw_name),
             invocation_index=int(native_check_status.get("invocation_index", -1)),
         )
 
@@ -217,6 +241,24 @@ class TensorProbe:
         if not self._closed:
             self._collector.close(synchronize=synchronize)
             self._closed = True
+
+    def _next_capture_invocation(
+        self,
+        tensor: torch.Tensor,
+        name: str,
+    ) -> int:
+        if (
+            not self._collector.enabled
+            or not isinstance(tensor, torch.Tensor)
+            or tensor.device.type != "cuda"
+        ):
+            return 0
+        with torch.cuda.device(tensor.device):
+            if not torch.cuda.is_current_stream_capturing():
+                return 0
+        invocation_index = self._capture_invocation_counts.get(name, 0)
+        self._capture_invocation_counts[name] = invocation_index + 1
+        return invocation_index
 
     def _ensure_open(self) -> None:
         if self._closed:

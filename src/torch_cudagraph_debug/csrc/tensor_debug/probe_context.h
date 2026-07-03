@@ -53,8 +53,9 @@ enum class NonContiguousPolicy { Error, Copy };
 enum class ProbeMode { Capture, Always };
 
 struct TensorObservationData {
-    std::string probe_name;
+    std::string name;
     uint64_t replay_index = 0;
+    uint64_t order = 0;
     uint64_t invocation_index = 0;
     std::vector<int64_t> shape;
     at::ScalarType dtype = at::kFloat;
@@ -65,7 +66,7 @@ struct TensorObservationData {
     bool captured = false;
 };
 
-struct InvocationSlot {
+struct TensorSlot {
     void* staging = nullptr;
     size_t staging_nbytes = 0;
     TensorObservationData observation;
@@ -76,6 +77,8 @@ struct CallbackPayload {
     class ProbeContext* owner = nullptr;
     void* staging = nullptr;
     size_t nbytes = 0;
+    uint64_t order = 0;
+    std::string name;
     uint64_t invocation_index = 0;
     std::vector<int64_t> shape;
     at::ScalarType dtype = at::kFloat;
@@ -98,7 +101,10 @@ class ProbeContext {
     ProbeContext(const ProbeContext&) = delete;
     ProbeContext& operator=(const ProbeContext&) = delete;
 
-    torch::Tensor enqueue(const torch::Tensor& tensor);
+    torch::Tensor enqueue(
+        const torch::Tensor& tensor,
+        const std::string& observation_name,
+        uint64_t invocation_index);
     pybind11::list observations(std::optional<uint64_t> replay_index);
     void clear_observations();
     pybind11::dict check_status();
@@ -114,24 +120,32 @@ class ProbeContext {
     void validate_tensor(const torch::Tensor& tensor) const;
     void validate_check_actions(
         const torch::Tensor& tensor,
+        uint64_t order,
+        const std::string& observation_name,
         uint64_t invocation_index) const;
     uint64_t capture_id_for_stream(cudaStream_t stream) const;
     void validate_eager_stream(cudaStream_t stream);
-    uint64_t next_invocation_index(bool is_capturing, uint64_t capture_id);
+    uint64_t next_slot_index(bool is_capturing, uint64_t capture_id);
     torch::Tensor source_tensor_for_enqueue(const torch::Tensor& tensor) const;
-    InvocationSlot& ensure_invocation_slot(
+    TensorSlot& ensure_slot(
         const torch::Tensor& tensor,
         size_t nbytes,
+        uint64_t order,
+        const std::string& observation_name,
         uint64_t invocation_index,
         bool is_capturing);
     std::unique_ptr<CallbackPayload> make_payload(
         const torch::Tensor& tensor,
         void* staging,
         size_t nbytes,
+        uint64_t order,
+        const std::string& observation_name,
         uint64_t invocation_index,
         bool is_capturing);
     void set_failure(
         uint64_t replay_index,
+        int64_t order,
+        std::string observation_name,
         int64_t invocation_index,
         const std::string& message);
     void release_resources_noexcept();
@@ -152,7 +166,7 @@ class ProbeContext {
 
     std::vector<void*> retired_staging_;
     std::vector<std::unique_ptr<CallbackPayload>> captured_payloads_;
-    std::vector<InvocationSlot> invocation_slots_;
+    std::vector<TensorSlot> slots_;
     std::atomic<uint64_t> eager_callbacks_in_flight_{0};
 
     mutable std::mutex mutex_;
@@ -160,12 +174,14 @@ class ProbeContext {
 
     bool captured_once_ = false;
     uint64_t captured_capture_id_ = 0;
-    uint64_t next_invocation_index_ = 0;
+    uint64_t next_slot_index_ = 0;
     uint64_t eager_callback_count_ = 0;
     std::optional<cudaStream_t> eager_stream_;
 
     bool check_failed_ = false;
     uint64_t failure_replay_index_ = 0;
+    int64_t failure_order_ = -1;
+    std::string failure_name_;
     int64_t failure_invocation_index_ = -1;
     std::string failure_message_;
 };

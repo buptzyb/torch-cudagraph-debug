@@ -26,7 +26,8 @@ SynchronizeTarget = bool | torch.cuda.Stream | torch.device
 
 @dataclass(frozen=True)
 class _CollectedTensor:
-    probe_name: str
+    name: str
+    order: int
     replay_index: int
     invocation_index: int
     tensor: torch.Tensor
@@ -182,6 +183,10 @@ class _TensorCollector:
             self._handle = None
 
     @property
+    def enabled(self) -> bool:
+        return self._handle is not None
+
+    @property
     def device(self) -> torch.device | None:
         return self._device
 
@@ -192,11 +197,17 @@ class _TensorCollector:
             return None
         return self._replay_index.detach().clone()
 
-    def enqueue(self, tensor: torch.Tensor) -> torch.Tensor:
+    def enqueue(
+        self,
+        tensor: torch.Tensor,
+        *,
+        name: str,
+        invocation_index: int,
+    ) -> torch.Tensor:
         self._ensure_open()
         if self._handle is None:
             return tensor
-        return self._handle.enqueue(tensor)
+        return self._handle.enqueue(tensor, name, invocation_index)
 
     def collect(
         self,
@@ -219,7 +230,8 @@ class _TensorCollector:
             tensor = item["tensor"]
             output.append(
                 _CollectedTensor(
-                    probe_name=str(item["probe_name"]),
+                    name=str(item["name"]),
+                    order=int(item["order"]),
                     replay_index=int(item["replay_index"]),
                     invocation_index=int(item.get("invocation_index", 0)),
                     tensor=tensor,
@@ -251,6 +263,8 @@ class _TensorCollector:
                 "ok": True,
                 "message": "",
                 "replay_index": 0,
+                "order": -1,
+                "name": None,
                 "invocation_index": -1,
             }
         if self.callback_enabled:

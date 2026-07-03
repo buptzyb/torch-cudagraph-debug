@@ -64,9 +64,9 @@ class TensorComparisonOptions:
 
 @dataclass(frozen=True)
 class TensorObservationComparison:
-    """Comparison result for one stable (probe name, invocation) key."""
+    """Comparison result for one stable (observation name, invocation) key."""
 
-    probe_name: str
+    name: str
     invocation_index: int
     status: ComparisonStatus
     kind: ObservationComparisonKind
@@ -85,7 +85,7 @@ class TensorObservationComparison:
 
     @property
     def key(self) -> TensorObservationKey:
-        return TensorObservationKey(self.probe_name, self.invocation_index)
+        return TensorObservationKey(self.name, self.invocation_index)
 
     @property
     def changed(self) -> bool:
@@ -95,7 +95,7 @@ class TensorObservationComparison:
         reference = self.reference
         candidate = self.candidate
         return {
-            "probe_name": self.probe_name,
+            "name": self.name,
             "invocation_index": self.invocation_index,
             "status": self.status,
             "kind": self.kind,
@@ -240,7 +240,7 @@ class _TensorStateComparison:
             for item in worst:
                 lines.append(
                     "    "
-                    f"{_key_text(item.probe_name, item.invocation_index)} "
+                    f"{_key_text(item.name, item.invocation_index)} "
                     f"mismatch={item.mismatch_fraction:.3%} "
                     f"max_abs={item.max_abs_error!r}"
                 )
@@ -255,7 +255,7 @@ class _TensorStateComparison:
         for item in selected:
             line = (
                 f"    [{item.status}] "
-                f"{_key_text(item.probe_name, item.invocation_index)}: "
+                f"{_key_text(item.name, item.invocation_index)}: "
                 f"{item.reason}"
             )
             if item.mismatch_count is not None and item.total_count is not None:
@@ -412,7 +412,7 @@ class TensorRunComparison:
                     continue
                 lines.append(
                     f"    [{observation_comparison.status}] "
-                    f"{_key_text(observation_comparison.probe_name, observation_comparison.invocation_index)}: "
+                    f"{_key_text(observation_comparison.name, observation_comparison.invocation_index)}: "
                     f"{observation_comparison.reason}"
                 )
         return "\n".join(lines)
@@ -511,7 +511,7 @@ class TensorPointSeriesComparison:
                     continue
                 lines.append(
                     f"    [{observation_comparison.status}] "
-                    f"{_key_text(observation_comparison.probe_name, observation_comparison.invocation_index)}: "
+                    f"{_key_text(observation_comparison.name, observation_comparison.invocation_index)}: "
                     f"{observation_comparison.reason}"
                 )
         return "\n".join(lines)
@@ -562,7 +562,7 @@ def compare_snapshots(
     *,
     options: TensorComparisonOptions | None = None,
 ) -> TensorSnapshotComparison:
-    """Compare standalone tensor snapshots by probe/invocation key."""
+    """Compare standalone tensor snapshots by observation name/invocation key."""
 
     if (
         reference.probe_id == candidate.probe_id
@@ -590,7 +590,7 @@ def compare_points(
     *,
     options: TensorComparisonOptions | None = None,
 ) -> TensorPointComparison:
-    """Compare two tensor points using stable probe/invocation keys."""
+    """Compare two tensor points using stable observation name/invocation keys."""
 
     selected = options or TensorComparisonOptions()
     observation_comparisons, warnings = _compare_observation_sets(
@@ -621,7 +621,7 @@ def _compare_observation_sets(
         if other is None:
             observation_comparisons.append(
                 TensorObservationComparison(
-                    probe_name=observation.probe_name,
+                    name=observation.name,
                     invocation_index=observation.invocation_index,
                     status="mismatch",
                     kind="reference_only",
@@ -640,7 +640,7 @@ def _compare_observation_sets(
             continue
         observation_comparisons.append(
             TensorObservationComparison(
-                probe_name=observation.probe_name,
+                name=observation.name,
                 invocation_index=observation.invocation_index,
                 status="mismatch",
                 kind="candidate_only",
@@ -791,7 +791,7 @@ def _compare_observations(
 
     if not dtype_changed and reference.sha256 == candidate.sha256:
         return TensorObservationComparison(
-            probe_name=reference.probe_name,
+            name=reference.name,
             invocation_index=reference.invocation_index,
             status="match",
             kind="match",
@@ -809,7 +809,7 @@ def _compare_observations(
     if options.mode == "exact" and not dtype_changed:
         if not reference.has_payload or not candidate.has_payload:
             return TensorObservationComparison(
-                probe_name=reference.probe_name,
+                name=reference.name,
                 invocation_index=reference.invocation_index,
                 status="mismatch",
                 kind="value",
@@ -820,7 +820,7 @@ def _compare_observations(
             )
     elif not reference.has_payload or not candidate.has_payload:
         return TensorObservationComparison(
-            probe_name=reference.probe_name,
+            name=reference.name,
             invocation_index=reference.invocation_index,
             status="inconclusive",
             kind="payload",
@@ -842,7 +842,7 @@ def _metadata_comparison(
     reason: str,
 ) -> TensorObservationComparison:
     return TensorObservationComparison(
-        probe_name=reference.probe_name,
+        name=reference.name,
         invocation_index=reference.invocation_index,
         status="mismatch",
         kind="metadata",
@@ -951,7 +951,7 @@ def _compare_full_payloads(
         else f"tensor values fail {options.mode} comparison"
     )
     return TensorObservationComparison(
-        probe_name=reference.probe_name,
+        name=reference.name,
         invocation_index=reference.invocation_index,
         status=status,
         kind="match" if status == "match" else "value",
@@ -1024,7 +1024,7 @@ def _state_display(state: TensorPoint | TensorProbeSnapshot) -> str:
 
 def _issue_text(issue: TensorObservationComparison) -> str:
     return (
-        f"{_key_text(issue.probe_name, issue.invocation_index)} "
+        f"{_key_text(issue.name, issue.invocation_index)} "
         f"[{issue.status}/{issue.kind}] {issue.reason}"
     )
 

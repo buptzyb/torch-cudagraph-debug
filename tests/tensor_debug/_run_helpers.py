@@ -37,13 +37,13 @@ def make_tensor_run(
     for label, values in points:
         counts: dict[str, int] = {}
         pending = []
-        for order, (probe_name, tensor, payload) in enumerate(values):
-            invocation = counts.get(probe_name, 0)
-            counts[probe_name] = invocation + 1
+        for order, (observation_name, tensor, payload) in enumerate(values):
+            invocation = counts.get(observation_name, 0)
+            counts[observation_name] = invocation + 1
             pending.append(
                 _PendingObservation(
                     order=order,
-                    probe_name=probe_name,
+                    name=observation_name,
                     invocation_index=invocation,
                     replay_index=None,
                     shape=tuple(tensor.shape),

@@ -5,6 +5,7 @@ import torch
 
 from torch_cudagraph_debug import _native
 from torch_cudagraph_debug.tensor_debug import (
+    TensorObservationKey,
     TensorProbe,
     CheckAction,
     TensorCheckError,
@@ -361,6 +362,41 @@ def test_one_probe_multiple_invocations_records_and_offline_compares() -> None:
     probe.close()
 
 
+def test_named_observations_use_per_name_invocations_and_global_order() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    x = torch.arange(4, device="cuda", dtype=torch.float32)
+    probe = TensorProbe("named", actions=[RecordAction()])
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probe(x + 1, name="hidden")
+        probe(x + 2, name="logits")
+        probe(x + 3, name="hidden")
+
+    graph.replay()
+    snapshot = probe.snapshot()
+
+    assert [
+        (item.name, item.invocation_index, item.order) for item in snapshot.observations
+    ] == [
+        ("hidden", 0, 0),
+        ("logits", 0, 1),
+        ("hidden", 1, 2),
+    ]
+    assert list(snapshot.by_key) == [
+        TensorObservationKey("hidden", 0),
+        TensorObservationKey("logits", 0),
+        TensorObservationKey("hidden", 1),
+    ]
+    torch.testing.assert_close(
+        snapshot.tensor("hidden", invocation_index=1),
+        torch.arange(4, dtype=torch.float32) + 3,
+    )
+    probe.close()
+
+
 def test_record_allows_different_shapes_in_one_cuda_graph() -> None:
     if not torch.cuda.is_available() or not _native.extension_available():
         pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
@@ -615,7 +651,9 @@ def test_tensor_check_reports_missing_expected_for_invocation() -> None:
     probe = TensorProbe("short-expected", actions=[CheckAction([x.detach().cpu()])])
 
     g = torch.cuda.CUDAGraph()
-    with pytest.raises(RuntimeError, match="no tensor for invocation 1"):
+    with pytest.raises(
+        RuntimeError, match=r"no tensor for observation short-expected\[1\] at order 1"
+    ):
         with torch.cuda.graph(g):
             probe(x)
             probe(x)
@@ -822,7 +860,7 @@ def test_record_and_check_share_first_mismatch_replay_index() -> None:
 
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
-        probe(x)
+        probe(x, name="activation")
 
     replay_stream = torch.cuda.current_stream()
     g.replay()
@@ -835,7 +873,10 @@ def test_record_and_check_share_first_mismatch_replay_index() -> None:
     status = probe.check_status(synchronize=replay_stream)
     assert status.ok is False
     assert status.replay_index == 2
+    assert status.order == 0
+    assert status.name == "activation"
     assert status.invocation_index == 0
+    assert status.key == TensorObservationKey("activation", 0)
     assert probe.snapshot(synchronize=False).replay_index == 2
     assert replay_index_value(probe) == 2
     probe.close()
@@ -853,7 +894,7 @@ def test_print_every_uses_graph_replay_index(capfd: pytest.CaptureFixture[str]) 
 
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
-        probe(x)
+        probe(x, name="printed")
 
     for _ in range(3):
         g.replay()
@@ -865,7 +906,7 @@ def test_print_every_uses_graph_replay_index(capfd: pytest.CaptureFixture[str]) 
         if "torch-cudagraph-debug:print-every" in line
     ]
     assert len(lines) == 1
-    assert "replay=2 invocation=0" in lines[0]
+    assert "replay=2 observation=printed[0] order=0" in lines[0]
     assert replay_index_value(probe) == 3
     probe.close()
 

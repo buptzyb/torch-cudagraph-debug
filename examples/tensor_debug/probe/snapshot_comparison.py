@@ -15,7 +15,7 @@ from torch_cudagraph_debug.tensor_debug import (
 
 
 def observed_forward(inputs: torch.Tensor, probe: TensorProbe) -> torch.Tensor:
-    hidden = probe((inputs + 1).square())
+    hidden = probe((inputs + 1).square(), name="hidden.square")
     return hidden.sum()
 
 
@@ -27,7 +27,7 @@ def main() -> None:
     stream = torch.cuda.current_stream()
 
     eager_probe = TensorProbe(
-        "hidden.square",
+        "eager-forward",
         [RecordAction()],
         when="always",
     )
@@ -37,7 +37,7 @@ def main() -> None:
     finally:
         eager_probe.close()
 
-    graph_probe = TensorProbe("hidden.square", [RecordAction()])
+    graph_probe = TensorProbe("cuda-graph-forward", [RecordAction()])
     try:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):

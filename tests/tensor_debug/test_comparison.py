@@ -222,6 +222,6 @@ def test_reports_write_text_json_html_and_csv(tmp_path: Path) -> None:
     assert set(paths) == {"text", "json", "html", "observations"}
     payload = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert payload["status"] == "mismatch"
-    assert payload["observation_comparisons"][0]["probe_name"] == "x"
+    assert payload["observation_comparisons"][0]["name"] == "x"
     assert "Tensor comparison" in paths["text"].read_text(encoding="utf-8")
     assert "<table>" in paths["html"].read_text(encoding="utf-8")

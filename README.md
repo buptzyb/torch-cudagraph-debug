@@ -137,8 +137,8 @@ probe = TensorProbe("hidden", [RecordAction()])
 graph = torch.cuda.CUDAGraph()
 with torch.cuda.graph(graph):
     # Each probe call records one intermediate tensor in this dataflow.
-    first_hidden = probe(static_x * 2)
-    second_hidden = probe(torch.relu(first_hidden - 5))
+    first_hidden = probe(static_x * 2, name="after_scale")
+    second_hidden = probe(torch.relu(first_hidden - 5), name="after_relu")
     output = second_hidden.square()
 
 replay_stream = torch.cuda.current_stream()
@@ -150,7 +150,8 @@ snapshot = probe.snapshot(synchronize=replay_stream)
 for observation in snapshot.observations:
     print(
         f"replay={snapshot.replay_index} "
-        f"invocation={observation.invocation_index}: {observation.tensor()}"
+        f"name={observation.name} invocation={observation.invocation_index} "
+        f"order={observation.order}: {observation.tensor()}"
     )
 # snapshot() already synchronized replay_stream, so cleanup needs no second wait.
 probe.close(synchronize=False)
@@ -159,8 +160,8 @@ probe.close(synchronize=False)
 Output:
 
 ```text
-replay=1 invocation=0: tensor([ 0.,  2.,  4.,  6.,  8., 10., 12., 14.])
-replay=1 invocation=1: tensor([0., 0., 0., 1., 3., 5., 7., 9.])
+replay=1 name=after_scale invocation=0 order=0: tensor([ 0.,  2.,  4.,  6.,  8., 10., 12., 14.])
+replay=1 name=after_relu invocation=0 order=1: tensor([0., 0., 0., 1., 3., 5., 7., 9.])
 ```
 
 `RecordAction` is the recommended starting point: query the latest replay
@@ -171,8 +172,10 @@ It still enqueues a device-to-host copy into pinned staging memory for every
 captured invocation, so keep probes limited to tensors needed for debugging.
 
 The graph above captures one sequential dataflow while the same probe observes
-two intermediate tensors. Each probe call creates one invocation slot, and
-`snapshot()` returns all latest values as one aggregate result. The probe's GPU
+two named intermediate tensors. Each call creates one globally ordered slot.
+The stable identity is `(name, invocation_index)`, where the index counts only
+repeated calls with that name; `order` preserves capture execution order.
+`snapshot()` returns all latest slot values as one aggregate result. The probe's GPU
 counter advances once per graph replay, so the snapshot reports one 1-based
 `replay_index` shared by every observation. Query methods use a safe
 device-wide synchronization by default; pass the replay stream for the

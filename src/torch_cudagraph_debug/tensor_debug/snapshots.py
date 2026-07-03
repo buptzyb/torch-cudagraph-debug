@@ -10,7 +10,12 @@ from types import MappingProxyType
 import torch
 
 
-from .recording import TensorObservation, TensorObservationKey
+from .recording import (
+    TensorObservation,
+    TensorObservationKey,
+    _validate_observation_name,
+    _validate_observation_sequence,
+)
 
 
 @dataclass(frozen=True)
@@ -20,7 +25,15 @@ class TensorCheckStatus:
     ok: bool
     message: str
     replay_index: int
+    order: int
+    name: str | None
     invocation_index: int
+
+    @property
+    def key(self) -> TensorObservationKey | None:
+        if self.name is None or self.invocation_index < 0:
+            return None
+        return TensorObservationKey(self.name, self.invocation_index)
 
 
 @dataclass(frozen=True)
@@ -40,36 +53,35 @@ class TensorProbeSnapshot:
             raise ValueError("probe_name must be non-empty")
         if self.replay_index < 0:
             raise ValueError("replay_index must be non-negative")
-        expected = list(range(len(self.observations)))
-        orders = [item.order for item in self.observations]
-        if orders != expected:
-            raise ValueError(
-                "tensor snapshot observations must be contiguous and ordered"
-            )
-        actual = [item.invocation_index for item in self.observations]
-        if actual != expected:
-            raise ValueError(
-                "tensor snapshot invocations must be contiguous and ordered"
-            )
-        if any(item.probe_name != self.probe_name for item in self.observations):
-            raise ValueError("tensor snapshot observations must share the probe name")
+        _validate_observation_sequence(self.observations, owner="tensor snapshot")
 
     @cached_property
     def by_key(self) -> Mapping[TensorObservationKey, TensorObservation]:
         return MappingProxyType({item.key: item for item in self.observations})
 
-    def observation(self, invocation_index: int = 0) -> TensorObservation:
-        key = TensorObservationKey(self.probe_name, invocation_index)
+    def observation(
+        self,
+        name: str | None = None,
+        invocation_index: int = 0,
+    ) -> TensorObservation:
+        resolved_name = (
+            self.probe_name if name is None else _validate_observation_name(name)
+        )
+        key = TensorObservationKey(resolved_name, invocation_index)
         try:
             return self.by_key[key]
         except KeyError as exc:
             raise KeyError(
-                f"tensor observation {self.probe_name!r}[{invocation_index}] "
+                f"tensor observation {resolved_name!r}[{invocation_index}] "
                 f"does not exist at replay {self.replay_index}"
             ) from exc
 
-    def tensor(self, invocation_index: int = 0) -> torch.Tensor:
-        return self.observation(invocation_index).tensor()
+    def tensor(
+        self,
+        name: str | None = None,
+        invocation_index: int = 0,
+    ) -> torch.Tensor:
+        return self.observation(name, invocation_index).tensor()
 
     def descriptor(self) -> dict[str, object]:
         return {

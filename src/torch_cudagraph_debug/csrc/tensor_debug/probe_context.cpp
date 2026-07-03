@@ -109,8 +109,14 @@ ProbeContext::~ProbeContext() {
     release_resources_noexcept();
 }
 
-torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
+torch::Tensor ProbeContext::enqueue(
+    const torch::Tensor& tensor,
+    const std::string& observation_name,
+    uint64_t invocation_index) {
     ensure_open();
+    if (observation_name.empty()) {
+        throw std::runtime_error("observation name must be non-empty");
+    }
 
     if ((!tensor.defined() || !tensor.is_cuda()) && mode_ == ProbeMode::Capture) {
         return tensor;
@@ -134,16 +140,26 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
         validate_eager_stream(stream);
     }
     const uint64_t capture_id = is_capturing ? capture_id_for_stream(stream) : 0;
-    const uint64_t invocation_index = next_invocation_index(is_capturing, capture_id);
+    const uint64_t order = next_slot_index(is_capturing, capture_id);
 
     validate_tensor(tensor);
-    validate_check_actions(tensor, invocation_index);
+    validate_check_actions(
+        tensor,
+        order,
+        observation_name,
+        invocation_index);
 
     torch::Tensor source = source_tensor_for_enqueue(tensor);
     const size_t nbytes = static_cast<size_t>(tensor_nbytes(tensor));
 
-    InvocationSlot& slot =
-        ensure_invocation_slot(tensor, nbytes, invocation_index, is_capturing);
+    TensorSlot& slot =
+        ensure_slot(
+            tensor,
+            nbytes,
+            order,
+            observation_name,
+            invocation_index,
+            is_capturing);
     if (!tensor.is_contiguous() && is_capturing) {
         slot.source_owners.push_back(source);
     } else if (!tensor.is_contiguous()) {
@@ -152,7 +168,7 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
             current_stream);
     }
 
-    if (is_capturing && invocation_index == 0) {
+    if (is_capturing && order == 0) {
         launch_increment_replay_counter(
             replay_index_.data_ptr<int64_t>(), stream);
         if (has_callback_actions_) {
@@ -175,7 +191,7 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
             stream));
     }
     if (has_callback_actions_) {
-        if (is_capturing && invocation_index > 0) {
+        if (is_capturing && order > 0) {
             TCGD_CUDA_CHECK(cudaStreamWaitEvent(
                 stream, replay_index_ready_event_, 0));
         }
@@ -183,6 +199,8 @@ torch::Tensor ProbeContext::enqueue(const torch::Tensor& tensor) {
             tensor,
             slot.staging,
             nbytes,
+            order,
+            observation_name,
             invocation_index,
             is_capturing);
         if (is_capturing) {
@@ -222,8 +240,8 @@ pybind11::list ProbeContext::observations(std::optional<uint64_t> replay_index) 
     std::vector<TensorObservationData> ordered;
     {
         std::lock_guard<std::mutex> guard(mutex_);
-        ordered.reserve(invocation_slots_.size());
-        for (const InvocationSlot& slot : invocation_slots_) {
+        ordered.reserve(slots_.size());
+        for (const TensorSlot& slot : slots_) {
             if (!slot.observation.valid) {
                 continue;
             }
@@ -241,7 +259,8 @@ pybind11::list ProbeContext::observations(std::optional<uint64_t> replay_index) 
     pybind11::list result;
     for (const TensorObservationData& observation : ordered) {
         pybind11::dict item;
-        item["probe_name"] = observation.probe_name;
+        item["name"] = observation.name;
+        item["order"] = observation.order;
         item["replay_index"] = observation.replay_index;
         item["invocation_index"] = observation.invocation_index;
         item["shape"] = observation.shape;
@@ -254,7 +273,7 @@ pybind11::list ProbeContext::observations(std::optional<uint64_t> replay_index) 
 
 void ProbeContext::clear_observations() {
     std::lock_guard<std::mutex> guard(mutex_);
-    for (InvocationSlot& slot : invocation_slots_) {
+    for (TensorSlot& slot : slots_) {
         if (slot.observation.valid && slot.staging != nullptr && slot.observation.nbytes > 0) {
             std::memset(slot.staging, 0, slot.observation.nbytes);
         }
@@ -267,6 +286,12 @@ pybind11::dict ProbeContext::check_status() {
     result["ok"] = !check_failed_;
     result["message"] = failure_message_;
     result["replay_index"] = failure_replay_index_;
+    result["order"] = failure_order_;
+    if (failure_name_.empty()) {
+        result["name"] = pybind11::none();
+    } else {
+        result["name"] = failure_name_;
+    }
     result["invocation_index"] = failure_invocation_index_;
     return result;
 }
@@ -274,7 +299,7 @@ pybind11::dict ProbeContext::check_status() {
 pybind11::dict ProbeContext::debug_resource_counts() const {
     std::lock_guard<std::mutex> guard(mutex_);
     size_t source_owner_count = 0;
-    for (const InvocationSlot& slot : invocation_slots_) {
+    for (const TensorSlot& slot : slots_) {
         source_owner_count += slot.source_owners.size();
     }
 
@@ -320,7 +345,7 @@ void ProbeContext::close() {
 
     release_resources_noexcept();
     captured_payloads_.clear();
-    invocation_slots_.clear();
+    slots_.clear();
     replay_index_ = torch::Tensor();
     unregister_context(id_);
 }
@@ -329,6 +354,8 @@ void ProbeContext::on_callback(const CallbackPayload& payload) noexcept {
     try {
         uint64_t replay_index = 0;
         uint64_t schedule_index = 0;
+        const uint64_t order = payload.order;
+        const std::string& observation_name = payload.name;
         const uint64_t invocation_index = payload.invocation_index;
         if (payload.captured && replay_index_staging_ != nullptr) {
             const int64_t captured_replay_index = *replay_index_staging_;
@@ -353,34 +380,45 @@ void ProbeContext::on_callback(const CallbackPayload& payload) noexcept {
                         action.print.summary);
                     std::fprintf(
                         stderr,
-                        "[torch-cudagraph-debug:%s] replay=%llu invocation=%llu dtype=%s %s\n",
+                        "[torch-cudagraph-debug:%s] replay=%llu observation=%s[%llu] order=%llu dtype=%s %s\n",
                         name_.c_str(),
                         static_cast<unsigned long long>(replay_index),
+                        observation_name.c_str(),
                         static_cast<unsigned long long>(invocation_index),
+                        static_cast<unsigned long long>(order),
                         scalar_type_name(payload.dtype).c_str(),
                         formatted.c_str());
                     std::fflush(stderr);
                 }
             } else if (action.kind == ActionConfig::Kind::Check && action.check.enabled) {
-                if (invocation_index >= action.check.expected.size()) {
+                if (order >= action.check.expected.size()) {
                     std::ostringstream oss;
                     oss << "CheckAction expected list for probe " << name_
-                        << " has no tensor for invocation " << invocation_index;
+                        << " has no tensor for observation " << observation_name
+                        << "[" << invocation_index << "] at order " << order;
                     set_failure(
                         replay_index,
+                        static_cast<int64_t>(order),
+                        observation_name,
                         static_cast<int64_t>(invocation_index),
                         oss.str());
                     continue;
                 }
                 const ExpectedTensorConfig& expected =
-                    action.check.expected[static_cast<size_t>(invocation_index)];
+                    action.check.expected[static_cast<size_t>(order)];
                 if (payload.dtype != expected.expected_dtype ||
                     payload.shape != expected.expected_shape ||
                     payload.numel != expected.expected_numel) {
                     std::ostringstream oss;
                     oss << "check metadata mismatch for probe " << name_
-                        << " invocation " << invocation_index;
-                    set_failure(replay_index, static_cast<int64_t>(invocation_index), oss.str());
+                        << " observation " << observation_name << "["
+                        << invocation_index << "] at order " << order;
+                    set_failure(
+                        replay_index,
+                        static_cast<int64_t>(order),
+                        observation_name,
+                        static_cast<int64_t>(invocation_index),
+                        oss.str());
                     continue;
                 }
                 CheckResult result = check_tensor_bytes(
@@ -393,16 +431,32 @@ void ProbeContext::on_callback(const CallbackPayload& payload) noexcept {
                     action.check.equal_nan);
                 if (!result.ok) {
                     std::ostringstream oss;
-                    oss << "probe " << name_ << " invocation " << invocation_index
-                        << " " << result.message;
-                    set_failure(replay_index, static_cast<int64_t>(invocation_index), oss.str());
+                    oss << "probe " << name_ << " observation "
+                        << observation_name << "[" << invocation_index
+                        << "] at order " << order << " " << result.message;
+                    set_failure(
+                        replay_index,
+                        static_cast<int64_t>(order),
+                        observation_name,
+                        static_cast<int64_t>(invocation_index),
+                        oss.str());
                 }
             }
         }
     } catch (const std::exception& exc) {
-        set_failure(0, -1, std::string("host callback error for probe ") + name_ + ": " + exc.what());
+        set_failure(
+            0,
+            static_cast<int64_t>(payload.order),
+            payload.name,
+            static_cast<int64_t>(payload.invocation_index),
+            std::string("host callback error for probe ") + name_ + ": " + exc.what());
     } catch (...) {
-        set_failure(0, -1, std::string("unknown host callback error for probe ") + name_);
+        set_failure(
+            0,
+            static_cast<int64_t>(payload.order),
+            payload.name,
+            static_cast<int64_t>(payload.invocation_index),
+            std::string("unknown host callback error for probe ") + name_);
     }
 }
 
@@ -437,29 +491,34 @@ void ProbeContext::validate_tensor(const torch::Tensor& tensor) const {
 
 void ProbeContext::validate_check_actions(
     const torch::Tensor& tensor,
+    uint64_t order,
+    const std::string& observation_name,
     uint64_t invocation_index) const {
     for (const ActionConfig& action : actions_) {
         if (action.kind != ActionConfig::Kind::Check || !action.check.enabled) {
             continue;
         }
-        if (invocation_index >= action.check.expected.size()) {
+        if (order >= action.check.expected.size()) {
             std::ostringstream oss;
             oss << "CheckAction expected list for probe " << name_
-                << " has no tensor for invocation " << invocation_index;
+                << " has no tensor for observation " << observation_name
+                << "[" << invocation_index << "] at order " << order;
             throw std::runtime_error(oss.str());
         }
         const ExpectedTensorConfig& expected =
-            action.check.expected[static_cast<size_t>(invocation_index)];
+            action.check.expected[static_cast<size_t>(order)];
         if (tensor.scalar_type() != expected.expected_dtype) {
             std::ostringstream oss;
             oss << "CheckAction expected dtype does not match probe input dtype"
-                << " for invocation " << invocation_index;
+                << " for observation " << observation_name << "["
+                << invocation_index << "] at order " << order;
             throw std::runtime_error(oss.str());
         }
         if (!same_shape(expected.expected_shape, tensor.sizes())) {
             std::ostringstream oss;
             oss << "CheckAction expected shape does not match probe input shape"
-                << " for invocation " << invocation_index;
+                << " for observation " << observation_name << "["
+                << invocation_index << "] at order " << order;
             throw std::runtime_error(oss.str());
         }
     }
@@ -504,7 +563,7 @@ void ProbeContext::validate_eager_stream(cudaStream_t stream) {
     }
 }
 
-uint64_t ProbeContext::next_invocation_index(bool is_capturing, uint64_t capture_id) {
+uint64_t ProbeContext::next_slot_index(bool is_capturing, uint64_t capture_id) {
     std::lock_guard<std::mutex> guard(mutex_);
 
     if (!is_capturing) {
@@ -514,7 +573,7 @@ uint64_t ProbeContext::next_invocation_index(bool is_capturing, uint64_t capture
     if (!captured_once_) {
         captured_once_ = true;
         captured_capture_id_ = capture_id;
-        next_invocation_index_ = 0;
+        next_slot_index_ = 0;
     } else if (captured_capture_id_ != capture_id) {
         std::ostringstream oss;
         oss << "tensor debug probe " << name_
@@ -523,7 +582,7 @@ uint64_t ProbeContext::next_invocation_index(bool is_capturing, uint64_t capture
         throw std::runtime_error(oss.str());
     }
 
-    return next_invocation_index_++;
+    return next_slot_index_++;
 }
 
 torch::Tensor ProbeContext::source_tensor_for_enqueue(const torch::Tensor& tensor) const {
@@ -533,17 +592,19 @@ torch::Tensor ProbeContext::source_tensor_for_enqueue(const torch::Tensor& tenso
     return tensor.contiguous();
 }
 
-InvocationSlot& ProbeContext::ensure_invocation_slot(
+TensorSlot& ProbeContext::ensure_slot(
     const torch::Tensor& tensor,
     size_t nbytes,
+    uint64_t order,
+    const std::string& observation_name,
     uint64_t invocation_index,
     bool is_capturing) {
-    const size_t index = static_cast<size_t>(invocation_index);
-    if (invocation_slots_.size() <= index) {
-        invocation_slots_.resize(index + 1);
+    const size_t index = static_cast<size_t>(order);
+    if (slots_.size() <= index) {
+        slots_.resize(index + 1);
     }
 
-    InvocationSlot& slot = invocation_slots_[index];
+    TensorSlot& slot = slots_[index];
     if (nbytes > slot.staging_nbytes) {
         void* new_staging = nullptr;
         {
@@ -560,8 +621,9 @@ InvocationSlot& ProbeContext::ensure_invocation_slot(
     }
 
     if (has_record_action_) {
-        slot.observation.probe_name = name_;
+        slot.observation.name = observation_name;
         slot.observation.replay_index = 0;
+        slot.observation.order = order;
         slot.observation.invocation_index = invocation_index;
         slot.observation.shape = tensor.sizes().vec();
         slot.observation.dtype = tensor.scalar_type();
@@ -578,12 +640,16 @@ std::unique_ptr<CallbackPayload> ProbeContext::make_payload(
     const torch::Tensor& tensor,
     void* staging,
     size_t nbytes,
+    uint64_t order,
+    const std::string& observation_name,
     uint64_t invocation_index,
     bool is_capturing) {
     auto payload = std::make_unique<CallbackPayload>();
     payload->owner = this;
     payload->staging = staging;
     payload->nbytes = nbytes;
+    payload->order = order;
+    payload->name = observation_name;
     payload->invocation_index = invocation_index;
     payload->shape = tensor.sizes().vec();
     payload->dtype = tensor.scalar_type();
@@ -595,6 +661,8 @@ std::unique_ptr<CallbackPayload> ProbeContext::make_payload(
 
 void ProbeContext::set_failure(
     uint64_t replay_index,
+    int64_t order,
+    std::string observation_name,
     int64_t invocation_index,
     const std::string& message) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -603,6 +671,8 @@ void ProbeContext::set_failure(
     }
     check_failed_ = true;
     failure_replay_index_ = replay_index;
+    failure_order_ = order;
+    failure_name_ = std::move(observation_name);
     failure_invocation_index_ = invocation_index;
     failure_message_ = message;
 }
@@ -622,7 +692,7 @@ void ProbeContext::release_resources_noexcept() {
         }
     }
     retired_staging_.clear();
-    for (InvocationSlot& slot : invocation_slots_) {
+    for (TensorSlot& slot : slots_) {
         if (slot.staging != nullptr) {
             cudaFreeHost(slot.staging);
             slot.staging = nullptr;

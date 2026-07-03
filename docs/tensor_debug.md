@@ -59,7 +59,7 @@ probe = TensorProbe(
 
 graph = torch.cuda.CUDAGraph()
 with torch.cuda.graph(graph):
-    mid = probe(static_x + 2)
+    mid = probe(static_x + 2, name="mid")
 
 replay_stream = torch.cuda.current_stream()
 graph.replay()
@@ -67,16 +67,19 @@ graph.replay()
 snapshot = probe.snapshot(synchronize=replay_stream)
 print("replay", snapshot.replay_index)
 for observation in snapshot.observations:
-    print(observation.invocation_index, observation.tensor())
+    print(observation.name, observation.invocation_index, observation.order, observation.tensor())
 
 # The snapshot query already waited for every node in this replay.
 probe.assert_check_ok(synchronize=False)
 probe.close(synchronize=False)
 ```
 
-One `TensorProbeSnapshot` aggregates every invocation slot visible at one query
-point in capture-call order. After a graph replay, its `replay_index` identifies
-that replay. `snapshot.tensor()` is shorthand for invocation 0.
+One `TensorProbeSnapshot` aggregates every named capture slot visible at one
+query point. `(name, invocation_index)` is the semantic key; the index starts
+from zero independently for each name, while `order` preserves capture-call
+order. After a graph replay, its `replay_index` identifies
+that replay. By default, `snapshot.tensor()` uses `snapshot.probe_name` as
+the observation name and `invocation_index=0`.
 The default `when="capture"` makes eager warmup calls transparent no-ops.
 Use `when="always"` only when eager debug side effects are intentional. Its
 first eager call locks one CUDA stream; calls from another eager stream fail.
@@ -86,9 +89,9 @@ established the fixed slot layout.
 ## Complete Workflow
 
 `TensorProbe` is the low-ceremony tool for one graph and its latest replay.
-`TensorRecorder` adds named observations, ordered points, persistence, and
-offline comparison. Use it when the question spans execution modes, replays,
-processes, code revisions, or devices.
+`TensorRecorder` uses the same named Observation identity and adds ordered
+points, persistence, and structured offline comparison. Use it when the
+question spans execution modes, replays, processes, code revisions, or devices.
 
 The same instrumented function can feed an eager reference and a CUDA Graph
 candidate:
@@ -134,7 +137,7 @@ print(comparison.to_text())
 
 `observe()` returns the exact tensor object. Within one point, repeated calls
 with the same name become invocation 0, 1, and so on. The stable cross-run key
-is `(probe_name, invocation_index)`; replay index is evidence rather than
+is `(name, invocation_index)`; replay index is evidence rather than
 identity.
 
 An eager recorder observes calls only inside `record_point()`. A CUDA Graph
@@ -271,8 +274,10 @@ their payloads.
 Every enabled probe owns a zero-dimensional CUDA `int64` counter. It starts at
 zero and a captured single-thread kernel increments it once per graph replay.
 The first replay is 1. Calling the same probe several times in one capture does
-not add more increments: those calls are invocation slots, and all slots from
-one replay share the same `replay_index`.
+not add more increments: those calls create globally ordered slots, and all
+slots from one replay share the same `replay_index`. Each slot also has a
+semantic `(name, invocation_index)` key; repeated calls increment only the
+counter for that name.
 
 The counter is per probe and monotonic for that probe's single capture. Eager
 calls under `when="always"` do not increment it and eager results use index 0.
@@ -301,17 +306,17 @@ those actions add one shared 8-byte counter copy per replay. When recording is
 combined with either callback action, `snapshot()` reuses that pinned-host
 counter value instead of performing a second counter transfer.
 
-Each `snapshot()` call copies every invocation's latest staged bytes into new
+Each `snapshot()` call copies every slot's latest staged bytes into new
 CPU tensors and returns one aggregate snapshot. Previously returned snapshots
 therefore survive later replays without an extra `clone()`, but the probe
-retains only the latest value for each invocation slot, not a replay history.
+retains only the latest value for each capture slot, not a replay history.
 
 ## Repeated Invocations
 
 `CheckAction` accepts either one CPU tensor/NumPy array or a sequence. A
-single value corresponds only to invocation 0; it is not broadcast when the
-same probe is called more than once in one capture. For repeated calls, pass
-expected values in invocation order:
+single value corresponds only to global capture order 0; it is not broadcast
+when the same probe is called more than once in one capture. For repeated
+calls, pass expected values in capture-call order:
 
 ```python
 probe = TensorProbe(
@@ -320,13 +325,14 @@ probe = TensorProbe(
 )
 ```
 
-Each capture-time call owns a logical slot with its own pinned staging storage.
+Each capture-time call owns a globally ordered slot with its own pinned staging
+storage and a semantic `(name, invocation_index)` key.
 One probe may have many slots in one graph, but it may not be reused by a
 different capture session.
 
 `PrintAction` writes to `stderr`. `max_items` limits the displayed prefix,
 `summary` controls aggregate statistics, and `every=N` prints all captured
-invocations on graph replay indices divisible by N.
+slots on graph replay indices divisible by N.
 
 ## Device Selection
 
@@ -346,15 +352,17 @@ extension, initialize CUDA, or allocate a counter, and `probe.replay_index` is
 `strict=False`:
 
 ```python
-activation_grad_probe.watch_grad(hidden)
-handle = weight_grad_probe.watch_grad(module.weight, strict=True)
+activation_grad_probe.watch_grad(hidden, name="activation.grad")
+handle = weight_grad_probe.watch_grad(module.weight, name="weight.grad", strict=True)
 
 # Later, after the hook is no longer needed:
 handle.remove()
 ```
 
-The hook calls the probe for its side effect and returns the original gradient.
-It does not replace the tensor or transform gradients. The hook still follows
+The optional name defaults to `probe.name`. The hook calls the probe for its side
+effect and returns the original gradient. Invocation indices are assigned when
+hooks actually fire, so repeated same-name hooks follow backward execution
+order. It does not replace the tensor or transform gradients. The hook still follows
 the probe's `when` policy: with the default `when="capture"`, an eager backward
 call is a no-op and the backward work must itself be captured.
 

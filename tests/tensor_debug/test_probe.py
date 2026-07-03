@@ -6,6 +6,7 @@ import torch
 from torch_cudagraph_debug import _native
 from torch_cudagraph_debug._errors import NativeExtensionUnavailableError
 from torch_cudagraph_debug.tensor_debug import (
+    TensorObservationKey,
     TensorProbe,
     CheckAction,
     TensorCheckError,
@@ -44,15 +45,21 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
             self.closed = False
             self.input = None
 
-        def enqueue(self, tensor: torch.Tensor) -> torch.Tensor:
-            self.input = tensor
+        def enqueue(
+            self,
+            tensor: torch.Tensor,
+            name: str,
+            invocation_index: int,
+        ) -> torch.Tensor:
+            self.input = (tensor, name, invocation_index)
             return tensor
 
         def observations(self, replay_index: int | None) -> list[dict[str, object]]:
             assert replay_index == 0
             return [
                 {
-                    "probe_name": "mid",
+                    "name": self.input[1],
+                    "order": 0,
                     "replay_index": 7,
                     "invocation_index": 0,
                     "shape": (2,),
@@ -69,6 +76,8 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
                 "ok": True,
                 "message": "",
                 "replay_index": 0,
+                "order": -1,
+                "name": None,
                 "invocation_index": -1,
             }
 
@@ -77,6 +86,8 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
 
         def close(self) -> None:
             self.closed = True
+
+    handle = FakeHandle()
 
     class FakeNative:
         @staticmethod
@@ -94,7 +105,7 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
             assert actions[0]["kind"] == "record"
             assert non_contiguous == "copy"
             assert mode == "always"
-            return FakeHandle()
+            return handle
 
     monkeypatch.setattr(collector_module._native, "require_native", lambda: FakeNative)
     monkeypatch.setattr(
@@ -112,11 +123,18 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
     tensor = torch.tensor([3.0])
 
     assert probe(tensor) is tensor
+    assert handle.input is not None
+    recorded_tensor, recorded_name, recorded_invocation = handle.input
+    assert recorded_tensor is tensor
+    assert (recorded_name, recorded_invocation) == ("mid", 0)
+
+    assert probe(tensor, name="activation") is tensor
+    assert handle.input[1:] == ("activation", 0)
     snapshot = probe.snapshot(synchronize=False)
     assert snapshot.probe_name == "mid"
     assert snapshot.replay_index == 7
     assert len(snapshot.observations) == 1
-    observation = snapshot.observation()
+    observation = snapshot.observation("activation")
     assert observation.invocation_index == 0
     assert observation.shape == (2,)
     assert observation.dtype == torch.float32
@@ -136,6 +154,8 @@ def test_assert_check_ok_raises_check_error(monkeypatch: pytest.MonkeyPatch) -> 
                 "ok": False,
                 "message": "probe mid mismatch",
                 "replay_index": 3,
+                "order": 1,
+                "name": "mid",
                 "invocation_index": 1,
             }
 
@@ -165,6 +185,11 @@ def test_assert_check_ok_raises_check_error(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     probe = TensorProbe("mid", [PrintAction()])
+    status = probe.check_status(synchronize=False)
+    assert status.order == 1
+    assert status.name == "mid"
+    assert status.invocation_index == 1
+    assert status.key == TensorObservationKey("mid", 1)
     with pytest.raises(TensorCheckError, match="mismatch"):
         probe.assert_check_ok(synchronize=False)
 
@@ -263,7 +288,12 @@ def test_all_disabled_probe_is_noop_without_native(
     with pytest.raises(TensorDebugError, match="requires an enabled RecordAction"):
         probe.snapshot()
     assert probe.check_status() == TensorCheckStatus(
-        ok=True, message="", replay_index=0, invocation_index=-1
+        ok=True,
+        message="",
+        replay_index=0,
+        order=-1,
+        name=None,
+        invocation_index=-1,
     )
     probe.assert_check_ok()
     probe.clear_snapshot()
@@ -277,6 +307,8 @@ def test_watch_grad_noops_for_tensor_without_grad() -> None:
     probe = TensorProbe("disabled", [PrintAction(enabled=False)])
     tensor = torch.tensor([1.0])
 
+    with pytest.raises(ValueError, match="non-empty"):
+        probe.watch_grad(tensor, name="")
     assert probe.watch_grad(tensor) is None
 
     with pytest.raises(RuntimeError, match="does not require grad"):
@@ -288,22 +320,28 @@ def test_watch_grad_probes_but_returns_original_grad() -> None:
         def __init__(self) -> None:
             self.name = "grad"
             self._closed = False
-            self.calls: list[torch.Tensor] = []
+            self.calls: list[tuple[str | None, torch.Tensor]] = []
 
-        def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
-            self.calls.append(tensor.detach().clone())
+        def __call__(
+            self,
+            tensor: torch.Tensor,
+            *,
+            name: str | None = None,
+        ) -> torch.Tensor:
+            self.calls.append((name, tensor.detach().clone()))
             return torch.zeros_like(tensor)
 
     probe = ReturningWrongProbe()
     x = torch.tensor([2.0, -3.0], requires_grad=True)
 
-    handle = probe.watch_grad(x)
+    handle = probe.watch_grad(x, name="activation.grad")
     assert handle is not None
     y = (x * torch.tensor([4.0, 5.0])).sum()
     y.backward()
 
     assert len(probe.calls) == 1
-    assert torch.equal(probe.calls[0], torch.tensor([4.0, 5.0]))
+    assert probe.calls[0][0] == "activation.grad"
+    assert torch.equal(probe.calls[0][1], torch.tensor([4.0, 5.0]))
     assert torch.equal(x.grad, torch.tensor([4.0, 5.0]))
 
 
@@ -314,7 +352,12 @@ def test_watch_grad_returned_handle_can_remove_hook() -> None:
             self._closed = False
             self.calls = 0
 
-        def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        def __call__(
+            self,
+            tensor: torch.Tensor,
+            *,
+            name: str | None = None,
+        ) -> torch.Tensor:
             self.calls += 1
             return tensor
 
@@ -401,6 +444,8 @@ def test_snapshot_reuses_callback_counter_staging(
                 "ok": True,
                 "message": "",
                 "replay_index": 0,
+                "order": -1,
+                "name": None,
                 "invocation_index": -1,
             }
 

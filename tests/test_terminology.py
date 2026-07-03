@@ -56,6 +56,13 @@ def test_observations_are_ownerless_shared_leaves() -> None:
     ownership_fields = {"probe_id", "run_id", "point_index", "replay_index"}
     assert ownership_fields.isdisjoint(_field_names(TensorObservation))
     assert ownership_fields.isdisjoint(_field_names(MemoryObservation))
+    assert _field_names(TensorObservation)[:3] == (
+        "order",
+        "name",
+        "invocation_index",
+    )
+    assert "probe_name" not in _field_names(TensorObservation)
+    assert "probe_name" in _field_names(TensorProbeSnapshot)
     assert "observations" in _field_names(TensorProbeSnapshot)
     assert "observations" in _field_names(MemoryProbeSnapshot)
     assert "observations" in _field_names(TensorPoint)

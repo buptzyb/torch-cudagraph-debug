@@ -77,7 +77,7 @@ _POINT_FIELDS = frozenset(
 _OBSERVATION_FIELDS = frozenset(
     {
         "order",
-        "probe_name",
+        "name",
         "invocation_index",
         "shape",
         "stride",
@@ -121,11 +121,19 @@ def validate_payload_kind(value: str) -> PayloadKind:
     return value  # type: ignore[return-value]
 
 
+def _validate_observation_name(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("observation name must be a string")
+    if not value:
+        raise ValueError("observation name must be non-empty")
+    return value
+
+
 @dataclass(frozen=True)
 class TensorObservationKey:
     """Stable key for one tensor observation within a point."""
 
-    probe_name: str
+    name: str
     invocation_index: int
 
 
@@ -201,7 +209,7 @@ class TensorObservation:
     """One named tensor value captured by a snapshot or point."""
 
     order: int
-    probe_name: str
+    name: str
     invocation_index: int
     shape: tuple[int, ...]
     stride: tuple[int, ...]
@@ -219,7 +227,7 @@ class TensorObservation:
 
     @property
     def key(self) -> TensorObservationKey:
-        return TensorObservationKey(self.probe_name, self.invocation_index)
+        return TensorObservationKey(self.name, self.invocation_index)
 
     @property
     def has_payload(self) -> bool:
@@ -228,7 +236,7 @@ class TensorObservation:
     def descriptor(self) -> dict[str, object]:
         return {
             "order": self.order,
-            "probe_name": self.probe_name,
+            "name": self.name,
             "invocation_index": self.invocation_index,
             "shape": list(self.shape),
             "stride": list(self.stride),
@@ -245,7 +253,7 @@ class TensorObservation:
 
         if self.payload != "full":
             raise TensorPayloadUnavailableError(
-                f"observation {self.probe_name!r}[{self.invocation_index}] "
+                f"observation {self.name!r}[{self.invocation_index}] "
                 "contains summary data only"
             )
         cached = self._tensor_cache.get("tensor")
@@ -253,7 +261,7 @@ class TensorObservation:
             return cached
         if self._blob_path is None:
             raise TensorBundleError(
-                f"observation {self.probe_name!r}[{self.invocation_index}] "
+                f"observation {self.name!r}[{self.invocation_index}] "
                 "has no tensor payload"
             )
         try:
@@ -277,6 +285,25 @@ class TensorObservation:
         return tensor
 
 
+def _validate_observation_sequence(
+    observations: Sequence[TensorObservation],
+    *,
+    owner: str,
+) -> None:
+    expected_orders = list(range(len(observations)))
+    if [item.order for item in observations] != expected_orders:
+        raise ValueError(f"{owner} observations must be contiguous and ordered")
+
+    invocation_counts: dict[str, int] = {}
+    for item in observations:
+        expected_invocation = invocation_counts.get(item.name, 0)
+        if item.invocation_index != expected_invocation:
+            raise ValueError(
+                f"{owner} invocations must be contiguous independently per name"
+            )
+        invocation_counts[item.name] = expected_invocation + 1
+
+
 @dataclass(frozen=True)
 class TensorPoint:
     """One ordered set of named tensor observations."""
@@ -289,20 +316,23 @@ class TensorPoint:
     replay_index: int | None
     observations: tuple[TensorObservation, ...]
 
+    def __post_init__(self) -> None:
+        _validate_observation_sequence(self.observations, owner="tensor point")
+
     @cached_property
     def by_key(self) -> Mapping[TensorObservationKey, TensorObservation]:
         return MappingProxyType({item.key: item for item in self.observations})
 
     def observation(
         self,
-        probe_name: str,
+        name: str,
         invocation_index: int = 0,
     ) -> TensorObservation:
         try:
-            return self.by_key[TensorObservationKey(probe_name, invocation_index)]
+            return self.by_key[TensorObservationKey(name, invocation_index)]
         except KeyError as exc:
             raise KeyError(
-                f"tensor observation {probe_name!r}[{invocation_index}] "
+                f"tensor observation {name!r}[{invocation_index}] "
                 f"does not exist at point {self.label!r}"
             ) from exc
 
@@ -486,12 +516,12 @@ class TensorRun:
                 if observation.key in keys:
                     raise TensorBundleError(
                         f"point {label!r} has duplicate observation "
-                        f"{observation.probe_name!r}[{observation.invocation_index}]"
+                        f"{observation.name!r}[{observation.invocation_index}]"
                     )
                 keys.add(observation.key)
                 observations.append(observation)
-            points.append(
-                TensorPoint(
+            try:
+                point = TensorPoint(
                     run_id=run_id,
                     index=index,
                     label=label,
@@ -500,7 +530,9 @@ class TensorRun:
                     observations=tuple(observations),
                     replay_index=replay_index,
                 )
-            )
+            except ValueError as exc:
+                raise TensorBundleError(str(exc)) from exc
+            points.append(point)
 
         provenance = _mapping_value(manifest["provenance"], "provenance")
         run_metadata = _mapping_value(manifest["run_metadata"], "run_metadata")
@@ -526,7 +558,7 @@ class TensorRun:
 @dataclass(frozen=True)
 class _PendingObservation:
     order: int
-    probe_name: str
+    name: str
     invocation_index: int
     replay_index: int | None
     shape: tuple[int, ...]
@@ -550,7 +582,7 @@ class _ActivePoint:
 @dataclass(frozen=True)
 class _CaptureSlot:
     order: int
-    probe_name: str
+    name: str
     invocation_index: int
     shape: tuple[int, ...]
     stride: tuple[int, ...]
@@ -644,8 +676,7 @@ class TensorRecorder:
         """Return tensor unchanged while recording one named observation."""
 
         self._ensure_open()
-        if not name:
-            raise ValueError("observation name must be non-empty")
+        name = _validate_observation_name(name)
         selected_payload = (
             self.default_payload if payload is None else validate_payload_kind(payload)
         )
@@ -662,7 +693,7 @@ class TensorRecorder:
             self._active_point.pending.append(
                 _PendingObservation(
                     order=len(self._active_point.pending),
-                    probe_name=name,
+                    name=name,
                     invocation_index=invocation_index,
                     replay_index=None,
                     shape=tuple(tensor.shape),
@@ -680,13 +711,17 @@ class TensorRecorder:
             return tensor
         self._validate_tensor(tensor)
         assert self._collector is not None
-        result = self._collector.enqueue(tensor)
         invocation_index = self._capture_invocation_counts.get(name, 0)
         self._capture_invocation_counts[name] = invocation_index + 1
+        result = self._collector.enqueue(
+            tensor,
+            name=name,
+            invocation_index=invocation_index,
+        )
         self._capture_slots.append(
             _CaptureSlot(
                 order=len(self._capture_slots),
-                probe_name=name,
+                name=name,
                 invocation_index=invocation_index,
                 shape=tuple(tensor.shape),
                 stride=tuple(tensor.stride()),
@@ -708,6 +743,7 @@ class TensorRecorder:
         """Register an autograd hook that records a named gradient observation."""
 
         self._ensure_open()
+        name = _validate_observation_name(name)
         if not tensor.requires_grad:
             if strict:
                 raise RuntimeError(
@@ -915,21 +951,28 @@ class TensorRecorder:
             )
         pending: list[_PendingObservation] = []
         for slot, snapshot in zip(self._capture_slots, snapshots):
-            if snapshot.invocation_index != slot.order:
+            if snapshot.order != slot.order:
                 raise TensorDebugError(
-                    "captured tensor invocation ordering changed unexpectedly"
+                    "captured tensor slot ordering changed unexpectedly"
+                )
+            if (
+                snapshot.name != slot.name
+                or snapshot.invocation_index != slot.invocation_index
+            ):
+                raise TensorDebugError(
+                    "captured tensor observation identity changed unexpectedly"
                 )
             if (
                 tuple(snapshot.shape or ()) != slot.shape
                 or snapshot.dtype != slot.dtype
             ):
                 raise TensorDebugError(
-                    f"captured tensor metadata changed for {slot.probe_name!r}"
+                    f"captured tensor metadata changed for {slot.name!r}"
                 )
             pending.append(
                 _PendingObservation(
                     order=slot.order,
-                    probe_name=slot.probe_name,
+                    name=slot.name,
                     invocation_index=slot.invocation_index,
                     replay_index=snapshot.replay_index,
                     shape=slot.shape,
@@ -961,10 +1004,10 @@ class TensorRecorder:
         for expected_order, item in enumerate(pending):
             if item.order != expected_order:
                 raise TensorDebugError("tensor observation order must be contiguous")
-            key = (item.probe_name, item.invocation_index)
+            key = (item.name, item.invocation_index)
             if key in seen:
                 raise TensorDebugError(
-                    f"duplicate tensor observation {item.probe_name!r}"
+                    f"duplicate tensor observation {item.name!r}"
                     f"[{item.invocation_index}]"
                 )
             seen.add(key)
@@ -981,7 +1024,7 @@ class TensorRecorder:
             observations.append(
                 TensorObservation(
                     order=expected_order,
-                    probe_name=item.probe_name,
+                    name=item.name,
                     invocation_index=item.invocation_index,
                     shape=item.shape,
                     stride=item.stride,
@@ -1120,7 +1163,7 @@ def _point_manifest(point: TensorPoint, root: Path) -> dict[str, object]:
         observations.append(
             {
                 "order": item.order,
-                "probe_name": item.probe_name,
+                "name": item.name,
                 "invocation_index": item.invocation_index,
                 "shape": list(item.shape),
                 "stride": list(item.stride),
@@ -1164,7 +1207,7 @@ def _observation_from_manifest(
         raise TensorBundleError(
             "tensor observation order must be contiguous and ordered"
         )
-    probe_name = _nonempty_string(raw["probe_name"], "probe_name")
+    name = _nonempty_string(raw["name"], "name")
     invocation_index = int(raw["invocation_index"])
     if invocation_index < 0:
         raise TensorBundleError("invocation_index must be non-negative")
@@ -1182,7 +1225,7 @@ def _observation_from_manifest(
     expected_nbytes = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
     if nbytes != expected_nbytes:
         raise TensorBundleError(
-            f"tensor observation {probe_name!r} has nbytes={nbytes}; "
+            f"tensor observation {name!r} has nbytes={nbytes}; "
             f"expected {expected_nbytes}"
         )
     try:
@@ -1204,19 +1247,18 @@ def _observation_from_manifest(
         blob_path = _safe_blob_path(root, raw["blob_file"], digest)
         if not blob_path.is_file():
             raise TensorBundleError(
-                f"tensor blob for {probe_name!r}[{invocation_index}] does not exist"
+                f"tensor blob for {name!r}[{invocation_index}] does not exist"
             )
         if blob_path.stat().st_size != nbytes:
             raise TensorBundleError(
-                f"tensor blob for {probe_name!r}[{invocation_index}] "
-                "has an unexpected size"
+                f"tensor blob for {name!r}[{invocation_index}] has an unexpected size"
             )
     elif raw["blob_file"] is not None:
         raise TensorBundleError("summary-only observations must not reference a blob")
 
     return TensorObservation(
         order=order,
-        probe_name=probe_name,
+        name=name,
         invocation_index=invocation_index,
         shape=shape,
         stride=stride,

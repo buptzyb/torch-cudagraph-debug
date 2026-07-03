@@ -24,8 +24,10 @@ class DebugMLP(torch.nn.Module):
         self.activation_grad_probe = activation_grad_probe
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        hidden = self.activation_probe(self.fc1(inputs))
-        self.activation_grad_probe.watch_grad(hidden, strict=True)
+        hidden = self.activation_probe(self.fc1(inputs), name="activation.value")
+        self.activation_grad_probe.watch_grad(
+            hidden, name="activation.grad", strict=True
+        )
         return self.fc2(torch.relu(hidden)).sum()
 
 
@@ -50,6 +52,7 @@ def main() -> None:
     ).cuda()
     weight_hook = probes["fc1.weight.grad.hook"].watch_grad(
         model.fc1.weight,
+        name="fc1.weight.grad.hook",
         strict=True,
     )
     assert weight_hook is not None
@@ -75,7 +78,7 @@ def main() -> None:
                 grad = model.fc1.weight.grad
                 if grad is None:
                     raise RuntimeError("fc1.weight.grad should exist after backward")
-                probes["fc1.weight.grad.final"](grad)
+                probes["fc1.weight.grad.final"](grad, name="fc1.weight.grad.final")
         torch.cuda.current_stream().wait_stream(capture_stream)
 
         replay_stream = torch.cuda.current_stream()
@@ -87,7 +90,7 @@ def main() -> None:
             assert snapshot.observations, f"{probe.name} did not record a replay value"
             observation = snapshot.observation()
             print(
-                f"{snapshot.probe_name}: replay={snapshot.replay_index} "
+                f"{observation.name}: replay={snapshot.replay_index} "
                 f"shape={observation.shape}"
             )
     finally:

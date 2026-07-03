@@ -77,7 +77,8 @@ Every enabled probe owns a zero-dimensional CUDA `int64` replay counter on
 `device`, or on the current CUDA device when `device=None`. An integer device
 index is accepted. Every active source tensor must be on the same device.
 
-`probe(tensor)` returns the exact input tensor object. In
+`probe(tensor, name=...)` returns the exact input tensor object. The optional
+name identifies the logical observation; omitting it uses `probe.name`. In
 `when="capture"`, calls outside CUDA stream capture perform no validation,
 allocation, copy, callback, print, record, or check work. In
 `when="always"`, eager calls execute debug work too. The first eager call
@@ -95,7 +96,9 @@ the same source tensor:
   and are not retained by the probe after queued work completes.
 
 A probe is owned by the first CUDA Graph capture session that uses it. Multiple
-calls in that capture create logical slots in invocation order. Reusing the
+calls in that capture create globally ordered slots. Observation identity is
+`(name, invocation_index)`, where the index starts at zero independently for
+each name; `order` preserves capture-call order. Reusing the
 probe in another capture is an error. The GPU counter advances once per graph
 replay, not once per invocation, so all slots in one replay share a 1-based
 replay index. Eager `when="always"` calls do not advance the counter and use
@@ -104,7 +107,7 @@ index 0.
 #### Methods
 
 ```python
-probe(tensor: torch.Tensor) -> torch.Tensor
+probe(tensor: torch.Tensor, *, name: str | None = None) -> torch.Tensor
 probe.replay_index -> torch.Tensor | None
 probe.snapshot(
     *,
@@ -131,6 +134,7 @@ probe.assert_check_ok(
 probe.watch_grad(
     tensor: torch.Tensor,
     *,
+    name: str | None = None,
     strict: bool = False,
 ) -> torch.utils.hooks.RemovableHandle | None
 probe.close(
@@ -157,12 +161,11 @@ Graph capture; for an enabled probe, `close()` is invalid during capture for
 every synchronization setting.
 
 `snapshot()` returns one aggregate `TensorProbeSnapshot` containing the latest
-value of every capture-time invocation slot. Capture installs copy nodes but
+value of every capture-time slot. Capture installs copy nodes but
 does not execute them. A Record-only probe reads its GPU counter at this query
 point. When Print or Check is also enabled, the query reuses their existing
 pinned-host counter staging instead of issuing another counter transfer. It
-raises `TensorDebugError` when no `RecordAction` is enabled or no invocation has
-recorded a value.
+raises `TensorDebugError` when no `RecordAction` is enabled or no slot has recorded a value.
 
 `compare()` accepts two snapshots owned by this probe in chronological replay
 order and returns the same result type as top-level `compare_snapshots()`.
@@ -178,15 +181,26 @@ class TensorCheckStatus:
     ok: bool
     message: str
     replay_index: int
+    order: int
+    name: str | None
     invocation_index: int
+
+    @property
+    def key(self) -> TensorObservationKey | None: ...
 ```
+
+A successful status uses `order=-1`, `name=None`, and `invocation_index=-1`.
+A mismatch reports both the semantic `key` and its global capture `order`.
 
 `check_status()` synchronizes callback-backed check state before returning it.
 `assert_check_ok()` delegates to `check_status()` and therefore synchronizes at
 most once; it raises `TensorCheckError` when the sticky check state is not OK.
 
-`watch_grad()` registers an autograd hook. The hook probes the gradient for its
-side effect and returns the original gradient. It obeys the probe's `when`
+`watch_grad()` registers an autograd hook. Its optional `name` follows the
+same default as `probe()`. The hook probes the gradient for its side effect and
+returns the original gradient. Invocation indices are assigned when hooks
+actually fire, so repeated same-name hooks follow backward execution order.
+It obeys the probe's `when`
 policy, so default capture-only probes do no work during eager backward. The
 method returns a removable hook handle. If `tensor.requires_grad` is false, it
 returns `None`; with `strict=True`, it raises `RuntimeError`.
@@ -227,23 +241,23 @@ with `float16`, `bfloat16`, `float32`, `float64`, `uint8`, `int8`, `int16`,
 
 `PrintAction` writes to `stderr` from a native CUDA host callback. `max_items`
 limits the displayed value prefix, `summary=False` omits aggregate statistics,
-and `every=N` prints every invocation on graph replay indices divisible by N.
+and `every=N` prints every captured slot on graph replay indices divisible by N.
 
 `RecordAction` enqueues a device-to-host tensor copy into pinned staging
 memory without a host callback when used alone. The probe stores only the latest
-staged value for each invocation slot. Its counter remains on the GPU during
+staged value for each capture slot. Its counter remains on the GPU during
 replay and transfers only when `snapshot()` explicitly queries it. When Record
 is combined with Print or Check, that query reuses the callback actions'
 single shared 8-byte counter transfer.
 
 `CheckAction.expected` values must be on CPU and match the captured source's
 shape and dtype. A single tensor or array is normalized to a one-item expected
-sequence and therefore applies only to invocation 0. It is never broadcast.
-For a probe called multiple times in one capture, pass one expected value per
-invocation in capture-call order.
+sequence and therefore applies only to global capture order 0. It is never
+broadcast. For a probe called multiple times in one capture, pass one expected
+value per slot in capture-call order.
 
 A check mismatch is sticky until the probe is destroyed. The first mismatch
-records the replay and invocation indices.
+records the replay index, semantic observation key, and global order.
 
 `PrintAction` and `CheckAction` process tensor elements on a CUDA host callback.
 Their latency grows with payload size and also depends on dtype, formatting,
@@ -264,17 +278,20 @@ class TensorProbeSnapshot:
     observations: tuple[TensorObservation, ...]
 
 snapshot.by_key -> Mapping[TensorObservationKey, TensorObservation]
-snapshot.observation(invocation_index=0) -> TensorObservation
-snapshot.tensor(invocation_index=0) -> torch.Tensor
+snapshot.observation(name: str | None = None, invocation_index: int = 0) -> TensorObservation
+snapshot.tensor(name: str | None = None, invocation_index: int = 0) -> torch.Tensor
 snapshot.descriptor() -> dict
 ```
 
 Every `snapshot()` call materializes new CPU tensor copies from the latest
 pinned staging bytes and records the probe's current replay counter. One
 snapshot represents one query point; after a graph replay, its replay index
-identifies that replay. Its observations represent invocation slots in
-capture-call order. Returned snapshots remain unchanged across later replays,
-so an additional `clone()` is not required for retention. A snapshot queried
+identifies that replay. Its observations are globally ordered capture slots
+keyed by `(name, invocation_index)`. Indices are contiguous independently for each name.
+Omitting `name` from `observation()` or `tensor()` uses
+`snapshot.probe_name` as the observation name and `invocation_index=0`.
+Returned snapshots remain unchanged across later replays, so an additional
+`clone()` is not required for retention. A snapshot queried
 after capture but before its first replay uses index 0; after replay, captured
 snapshots are 1-based. Eager `when="always"` snapshots also use index 0.
 
@@ -372,14 +389,21 @@ run[ref: str | int] -> TensorPoint
 run.compare(reference, candidate, *, options=None) -> TensorPointComparison
 ```
 
+```python
+@dataclass(frozen=True)
+class TensorObservationKey:
+    name: str
+    invocation_index: int
+```
+
 A `TensorPoint` owns a point-level optional `replay_index` and ordered
 `TensorObservation` objects.
 `point.observation(name, invocation_index=0)` performs stable-key lookup.
 A foreign point passed to `run.point()` raises `TensorOwnershipError`.
 
 `TensorObservation` is an ownerless leaf shared by Probe snapshots and Recorder
-points. It records local order, name, invocation, shape, stride, dtype, source
-device, payload kind, nbytes, SHA-256, and a `TensorValueSummary`.
+points. It records global order, name, per-name invocation, shape, stride,
+dtype, source device, payload kind, nbytes, SHA-256, and a `TensorValueSummary`.
 `observation.tensor()` lazily returns a CPU tensor for a full payload and
 validates blob size and digest. It raises `TensorPayloadUnavailableError` for a
 summary-only observation.
@@ -415,7 +439,7 @@ different probes can be compared directly. `TensorSnapshotComparison` and
 `candidate`, `options`, and `observation_comparisons` fields; snapshot results
 do not contain a synthetic `point_comparison`.
 
-The stable observation key is `(probe_name, invocation_index)`.
+The stable observation key is `(name, invocation_index)`.
 `compare_points()` follows reference order and appends candidate-only keys.
 Missing keys, shape changes, and strict dtype changes are mismatches.
 

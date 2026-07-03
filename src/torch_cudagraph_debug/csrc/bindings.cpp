@@ -149,7 +149,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         torch_cudagraph_debug::tensor_debug::ProbeContext,
         std::shared_ptr<torch_cudagraph_debug::tensor_debug::ProbeContext>>(
         m, "TensorDebugProbeHandle")
-        .def("enqueue", &torch_cudagraph_debug::tensor_debug::ProbeContext::enqueue)
+        .def(
+            "enqueue",
+            &torch_cudagraph_debug::tensor_debug::ProbeContext::enqueue,
+            py::arg("tensor"),
+            py::arg("name"),
+            py::arg("invocation_index"))
         .def(
             "observations",
             &torch_cudagraph_debug::tensor_debug::ProbeContext::observations,
