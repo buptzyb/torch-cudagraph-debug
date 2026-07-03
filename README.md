@@ -7,95 +7,42 @@ Focused debugging tools for PyTorch CUDA Graphs:
 - `memory_debug` records allocator snapshots and analyzes default and
   non-default pools, including CUDA Graph private pools.
 
-Both domains expose two public collection workflows. A `Probe` returns a
-standalone `ProbeSnapshot` for immediate inspection and direct two-point
-comparison. A `Recorder` produces a `Run` for named points, metadata, optional
-persistence, and structured multi-point or cross-run analysis. A Run contains
-`Point` objects; `ProbeSnapshot` and `Point` both contain the same ownerless
-`Observation` leaf type. Probe and Recorder are sibling clients of private,
-domain-specific collection code.
-
 The package targets Linux, Python 3.10+, and CUDA-enabled PyTorch 2.6+. Source
 builds use the PyTorch and CUDA toolchain in the target environment.
 
 ## Architecture at a Glance
 
+Tensor Debug and Memory Debug share two collection workflows:
+
+- A `Probe` supports immediate local inspection; `snapshot()` returns a
+  standalone `ProbeSnapshot` without run identity or recording-session
+  lifecycle.
+- A `Recorder` owns a complete experiment; `finish()` returns a `Run` with
+  named `Point` objects, metadata, optional persistence, and structured
+  multi-point or cross-run analysis.
+
+This keeps local inspection lightweight while preserving explicit experiment
+structure for investigations that span points or runs. Both workflows reuse
+private, domain-specific collection code and converge on the same ownerless
+`Observation` leaf type within each domain.
+
 ```mermaid
-flowchart TB
-    APP["Application or test code"]
+flowchart LR
+    P["<b>Probe</b><br/>for a local question"] -->|produces| PS["<b>ProbeSnapshot</b>"]
+    PS -->|contains| O["<b>Observation</b><br/>(domain-specific leaf)"]
 
-    subgraph DOMAINS["Two symmetric debug domains"]
-        direction LR
+    R["<b>Recorder</b><br/>for a complete experiment"] -->|produces| RUN["<b>Run</b>"]
+    RUN -->|contains| PT["<b>Point</b>"]
+    PT -->|contains| O
 
-        subgraph TENSOR["tensor_debug"]
-            direction TB
-            TP["TensorProbe"]
-            TPS["TensorProbeSnapshot"]
-            TR["TensorRecorder"]
-            TRUN["TensorRun"]
-            TPOINT["TensorPoint"]
-            TO["TensorObservation<br/>ownerless shared leaf"]
-            TC["Private collection<br/>_TensorCollector / _EagerTensorCollector"]
-            TSRC["PyTorch tensors + native C++/CUDA<br/>replay counter, D2H staging, callbacks"]
-            TB["Optional .tcgd-tensor bundle"]
-            TA["Snapshot / point / run / series comparison"]
-
-            TP -->|returns| TPS
-            TPS -->|contains| TO
-            TR -->|produces| TRUN
-            TRUN -->|contains| TPOINT
-            TPOINT -->|contains| TO
-            TRUN -->|persists as| TB
-            TP -. uses .-> TC
-            TR -. uses .-> TC
-            TC -->|reads/copies| TSRC
-            TO -->|analyzed by| TA
-            TB -->|loaded by| TA
-        end
-
-        subgraph MEMORY["memory_debug"]
-            direction TB
-            MP["MemoryProbe"]
-            MPS["MemoryProbeSnapshot"]
-            MR["MemoryRecorder"]
-            MRUN["MemoryRun"]
-            MPOINT["MemoryPoint"]
-            MO["MemoryObservation<br/>ownerless shared leaf"]
-            MC["Private collection<br/>_MemoryCollector"]
-            MSRC["PyTorch CUDA allocator<br/>_snapshot() + optional allocator history"]
-            MB["Optional .tcgd-memory bundle"]
-            MA["Snapshot / point / timeline / lifetime /<br/>phase / run-group analysis"]
-
-            MP -->|returns| MPS
-            MPS -->|contains| MO
-            MR -->|produces| MRUN
-            MRUN -->|contains| MPOINT
-            MPOINT -->|contains| MO
-            MRUN -->|persists as| MB
-            MP -. uses .-> MC
-            MR -. uses .-> MC
-            MC -->|reads| MSRC
-            MO -->|analyzed by| MA
-            MB -->|loaded by| MA
-        end
-    end
-
-    APP -->|uses| TP
-    APP -->|uses| TR
-    APP -->|uses| MP
-    APP -->|uses| MR
-
-    TA -->|renders| TOUT["Text / JSON / CSV / HTML<br/>tcgd-tensor + TensorBoard"]
-    MA -->|renders| MOUT["Text / JSON / CSV / HTML<br/>tcgd-memory"]
+    O -->|used by| T["<b>Tensor Debug</b><br/>values / gradients / online checks<br/>snapshot / point / run / series comparison<br/>bundles / reports / TensorBoard"]
+    O -->|used by| M["<b>Memory Debug</b><br/>pools / streams / attribution<br/>timeline / lifetime / phase / run-group analysis<br/>bundles / reports"]
 ```
 
-The same vocabulary is used in both domains. `Probe` is the quick, bundle-free
-entry point; `Recorder` manages a named recording session and optional
-persistence. Both reuse private collection code and converge on ownerless
-`Observation` leaves, while snapshot and point comparisons remain sibling
-result types. See the
-[detailed architecture](docs/architecture.md) for ownership and lifecycle
-rules.
+The diagram uses shared API roles; tensor and memory provide separate concrete
+types such as `TensorObservation` and `MemoryObservation`. See the
+[detailed architecture](docs/architecture.md) for Collector boundaries,
+ownership, and lifecycle rules.
 
 ## Install
 
