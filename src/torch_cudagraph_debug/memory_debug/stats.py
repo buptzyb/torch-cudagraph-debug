@@ -21,6 +21,20 @@ class MemoryStats:
     block_count: int = 0
     largest_inactive_block_bytes: int = 0
 
+    def __post_init__(self) -> None:
+        for name in (
+            "reserved_bytes",
+            "allocated_bytes",
+            "active_bytes",
+            "requested_bytes",
+            "segment_count",
+            "block_count",
+            "largest_inactive_block_bytes",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
     @property
     def inactive_bytes(self) -> int:
         return max(self.reserved_bytes - self.active_bytes, 0)
@@ -31,15 +45,22 @@ class MemoryStats:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "MemoryStats":
-        return cls(
-            reserved_bytes=int(value["reserved_bytes"]),
-            allocated_bytes=int(value["allocated_bytes"]),
-            active_bytes=int(value["active_bytes"]),
-            requested_bytes=int(value["requested_bytes"]),
-            segment_count=int(value["segment_count"]),
-            block_count=int(value["block_count"]),
-            largest_inactive_block_bytes=int(value["largest_inactive_block_bytes"]),
+        fields = (
+            "reserved_bytes",
+            "allocated_bytes",
+            "active_bytes",
+            "requested_bytes",
+            "segment_count",
+            "block_count",
+            "largest_inactive_block_bytes",
         )
+        values = {}
+        for name in fields:
+            raw = value[name]
+            if type(raw) is not int or raw < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+            values[name] = raw
+        return cls(**values)
 
     @classmethod
     def combine(cls, values: Iterable["MemoryStats"]) -> "MemoryStats":
@@ -83,6 +104,10 @@ class MemoryStatsDelta:
     block_count: int
     largest_inactive_block_bytes: int
     fragmentation_bytes: int
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not int for value in asdict(self).values()):
+            raise TypeError("memory stat deltas must be integers")
 
     @classmethod
     def between(

@@ -237,8 +237,8 @@ and validates payload size and SHA-256 before materialization.
 
 ## Query Synchronization
 
-`snapshot()`, `clear_snapshot()`, `check_status()`, `assert_check_ok()`, and
-`close()` accept one keyword-only `synchronize` argument:
+`snapshot()`, `check_status()`, `assert_check_ok()`, and `close()` accept one
+keyword-only `synchronize` argument:
 
 - `True` is the correctness-first default and synchronizes the probe's entire
   CUDA device. It may wait for unrelated streams and increases exposure to

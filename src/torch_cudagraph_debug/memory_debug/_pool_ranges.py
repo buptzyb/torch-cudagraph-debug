@@ -25,7 +25,6 @@ class _PoolRangeLayer:
     ranges_by_device: Mapping[int | None, tuple[_PoolRange, ...]]
 
     def find(self, device: int | None, address: int) -> tuple[Any, ...] | None:
-        matches: list[_PoolRange] = []
         candidate_devices = (device,) if device is None else (device, None)
         for candidate_device in candidate_devices:
             starts = self.starts_by_device.get(candidate_device)
@@ -37,10 +36,8 @@ class _PoolRangeLayer:
                 continue
             candidate = ranges[index]
             if address < candidate.end:
-                matches.append(candidate)
-        if not matches:
-            return None
-        return min(matches, key=lambda item: item.ordinal).pool_id
+                return candidate.pool_id
+        return None
 
 
 @dataclass(frozen=True)

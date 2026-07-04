@@ -24,7 +24,7 @@ from .allocator_snapshot import (
 )
 
 if TYPE_CHECKING:
-    from .attribution import MemoryAttributionOptions
+    from .attribution import MemoryLifetimeOptions
     from .recording import MemoryPoint, MemoryRun
     from .snapshots import MemoryProbeSnapshot
     from .reports import MemoryAllocationLifetimeAnalysis
@@ -260,7 +260,8 @@ def analyze_allocation_lifetimes(
     end: MemoryPoint,
     active_at: MemoryPoint | None,
     born_between: tuple[MemoryPoint, MemoryPoint] | None,
-    options: MemoryAttributionOptions,
+    options: MemoryLifetimeOptions,
+    _raw_snapshots: Sequence[Any] | None = None,
 ) -> MemoryAllocationLifetimeAnalysis:
     """Build allocation cohorts for a range in one recorded run."""
 
@@ -274,6 +275,7 @@ def analyze_allocation_lifetimes(
         active_at=active_at,
         born_between=born_between,
         options=options,
+        raw_snapshots=_raw_snapshots,
     )
 
 
@@ -281,7 +283,8 @@ def analyze_probe_snapshot_lifetimes(
     reference: MemoryProbeSnapshot,
     candidate: MemoryProbeSnapshot,
     *,
-    options: MemoryAttributionOptions,
+    options: MemoryLifetimeOptions,
+    _raw_snapshots: Sequence[Any] | None = None,
 ) -> MemoryAllocationLifetimeAnalysis:
     """Build allocation cohorts for two ordered snapshots from one Probe."""
 
@@ -299,6 +302,7 @@ def analyze_probe_snapshot_lifetimes(
         active_at=None,
         born_between=None,
         options=options,
+        raw_snapshots=_raw_snapshots,
     )
 
 
@@ -312,7 +316,8 @@ def _analyze_allocation_lifetimes(
     end: Any,
     active_at: Any | None,
     born_between: tuple[Any, Any] | None,
-    options: MemoryAttributionOptions,
+    options: MemoryLifetimeOptions,
+    raw_snapshots: Sequence[Any] | None,
 ) -> MemoryAllocationLifetimeAnalysis:
     """Build an offline allocation-cohort lifetime report."""
 
@@ -323,6 +328,7 @@ def _analyze_allocation_lifetimes(
         points,
         events=options.events,
         stack_depth=options.stack_depth,
+        raw_snapshots=raw_snapshots,
     )
     warnings = [warning for point in points for warning in point.warnings]
     if options.events:
@@ -411,6 +417,7 @@ def _scan_points(
     *,
     events: bool,
     stack_depth: int,
+    raw_snapshots: Sequence[Any] | None,
 ) -> tuple[
     dict[int, tuple[_BlockObservation, ...]],
     tuple[_IntervalHistory, ...],
@@ -420,8 +427,14 @@ def _scan_points(
     previous: Any | None = None
     previous_segments: tuple[Mapping[str, Any], ...] | None = None
 
-    for point in points:
-        snapshot = point.raw_snapshot()
+    if raw_snapshots is not None and len(raw_snapshots) != len(points):
+        raise ValueError("raw snapshot count must match lifetime points")
+    snapshots = (
+        raw_snapshots
+        if raw_snapshots is not None
+        else tuple(point.raw_snapshot() for point in points)
+    )
+    for point, snapshot in zip(points, snapshots):
         segments = normalize_snapshot(snapshot)
         observations[point.index] = _active_blocks_from_segments(
             point,

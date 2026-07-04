@@ -62,11 +62,6 @@ def main() -> None:
         assert torch.equal(changed.tensor(), torch.full((4,), 4.0))
         print(f"changed snapshot: {changed.tensor().tolist()}")
 
-        probe.clear_snapshot(synchronize=False)
-        cleared = probe.snapshot(synchronize=False)
-        assert len(cleared.observations) == 1
-        assert torch.equal(cleared.tensor(), torch.zeros_like(expected))
-        print("cleared snapshot storage: retained slot now contains zeros")
     finally:
         probe.close()
 

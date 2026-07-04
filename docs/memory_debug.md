@@ -35,6 +35,7 @@ Import the supported public memory API from `memory_debug`:
 ```python
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
+    MemoryLifetimeOptions,
     MemoryProbe,
     MemoryRecorder,
     MemoryRun,
@@ -236,7 +237,7 @@ go away?", anchor the analysis at the point of interest:
 lifetimes = run.lifetimes(
     "before_capture",
     through="after_replay",
-    attribution=MemoryAttributionOptions(
+    options=MemoryLifetimeOptions(
         events=True,
         on_missing="warn",
         stack_depth=4,
@@ -269,6 +270,7 @@ the half-open `(start, end]` birth selection:
 born = run.lifetimes(
     born_between=("before_capture", "after_capture"),
     through="after_replay",
+    options=MemoryLifetimeOptions(events=True),
 )
 ```
 
@@ -369,12 +371,16 @@ snapshot access is worth the additional host memory.
 
 ## Reports And Bundles
 
-Every report result provides:
+State comparisons, timelines, phase comparisons, and group phase comparisons
+provide:
 
 - `to_text(include_unchanged=True)`
 - `to_dict()`
 - `to_html(include_unchanged=True)`
 - `write(output_dir, include_unchanged=True)`
+
+Lifetime analyses and run-group summaries have no unchanged-row filter and
+provide `to_text()`, `to_dict()`, `to_html()`, and `write(output_dir)`.
 
 `write()` always creates `report.txt`, `report.json`, and `report.html`.
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
@@ -385,7 +391,8 @@ Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
 `birth_stacks.csv` and `release_stacks.csv`. Group reports add either
 `rank_point_entries.csv` and `point_aggregates.csv`, or `rank_decomposition.csv`
 and `phase_aggregates.csv`.
-Timeline HTML includes allocated, reserved, and optional cohort charts.
+Timeline HTML includes allocated, reserved, active, requested, and optional
+cohort charts.
 `include_unchanged=False` filters zero-change rows from text, HTML, and CSV;
 JSON always retains the complete result.
 

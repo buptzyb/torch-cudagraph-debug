@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from ._run_helpers import make_probe_snapshot
+from ._run_helpers import make_tensor_run
+from torch_cudagraph_debug.tensor_debug import TensorProbeSnapshot
 from torch_cudagraph_debug.tensor_debug.postprocess import (
     export_snapshots_to_tensorboard,
 )
@@ -100,3 +102,40 @@ def test_export_snapshots_empty_tensor_writes_only_numel() -> None:
 
     assert writer.scalars == [("empty/numel", 0, 3)]
     assert writer.histograms == []
+
+
+def test_distinct_observation_names_do_not_get_invocation_zero_suffix() -> None:
+    run = make_tensor_run(
+        [
+            (
+                "point",
+                [
+                    ("hidden", torch.tensor([1.0]), "full"),
+                    ("logits", torch.tensor([2.0]), "full"),
+                ],
+            )
+        ]
+    )
+    snapshot = TensorProbeSnapshot(
+        probe_id="probe",
+        probe_name="model",
+        replay_index=1,
+        timestamp=0.0,
+        observations=run["point"].observations,
+    )
+    writer = FakeWriter()
+
+    export_snapshots_to_tensorboard(writer, [snapshot])
+
+    tags = {tag for tag, _, _ in writer.scalars}
+    assert "hidden/numel" in tags
+    assert "logits/numel" in tags
+    assert not any("invocation_0" in tag for tag in tags)
+
+
+def test_tensorboard_step_must_be_an_integer() -> None:
+    writer = FakeWriter()
+    snapshot = make_probe_snapshot(torch.ones(1))
+
+    with pytest.raises(TypeError, match="step must be an integer"):
+        export_snapshots_to_tensorboard(writer, [snapshot], step=1.5)  # type: ignore[arg-type]

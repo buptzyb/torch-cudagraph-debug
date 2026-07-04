@@ -52,12 +52,20 @@ class TensorComparisonOptions:
     def __post_init__(self) -> None:
         if self.mode not in {"allclose", "exact"}:
             raise ValueError('mode must be either "allclose" or "exact"')
-        if self.rtol < 0:
+        if isinstance(self.rtol, bool) or not isinstance(self.rtol, (int, float)):
+            raise TypeError("rtol must be a finite number")
+        if isinstance(self.atol, bool) or not isinstance(self.atol, (int, float)):
+            raise TypeError("atol must be a finite number")
+        if not math.isfinite(float(self.rtol)) or self.rtol < 0:
             raise ValueError("rtol must be non-negative")
-        if self.atol < 0:
+        if not math.isfinite(float(self.atol)) or self.atol < 0:
             raise ValueError("atol must be non-negative")
+        if type(self.equal_nan) is not bool:
+            raise TypeError("equal_nan must be a boolean")
         if self.dtype_policy not in {"strict", "promote"}:
             raise ValueError('dtype_policy must be either "strict" or "promote"')
+        if type(self.limit) is not int:
+            raise TypeError("limit must be an integer")
         if self.limit < 1:
             raise ValueError("limit must be >= 1")
 
@@ -186,6 +194,8 @@ class _TensorStateComparison:
         *,
         limit: int | None = None,
     ) -> tuple[TensorObservationComparison, ...]:
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise ValueError("limit must be a positive integer or None")
         selected = [
             item
             for item in self.observation_comparisons
@@ -202,7 +212,8 @@ class _TensorStateComparison:
             ),
             reverse=True,
         )
-        return tuple(selected[: limit or self.options.limit])
+        selected_limit = self.options.limit if limit is None else limit
+        return tuple(selected[:selected_limit])
 
     def assert_ok(self) -> None:
         if not self.ok:
@@ -353,6 +364,15 @@ class TensorRunComparison:
     warnings: tuple[str, ...] = ()
 
     @property
+    def report_warnings(self) -> tuple[str, ...]:
+        nested = (
+            f"point {item.candidate.label!r}: {warning}"
+            for item in self.point_comparisons
+            for warning in item.warnings
+        )
+        return tuple(dict.fromkeys((*self.warnings, *nested)))
+
+    @property
     def status(self) -> ComparisonStatus:
         if self.reference_only_points or self.candidate_only_points:
             return "mismatch"
@@ -387,7 +407,7 @@ class TensorRunComparison:
             f"{self.candidate.name!r}: {self.status}",
             f"  compared points={len(self.point_comparisons)}",
         ]
-        lines.extend(f"  warning: {warning}" for warning in self.warnings)
+        lines.extend(f"  warning: {warning}" for warning in self.report_warnings)
         if self.reference_only_points:
             lines.append(
                 f"  reference-only points: {', '.join(self.reference_only_points)}"
@@ -427,7 +447,7 @@ class TensorRunComparison:
             "candidate": self.candidate.descriptor(),
             "reference_only_points": list(self.reference_only_points),
             "candidate_only_points": list(self.candidate_only_points),
-            "warnings": list(self.warnings),
+            "warnings": list(self.report_warnings),
             "point_comparisons": [item.to_dict() for item in self.point_comparisons],
         }
 
@@ -439,7 +459,7 @@ class TensorRunComparison:
                 self.point_comparisons,
                 include_unchanged=include_unchanged,
             ),
-            self.warnings,
+            self.report_warnings,
         )
 
     def write(
@@ -469,6 +489,16 @@ class TensorPointSeriesComparison:
     point_comparisons: tuple[TensorPointComparison, ...]
 
     @property
+    def warnings(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                f"point {item.candidate.label!r}: {warning}"
+                for item in self.point_comparisons
+                for warning in item.warnings
+            )
+        )
+
+    @property
     def status(self) -> ComparisonStatus:
         if any(item.status == "mismatch" for item in self.point_comparisons):
             return "mismatch"
@@ -496,6 +526,7 @@ class TensorPointSeriesComparison:
             f"Tensor point-series comparison reference={_state_display(self.reference)} "
             f"candidate_run={self.candidate_run.name!r}: {self.status}"
         ]
+        lines.extend(f"  warning: {warning}" for warning in self.warnings)
         for comparison in self.point_comparisons:
             lines.append(
                 f"  {comparison.candidate.label}: {comparison.status} "
@@ -524,6 +555,7 @@ class TensorPointSeriesComparison:
             "conclusive": self.conclusive,
             "reference": self.reference.descriptor(),
             "candidate_run": self.candidate_run.descriptor(),
+            "warnings": list(self.warnings),
             "point_comparisons": [item.to_dict() for item in self.point_comparisons],
         }
 
@@ -535,7 +567,7 @@ class TensorPointSeriesComparison:
                 self.point_comparisons,
                 include_unchanged=include_unchanged,
             ),
-            (),
+            self.warnings,
         )
 
     def write(
@@ -733,37 +765,20 @@ def compare_runs(
 
 def compare_point_series(
     reference: TensorPoint,
-    candidates: TensorRun | Sequence[TensorPoint],
+    candidates: TensorRun,
     *,
     options: TensorComparisonOptions | None = None,
 ) -> TensorPointSeriesComparison:
     """Compare one reference point against an ordered candidate series."""
 
-    points = (
-        candidates.points if isinstance(candidates, TensorRun) else tuple(candidates)
-    )
+    if not isinstance(candidates, TensorRun):
+        raise TypeError("candidates must be a TensorRun")
+    points = candidates.points
     if not points:
         raise ValueError("candidate series must be non-empty")
-    if isinstance(candidates, TensorRun):
-        candidate_run = candidates
-    else:
-        run_ids = {point.run_id for point in points}
-        if len(run_ids) != 1:
-            raise ValueError("candidate series points must belong to one run")
-        candidate_run = TensorRun(
-            run_id=points[0].run_id,
-            name="candidate-series",
-            execution="eager",
-            rank=None,
-            created_at=points[0].timestamp,
-            finished_at=None,
-            complete=False,
-            default_payload="full",
-            points=tuple(points),
-        )
     return TensorPointSeriesComparison(
         reference=reference,
-        candidate_run=candidate_run,
+        candidate_run=candidates,
         point_comparisons=tuple(
             compare_points(reference, point, options=options) for point in points
         ),
@@ -790,6 +805,8 @@ def _compare_observations(
         )
 
     if not dtype_changed and reference.sha256 == candidate.sha256:
+        reference._verify_payload()
+        candidate._verify_payload()
         return TensorObservationComparison(
             name=reference.name,
             invocation_index=reference.invocation_index,
@@ -857,8 +874,8 @@ def _compare_full_payloads(
     candidate: TensorObservation,
     options: TensorComparisonOptions,
 ) -> TensorObservationComparison:
-    reference_tensor = reference.tensor().reshape(-1)
-    candidate_tensor = candidate.tensor().reshape(-1)
+    reference_tensor = reference._materialize_tensor().reshape(-1)
+    candidate_tensor = candidate._materialize_tensor().reshape(-1)
     numel = reference_tensor.numel()
     mismatch_count = 0
     first_flat_index: int | None = None

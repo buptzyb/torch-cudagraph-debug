@@ -219,6 +219,68 @@ def test_payload_digest_is_verified_when_materialized(tmp_path: Path) -> None:
         reloaded["point"].observation("x").tensor()
 
 
+def test_equal_digest_shortcut_verifies_both_full_blobs(tmp_path: Path) -> None:
+    reference_bundle = tmp_path / "reference.tcgd-tensor"
+    candidate_bundle = tmp_path / "candidate.tcgd-tensor"
+    value = torch.arange(4, dtype=torch.float32)
+    make_tensor_run(
+        [("point", [("x", value, "full")])],
+        bundle_dir=reference_bundle,
+    )
+    make_tensor_run(
+        [("point", [("x", value, "full")])],
+        bundle_dir=candidate_bundle,
+    )
+    reference = TensorRun.load(reference_bundle)
+    candidate = TensorRun.load(candidate_bundle)
+    blob = candidate["point"].observation("x")._blob_path
+    assert blob is not None
+    blob.write_bytes(bytes(value.numel() * value.element_size()))
+
+    from torch_cudagraph_debug.tensor_debug import compare_points
+
+    with pytest.raises(TensorBundleError, match="does not match its SHA-256"):
+        compare_points(reference["point"], candidate["point"])
+
+
+def test_recorder_manifest_failures_do_not_commit_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = TensorRecorder(
+        execution="eager",
+        bundle_dir=tmp_path / "transaction.tcgd-tensor",
+    )
+    original = recorder._write_manifest
+    failed_point = False
+    failed_finish = False
+
+    def flaky(**kwargs: object) -> None:
+        nonlocal failed_point, failed_finish
+        complete = kwargs["complete"]
+        if not complete and not failed_point:
+            failed_point = True
+            raise TensorBundleError("injected manifest failure")
+        if complete and not failed_finish:
+            failed_finish = True
+            raise TensorBundleError("injected manifest failure")
+        original(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(recorder, "_write_manifest", flaky)
+    with pytest.raises(TensorBundleError, match="injected"):
+        with recorder.record_point("point"):
+            pass
+    assert recorder.snapshot_run().points == ()
+
+    with recorder.record_point("point"):
+        pass
+    with pytest.raises(TensorBundleError, match="injected"):
+        recorder.finish()
+    assert recorder._result is None
+    run = recorder.finish()
+    assert [point.label for point in run.points] == ["point"]
+
+
 def test_load_normalizes_invalid_modes_to_bundle_errors(tmp_path: Path) -> None:
     bundle = tmp_path / "invalid-mode.tcgd-tensor"
     make_tensor_run(
@@ -232,6 +294,52 @@ def test_load_normalizes_invalid_modes_to_bundle_errors(tmp_path: Path) -> None:
 
     with pytest.raises(TensorBundleError, match="invalid tensor bundle mode"):
         TensorRun.load(bundle)
+
+
+def test_tensor_bundle_load_rejects_lossy_scalar_coercions(tmp_path: Path) -> None:
+    bundle = tmp_path / "strict.tcgd-tensor"
+    make_tensor_run(
+        [("point", [("x", torch.ones(1), "full")])],
+        bundle_dir=bundle,
+    )
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    manifest["complete"] = 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(TensorBundleError, match="boolean"):
+        TensorRun.load(bundle)
+
+    manifest["complete"] = True
+    manifest["points"][0]["index"] = 0.0
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(TensorBundleError, match="integer"):
+        TensorRun.load(bundle)
+
+    manifest["points"][0]["index"] = 0
+    manifest["created_at"] = float("nan")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(TensorBundleError, match="non-finite"):
+        TensorRun.load(bundle)
+
+
+def test_tensor_recorder_rejects_bad_environment_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RANK", "not-an-integer")
+
+    with pytest.raises(ValueError, match="environment variable RANK"):
+        TensorRecorder(execution="eager")
+
+
+def test_tensor_recorder_context_rejects_reentry_and_explicit_finish() -> None:
+    recorder = TensorRecorder(execution="eager")
+
+    with recorder:
+        with pytest.raises(TensorDebugError, match="re-entered"):
+            recorder.__enter__()
+        with pytest.raises(TensorDebugError, match="inside its context"):
+            recorder.finish()
 
 
 def test_recorder_exception_exit_persists_incomplete_terminal_run(

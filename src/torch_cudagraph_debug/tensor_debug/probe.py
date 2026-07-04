@@ -187,16 +187,6 @@ class TensorProbe:
 
         return compare_snapshots(reference, candidate, options=options)
 
-    def clear_snapshot(
-        self,
-        *,
-        synchronize: SynchronizeTarget = True,
-    ) -> None:
-        """Synchronize as requested, then clear retained host snapshot storage."""
-
-        self._ensure_open()
-        self._collector.clear(synchronize=synchronize)
-
     def check_status(
         self,
         *,
@@ -206,14 +196,48 @@ class TensorProbe:
 
         self._ensure_open()
         native_check_status = self._collector.check_status(synchronize=synchronize)
-        raw_name = native_check_status.get("name")
+        required = {
+            "ok",
+            "message",
+            "replay_index",
+            "order",
+            "name",
+            "invocation_index",
+        }
+        missing = required - set(native_check_status)
+        if missing:
+            raise TensorDebugError(
+                f"native check status is missing fields {sorted(missing)!r}"
+            )
+        ok = native_check_status["ok"]
+        message = native_check_status["message"]
+        replay_index = native_check_status["replay_index"]
+        order = native_check_status["order"]
+        raw_name = native_check_status["name"]
+        invocation_index = native_check_status["invocation_index"]
+        if type(ok) is not bool:
+            raise TensorDebugError("native check status ok must be a boolean")
+        if not isinstance(message, str):
+            raise TensorDebugError("native check status message must be a string")
+        if type(replay_index) is not int or replay_index < 0:
+            raise TensorDebugError(
+                "native check status replay_index must be non-negative"
+            )
+        if type(order) is not int:
+            raise TensorDebugError("native check status order must be an integer")
+        if raw_name is not None and not isinstance(raw_name, str):
+            raise TensorDebugError("native check status name must be a string or None")
+        if type(invocation_index) is not int:
+            raise TensorDebugError(
+                "native check status invocation_index must be an integer"
+            )
         return TensorCheckStatus(
-            ok=bool(native_check_status.get("ok", False)),
-            message=str(native_check_status.get("message", "")),
-            replay_index=int(native_check_status.get("replay_index", 0)),
-            order=int(native_check_status.get("order", -1)),
-            name=None if raw_name is None else str(raw_name),
-            invocation_index=int(native_check_status.get("invocation_index", -1)),
+            ok=ok,
+            message=message,
+            replay_index=replay_index,
+            order=order,
+            name=raw_name,
+            invocation_index=invocation_index,
         )
 
     def assert_check_ok(

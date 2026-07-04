@@ -1,7 +1,7 @@
 """CUDA allocator memory debugging with explicit points and immutable runs."""
 
 from .allocator_snapshot import MemoryObservationKey
-from .attribution import MemoryAttributionOptions
+from .attribution import MemoryAttributionOptions, MemoryLifetimeOptions
 from .comparison import compare_phases, compare_points, compare_snapshots
 from .errors import (
     MemoryBundleError,
@@ -49,6 +49,7 @@ __all__ = [
     "MemoryRunGroupPhaseComparison",
     "MemoryAllocationLifetimeAnalysis",
     "MemoryAttributionOptions",
+    "MemoryLifetimeOptions",
     "compare_snapshots",
     "compare_points",
     "compare_phases",

@@ -203,9 +203,10 @@ def test_workflow_docs_separate_control_flow_from_containment() -> None:
         assert phrase not in normalized
 
     readme = documents[0].read_text(encoding="utf-8")
-    assert "A `Probe` returns a" in readme
-    assert "A `Recorder` produces a `Run`" in readme
-    assert "`ProbeSnapshot` and `Point` both contain" in readme
+    readme_normalized = re.sub(r"\s+", " ", readme.replace("`", ""))
+    assert "snapshot() returns a standalone ProbeSnapshot" in readme_normalized
+    assert "finish() returns a Run" in readme_normalized
+    assert "same ownerless Observation model within each domain" in readme_normalized
 
 
 def test_mermaid_edges_name_their_relationships() -> None:
@@ -389,3 +390,15 @@ def test_public_docs_use_supported_api_terminology() -> None:
     )
     assert "stable API" not in combined
     assert "stable facade" not in combined
+    assert "clear_snapshot" not in combined
+    assert re.search(r"status queries,\s+clear,", combined) is None
+
+
+def test_memory_docs_distinguish_lifetime_and_attribution_options() -> None:
+    api = (ROOT / "docs" / "api.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "memory_debug.md").read_text(encoding="utf-8")
+
+    assert "MemoryLifetimeOptions" in api
+    assert "options: MemoryLifetimeOptions | None" in api
+    assert "options=MemoryLifetimeOptions(" in guide
+    assert "attribution=MemoryAttributionOptions(" in guide

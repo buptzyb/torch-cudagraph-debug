@@ -75,7 +75,8 @@ class AllocationStackSummary:
 class AllocationStackDelta:
     """Reference/candidate delta for one allocation-stack bucket."""
 
-    pool_id: tuple[Any, ...]
+    reference_pool_id: tuple[Any, ...]
+    candidate_pool_id: tuple[Any, ...]
     stream: Any | None
     stack_key: str
     reference_size_bytes: int
@@ -96,7 +97,8 @@ class AllocationStackDelta:
 
     def to_row(self) -> dict[str, object]:
         row: dict[str, object] = {
-            "pool_id": pool_id_label(self.pool_id),
+            "reference_pool_id": pool_id_label(self.reference_pool_id),
+            "candidate_pool_id": pool_id_label(self.candidate_pool_id),
             "stack_key": self.stack_key,
             "reference_size_bytes": self.reference_size_bytes,
             "candidate_size_bytes": self.candidate_size_bytes,
@@ -128,8 +130,7 @@ def _build_allocation_stack_index(
     *,
     stack_depth: int,
 ) -> _AllocationStackIndex:
-    if stack_depth < 1:
-        raise ValueError("stack_depth must be >= 1")
+    _validate_stack_depth(stack_depth)
     aggregate: dict[tuple[PoolId, str], list[int]] = defaultdict(lambda: [0, 0, 0])
     detailed: dict[tuple[PoolId, Any, str], list[int]] = defaultdict(lambda: [0, 0, 0])
     active = attributed = 0
@@ -229,7 +230,8 @@ def _compare_mapped_stack_indexes(
             reference_row = reference_rows.get(stack_key)
             candidate_row = candidate_rows.get(stack_key)
             delta = _stack_delta(
-                pool_id=candidate_pool,
+                reference_pool_id=reference_pool,
+                candidate_pool_id=candidate_pool,
                 stream=None,
                 stack_key=stack_key,
                 reference=reference_row,
@@ -279,8 +281,8 @@ def summarize_allocation_stacks(
 ) -> tuple[AllocationStackSummary, ...]:
     """Group active blocks by allocation stack, aggregating streams by default."""
 
-    if stack_depth < 1:
-        raise ValueError("stack_depth must be >= 1")
+    _validate_stack_depth(stack_depth)
+    _validate_top(top)
     pool_filter = normalize_pool_id(pool_id) if pool_id is not None else None
     stream_filter = normalize_stream(stream) if stream is not None else None
     totals: dict[tuple[tuple[Any, ...], Any | None, str], list[int]] = defaultdict(
@@ -343,6 +345,10 @@ def compare_allocation_stacks(
 ) -> tuple[AllocationStackDelta, ...]:
     """Compare active allocation-stack buckets between two snapshots."""
 
+    _validate_stack_depth(stack_depth)
+    _validate_top(top)
+    if type(by_stream) is not bool or type(include_unchanged) is not bool:
+        raise TypeError("by_stream and include_unchanged must be booleans")
     reference_rows = summarize_allocation_stacks(
         reference,
         pool_id=pool_id,
@@ -381,7 +387,8 @@ def _compare_stack_rows(
     deltas = []
     for key in set(reference_map) | set(candidate_map):
         delta = _stack_delta(
-            pool_id=key[0],
+            reference_pool_id=key[0],
+            candidate_pool_id=key[0],
             stream=key[1],
             stack_key=key[2],
             reference=reference_map.get(key),
@@ -395,7 +402,8 @@ def _compare_stack_rows(
 
 def _stack_delta(
     *,
-    pool_id: PoolId,
+    reference_pool_id: PoolId,
+    candidate_pool_id: PoolId,
     stream: Any | None,
     stack_key: str,
     reference: AllocationStackSummary | None,
@@ -408,7 +416,8 @@ def _stack_delta(
     reference_count = reference.count if reference else 0
     candidate_count = candidate.count if candidate else 0
     return AllocationStackDelta(
-        pool_id=pool_id,
+        reference_pool_id=reference_pool_id,
+        candidate_pool_id=candidate_pool_id,
         stream=stream,
         stack_key=stack_key,
         reference_size_bytes=reference_size,
@@ -430,7 +439,23 @@ def _stack_delta_sort_key(
         -abs(item.delta_size_bytes),
         -abs(item.delta_requested_bytes),
         -abs(item.delta_count),
-        pool_id_label(item.pool_id),
+        pool_id_label(item.candidate_pool_id),
         "" if item.stream is None else stream_label(item.stream),
         item.stack_key,
     )
+
+
+def _validate_stack_depth(value: int) -> None:
+    if type(value) is not int:
+        raise TypeError("stack_depth must be an integer")
+    if value < 1:
+        raise ValueError("stack_depth must be >= 1")
+
+
+def _validate_top(value: int | None) -> None:
+    if value is None:
+        return
+    if type(value) is not int:
+        raise TypeError("top must be an integer or None")
+    if value < 1:
+        raise ValueError("top must be >= 1")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable
 from typing import Protocol
 
@@ -40,15 +41,19 @@ def export_snapshots_to_tensorboard(
     with ``add_scalar`` and ``add_histogram`` methods.
     """
 
+    if type(write_scalars) is not bool or type(write_histograms) is not bool:
+        raise TypeError("write_scalars and write_histograms must be booleans")
+    if not write_scalars and not write_histograms:
+        return
+
     for snapshot in snapshots:
         global_step = _resolve_step(snapshot, step)
-        multiple = len(snapshot.observations) > 1
+        name_counts = Counter(item.name for item in snapshot.observations)
         for observation in snapshot.observations:
             base_tag = f"{tag_prefix}{observation.name}"
-            if multiple:
+            if name_counts[observation.name] > 1:
                 base_tag += f"/invocation_{observation.invocation_index}"
-            tensor = observation.tensor().detach()
-            numel = int(tensor.numel())
+            numel = observation.summary.numel
 
             if write_scalars:
                 writer.add_scalar(f"{base_tag}/numel", numel, global_step)
@@ -56,7 +61,7 @@ def export_snapshots_to_tensorboard(
             if numel == 0:
                 continue
 
-            values = tensor.to(dtype=torch.float32)
+            values = observation._materialize_tensor().to(dtype=torch.float32)
             flat = values.reshape(-1)
 
             if write_scalars:
@@ -80,7 +85,11 @@ def export_snapshots_to_tensorboard(
 
 def _resolve_step(snapshot: TensorProbeSnapshot, step: StepSelector | None) -> int:
     if step is None:
-        return int(snapshot.replay_index)
+        return snapshot.replay_index
     if callable(step):
-        return int(step(snapshot))
-    return int(step)
+        value = step(snapshot)
+    else:
+        value = step
+    if type(value) is not int:
+        raise TypeError("TensorBoard step must be an integer")
+    return value

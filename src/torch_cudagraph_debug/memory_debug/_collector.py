@@ -92,7 +92,14 @@ class _MemoryCollector:
             return
         if not torch.cuda.is_available():
             return
-        if _current_stream_is_capturing():
+        capture_state = _current_stream_capture_state()
+        if capture_state is None:
+            warnings.append(
+                "could not determine CUDA graph capture state; requested allocator "
+                "synchronization was skipped"
+            )
+            return
+        if capture_state:
             warnings.append(
                 "requested allocator synchronization was skipped during "
                 "CUDA graph capture"
@@ -154,11 +161,11 @@ def _snapshot_envelope(snapshot: AllocatorSnapshotData) -> AllocatorSnapshotData
     return envelope
 
 
-def _current_stream_is_capturing() -> bool:
+def _current_stream_capture_state() -> bool | None:
     is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
     if not callable(is_capturing):
-        return False
+        return None
     try:
         return bool(is_capturing())
     except Exception:
-        return False
+        return None

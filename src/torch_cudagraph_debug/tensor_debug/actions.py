@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -12,6 +13,8 @@ NonContiguousPolicy = Literal["error", "copy"]
 def validate_non_contiguous_policy(policy: str) -> NonContiguousPolicy:
     """Validate the non-contiguous tensor handling policy."""
 
+    if not isinstance(policy, str):
+        raise TypeError("non_contiguous must be a string")
     if policy not in {"error", "copy"}:
         raise ValueError('non_contiguous must be either "error" or "copy"')
     return policy  # type: ignore[return-value]
@@ -27,6 +30,14 @@ class PrintAction:
     enabled: bool = True
 
     def __post_init__(self) -> None:
+        if type(self.max_items) is not int:
+            raise TypeError("max_items must be an integer")
+        if type(self.every) is not int:
+            raise TypeError("every must be an integer")
+        if type(self.summary) is not bool:
+            raise TypeError("summary must be a boolean")
+        if type(self.enabled) is not bool:
+            raise TypeError("enabled must be a boolean")
         if self.max_items < 0:
             raise ValueError("max_items must be non-negative")
         if self.every <= 0:
@@ -48,6 +59,10 @@ class RecordAction:
 
     enabled: bool = True
 
+    def __post_init__(self) -> None:
+        if type(self.enabled) is not bool:
+            raise TypeError("enabled must be a boolean")
+
     def _to_native(self) -> dict[str, Any]:
         return {
             "kind": "record",
@@ -66,6 +81,18 @@ class CheckAction:
     enabled: bool = True
 
     def __post_init__(self) -> None:
+        if isinstance(self.rtol, bool) or not isinstance(self.rtol, (int, float)):
+            raise TypeError("rtol must be a finite number")
+        if isinstance(self.atol, bool) or not isinstance(self.atol, (int, float)):
+            raise TypeError("atol must be a finite number")
+        if not math.isfinite(float(self.rtol)):
+            raise ValueError("rtol must be finite")
+        if not math.isfinite(float(self.atol)):
+            raise ValueError("atol must be finite")
+        if type(self.equal_nan) is not bool:
+            raise TypeError("equal_nan must be a boolean")
+        if type(self.enabled) is not bool:
+            raise TypeError("enabled must be a boolean")
         if self.rtol < 0:
             raise ValueError("rtol must be non-negative")
         if self.atol < 0:

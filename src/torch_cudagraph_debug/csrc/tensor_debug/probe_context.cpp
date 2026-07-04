@@ -271,15 +271,6 @@ pybind11::list ProbeContext::observations(std::optional<uint64_t> replay_index) 
     return result;
 }
 
-void ProbeContext::clear_observations() {
-    std::lock_guard<std::mutex> guard(mutex_);
-    for (TensorSlot& slot : slots_) {
-        if (slot.observation.valid && slot.staging != nullptr && slot.observation.nbytes > 0) {
-            std::memset(slot.staging, 0, slot.observation.nbytes);
-        }
-    }
-}
-
 pybind11::dict ProbeContext::check_status() {
     std::lock_guard<std::mutex> guard(mutex_);
     pybind11::dict result;

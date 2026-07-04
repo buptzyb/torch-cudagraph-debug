@@ -8,6 +8,7 @@ import pytest
 from torch_cudagraph_debug.memory_debug import (
     MemoryAllocationLifetimeAnalysis,
     MemoryAttributionOptions,
+    MemoryLifetimeOptions,
     MemoryDebugError,
     MemoryHistoryError,
     MemoryOwnershipError,
@@ -43,7 +44,7 @@ def test_snapshot_lifetimes_group_sizes_and_infer_release() -> None:
     report = run.lifetimes(
         "anchor",
         through="final",
-        attribution=MemoryAttributionOptions(events=False, stack_depth=4),
+        options=MemoryLifetimeOptions(events=False, stack_depth=4),
     )
 
     assert isinstance(report, MemoryAllocationLifetimeAnalysis)
@@ -103,7 +104,7 @@ def test_event_lifetimes_split_same_address_reuse_generation() -> None:
     report = run.lifetimes(
         "anchor",
         through="reused",
-        attribution=MemoryAttributionOptions(
+        options=MemoryLifetimeOptions(
             events=True,
             on_missing="error",
             stack_depth=4,
@@ -123,7 +124,7 @@ def test_event_lifetimes_split_same_address_reuse_generation() -> None:
 
     born = run.lifetimes(
         born_between=("anchor", "reused"),
-        attribution=MemoryAttributionOptions(
+        options=MemoryLifetimeOptions(
             events=True,
             on_missing="error",
             stack_depth=4,
@@ -171,7 +172,7 @@ def test_born_between_keeps_event_only_transient_allocation(tmp_path: Path) -> N
     recorder.record_point("after")
     report = recorder.finish().lifetimes(
         born_between=("before", "after"),
-        attribution=MemoryAttributionOptions(
+        options=MemoryLifetimeOptions(
             events=True,
             on_missing="error",
             stack_depth=4,
@@ -254,7 +255,7 @@ def test_born_between_snapshot_fallback_warns_and_misses_no_survivor() -> None:
     report = run.lifetimes(
         born_between=("before", "born"),
         through="released",
-        attribution=MemoryAttributionOptions(events=False, stack_depth=4),
+        options=MemoryLifetimeOptions(events=False, stack_depth=4),
     )
 
     assert len(report.cohorts) == 1
@@ -295,7 +296,7 @@ def test_born_between_uses_trace_devices_without_endpoint_segments() -> None:
     recorder.record_point("after")
     report = recorder.finish().lifetimes(
         born_between=("before", "after"),
-        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
+        options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
     assert len(report.cohorts) == 1
@@ -328,7 +329,7 @@ def test_incomplete_history_keeps_provable_release_and_warns() -> None:
     recorder.record_point("final")
     report = recorder.finish().lifetimes(
         "anchor",
-        attribution=MemoryAttributionOptions(events=True),
+        options=MemoryLifetimeOptions(events=True),
     )
 
     assert report.history_complete is False
@@ -338,7 +339,7 @@ def test_incomplete_history_keeps_provable_release_and_warns() -> None:
     with pytest.raises(MemoryHistoryError, match="unavailable or incomplete"):
         recorder.result.lifetimes(
             "anchor",
-            attribution=MemoryAttributionOptions(events=True, on_missing="error"),
+            options=MemoryLifetimeOptions(events=True, on_missing="error"),
         )
 
 
@@ -390,7 +391,7 @@ def test_lifetimes_keep_devices_separate_for_same_address() -> None:
     recorder.record_point("final")
     report = recorder.finish().lifetimes(
         "anchor",
-        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
+        options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
     assert {item.device for item in report.cohorts} == {0, 1}
@@ -435,7 +436,7 @@ def test_lifetimes_do_not_match_event_to_other_device_same_address() -> None:
     recorder.record_point("final")
     report = recorder.finish().lifetimes(
         "anchor",
-        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
+        options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
     assert len(report.cohorts) == 1
@@ -479,7 +480,7 @@ def test_event_only_birth_infers_pool_from_segment_range() -> None:
     recorder.record_point("after")
     report = recorder.finish().lifetimes(
         born_between=("before", "after"),
-        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
+        options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
     assert len(report.cohorts) == 1
@@ -497,7 +498,7 @@ def test_lifetime_report_owns_all_formats(tmp_path: Path) -> None:
     )
     report = run.lifetimes(
         "anchor",
-        attribution=MemoryAttributionOptions(events=False),
+        options=MemoryLifetimeOptions(events=False),
     )
 
     output = tmp_path / "lifetimes"
@@ -596,5 +597,32 @@ def test_lifetime_scan_loads_each_point_once(monkeypatch) -> None:
         return original(point)
 
     monkeypatch.setattr(MemoryPoint, "raw_snapshot", tracked)
-    run.lifetimes(attribution=MemoryAttributionOptions(events=False))
+    run.lifetimes(options=MemoryLifetimeOptions(events=False))
+    assert calls == [0, 1, 2]
+
+
+def test_combined_timeline_attribution_loads_each_point_once(monkeypatch) -> None:
+    run = make_run(
+        [
+            snapshot(segment(active=10)),
+            snapshot(segment(active=20)),
+            snapshot(segment(active=30)),
+        ],
+        labels=("before", "middle", "after"),
+    )
+    original = MemoryPoint.raw_snapshot
+    calls: list[int] = []
+
+    def tracked(point: MemoryPoint):
+        calls.append(point.index)
+        return original(point)
+
+    monkeypatch.setattr(MemoryPoint, "raw_snapshot", tracked)
+    run.timeline(
+        attribution=MemoryAttributionOptions(
+            stacks=True,
+            events=True,
+            lifetimes=True,
+        )
+    )
     assert calls == [0, 1, 2]

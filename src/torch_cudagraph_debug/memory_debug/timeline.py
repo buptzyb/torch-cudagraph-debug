@@ -10,7 +10,11 @@ from ._pool_identity import PoolId, pool_id_label, stream_label
 from .aggregation import ALLOCATOR_SCOPES, summarize_allocator_scopes
 from .allocator_snapshot import MemoryObservationKey
 from .attribution import MemoryAttributionOptions
-from .comparison import _compare_same_run_views, _load_state
+from .comparison import (
+    _MemoryStateView,
+    _compare_same_run_views,
+    _load_interval_views,
+)
 from .lifetimes import analyze_allocation_lifetimes
 from .recording import MemoryRun
 from .reports import MemoryPointComparison, MemoryTimeline
@@ -168,6 +172,9 @@ def _build_timeline(
 
     allocation_lifetimes = None
     comparison_options = replace(options, lifetimes=False)
+    interval_views: tuple[_MemoryStateView, ...] = ()
+    if (options.stacks or options.events or options.lifetimes) and run.points:
+        interval_views = _load_interval_views(run.points, comparison_options)
     if options.lifetimes and run.points:
         allocation_lifetimes = analyze_allocation_lifetimes(
             run,
@@ -175,10 +182,11 @@ def _build_timeline(
             end=run.points[-1],
             active_at=None,
             born_between=None,
-            options=comparison_options,
+            options=options.lifetime_options(),
+            _raw_snapshots=tuple(view.raw for view in interval_views),
         )
     point_comparisons = (
-        _build_point_comparisons(run, comparison_options)
+        _build_point_comparisons(run, comparison_options, interval_views)
         if options.stacks or options.events
         else ()
     )
@@ -195,15 +203,23 @@ def _build_timeline(
 def _build_point_comparisons(
     run: MemoryRun,
     options: MemoryAttributionOptions,
+    interval_views: tuple[_MemoryStateView, ...],
 ) -> tuple[MemoryPointComparison, ...]:
     if len(run.points) < 2:
         return ()
     rows = []
-    reference_view = _load_state(run.points[0], options)
-    for point in run.points[1:]:
-        candidate_view = _load_state(point, options)
+    if len(interval_views) != len(run.points):
+        raise ValueError("timeline interval views must match run points")
+    reference_view = interval_views[0]
+    for candidate_view in interval_views[1:]:
         rows.append(
-            _compare_same_run_views(run, reference_view, candidate_view, options)
+            _compare_same_run_views(
+                run,
+                reference_view,
+                candidate_view,
+                options,
+                interval_views=(reference_view, candidate_view),
+            )
         )
         reference_view = candidate_view
     return tuple(rows)

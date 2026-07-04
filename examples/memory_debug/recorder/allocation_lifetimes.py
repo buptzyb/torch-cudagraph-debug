@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 
 from torch_cudagraph_debug.memory_debug import (
-    MemoryAttributionOptions,
+    MemoryLifetimeOptions,
     MemoryRecorder,
     MemoryRun,
 )
@@ -77,7 +77,7 @@ def main() -> None:
             return
 
         run = MemoryRun.load(bundle_dir, cache_snapshots=False)
-        options = MemoryAttributionOptions(
+        options = MemoryLifetimeOptions(
             events=True,
             on_missing="error",
             stack_depth=4,
@@ -86,12 +86,12 @@ def main() -> None:
         active = run.lifetimes(
             "anchor",
             through="after_cleanup",
-            attribution=options,
+            options=options,
         )
         born = run.lifetimes(
             born_between=("before_transient", "after_transient"),
             through="after_cleanup",
-            attribution=options,
+            options=options,
         )
         active_paths = active.write(output_dir / "active-at-anchor")
         born_paths = born.write(output_dir / "born-in-interval")

@@ -93,10 +93,10 @@ def synchronize_tensor_results(
             f"synchronize target {target_device} does not match collector device "
             f"{collector_device}"
         )
-    if torch.cuda.is_current_stream_capturing():
+    if _is_capturing_on_device(target_device):
         raise RuntimeError(
-            "cannot synchronize tensor collector results during CUDA graph capture; "
-            "query after capture or pass synchronize=False"
+            "cannot synchronize tensor collector results during CUDA graph "
+            "capture; query after capture or pass synchronize=False"
         )
 
     if target_stream is not None:
@@ -226,30 +226,73 @@ class _TensorCollector:
             None if self.callback_enabled else int(self._replay_index.item())
         )
         output = []
-        for item in self._handle.observations(current_replay_index):
+        for index, item in enumerate(self._handle.observations(current_replay_index)):
+            if not isinstance(item, Mapping):
+                raise RuntimeError(
+                    f"native tensor observation {index} must be a mapping"
+                )
+            required = {
+                "name",
+                "order",
+                "replay_index",
+                "invocation_index",
+                "shape",
+                "device",
+                "tensor",
+            }
+            missing = required - set(item)
+            if missing:
+                raise RuntimeError(
+                    f"native tensor observation {index} is missing fields "
+                    f"{sorted(missing)!r}"
+                )
             tensor = item["tensor"]
+            if not isinstance(tensor, torch.Tensor):
+                raise RuntimeError(
+                    f"native tensor observation {index} tensor must be a torch.Tensor"
+                )
+            name = item["name"]
+            if not isinstance(name, str) or not name:
+                raise RuntimeError(
+                    f"native tensor observation {index} name must be non-empty"
+                )
+            order = _native_nonnegative_int(item["order"], f"observation {index} order")
+            replay_index = _native_nonnegative_int(
+                item["replay_index"], f"observation {index} replay_index"
+            )
+            invocation_index = _native_nonnegative_int(
+                item["invocation_index"],
+                f"observation {index} invocation_index",
+            )
+            raw_shape = item["shape"]
+            if isinstance(raw_shape, (str, bytes)) or not isinstance(
+                raw_shape, Sequence
+            ):
+                raise RuntimeError(
+                    f"native tensor observation {index} shape must be a sequence"
+                )
+            shape = tuple(
+                _native_nonnegative_int(value, f"observation {index} shape")
+                for value in raw_shape
+            )
+            source_device = item["device"]
+            if not isinstance(source_device, str) or not source_device:
+                raise RuntimeError(
+                    f"native tensor observation {index} device must be non-empty"
+                )
             output.append(
                 _CollectedTensor(
-                    name=str(item["name"]),
-                    order=int(item["order"]),
-                    replay_index=int(item["replay_index"]),
-                    invocation_index=int(item.get("invocation_index", 0)),
+                    name=name,
+                    order=order,
+                    replay_index=replay_index,
+                    invocation_index=invocation_index,
                     tensor=tensor,
-                    shape=tuple(item.get("shape", tuple(tensor.shape))),
-                    dtype=getattr(tensor, "dtype"),
-                    source_device=str(item.get("device", "")),
+                    shape=shape,
+                    dtype=tensor.dtype,
+                    source_device=source_device,
                 )
             )
         return tuple(output)
-
-    def clear(self, *, synchronize: SynchronizeTarget) -> None:
-        self._ensure_open()
-        validate_synchronize_target(synchronize)
-        if self._handle is None or not self.record_enabled:
-            return
-        self.synchronize(synchronize)
-        self._handle._reclaim_retired_staging()
-        self._handle.clear_observations()
 
     def check_status(
         self,
@@ -286,7 +329,8 @@ class _TensorCollector:
             return
         validate_synchronize_target(synchronize)
         if self._handle is not None:
-            if torch.cuda.is_current_stream_capturing():
+            assert self._device is not None
+            if _is_capturing_on_device(self._device):
                 raise RuntimeError(
                     "cannot close tensor collector during CUDA graph capture"
                 )
@@ -300,3 +344,16 @@ class _TensorCollector:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError(f"tensor collector {self.name!r} is closed")
+
+
+def _native_nonnegative_int(value: object, context: str) -> int:
+    if type(value) is not int or value < 0:
+        raise RuntimeError(f"native tensor {context} must be a non-negative integer")
+    return value
+
+
+def _is_capturing_on_device(device: torch.device) -> bool:
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return bool(torch.cuda.is_current_stream_capturing())
+    with torch.cuda.device(device):
+        return bool(torch.cuda.is_current_stream_capturing())

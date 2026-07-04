@@ -32,6 +32,10 @@ class MemoryObservationKey:
     pool_id: PoolId
     stream: Any
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "pool_id", normalize_pool_id(self.pool_id))
+        object.__setattr__(self, "stream", normalize_stream(self.stream))
+
 
 @dataclass(frozen=True)
 class AllocatorTraceEntry:
@@ -56,24 +60,30 @@ def normalize_snapshot(
 
     segments = _segments_from_snapshot(snapshot)
     normalized = []
-    for segment in segments:
+    for segment_index, segment in enumerate(segments):
+        context = f"segment[{segment_index}]"
         pool_id = normalize_pool_id(segment.get("segment_pool_id", DEFAULT_POOL_ID))
         stream = normalize_stream(segment.get("stream", UNKNOWN_STREAM))
-        address = _optional_int(segment.get("address"))
+        address = _optional_int_field(segment, "address", context)
         blocks = []
         block_address = address
-        for block in segment.get("blocks", []) or []:
-            current_address = _optional_int(block.get("address"))
+        for block_index, block in enumerate(
+            _mapping_sequence_field(segment, "blocks", context)
+        ):
+            block_context = f"{context}.blocks[{block_index}]"
+            current_address = _optional_int_field(block, "address", block_context)
             if current_address is None and block_address is not None:
                 current_address = block_address
-            size = _int(block.get("size"))
+            size = _int_field(block, "size", block_context)
             blocks.append(
                 {
                     "address": current_address,
                     "size": size,
-                    "requested_size": _int(block.get("requested_size")),
-                    "state": str(block.get("state", "unknown")),
-                    "frames": tuple(block.get("frames") or ()),
+                    "requested_size": _int_field(
+                        block, "requested_size", block_context
+                    ),
+                    "state": _string_field(block, "state", block_context, "unknown"),
+                    "frames": _frames_field(block, block_context),
                 }
             )
             if block_address is not None:
@@ -81,16 +91,18 @@ def normalize_snapshot(
         normalized.append(
             {
                 "address": address,
-                "device": _optional_int(segment.get("device")),
+                "device": _optional_int_field(segment, "device", context),
                 "stream": stream,
                 "segment_pool_id": pool_id,
-                "segment_type": str(segment.get("segment_type", "unknown")),
-                "total_size": _int(segment.get("total_size")),
-                "allocated_size": _int(segment.get("allocated_size")),
-                "active_size": _int(segment.get("active_size")),
-                "requested_size": _int(segment.get("requested_size")),
+                "segment_type": _string_field(
+                    segment, "segment_type", context, "unknown"
+                ),
+                "total_size": _int_field(segment, "total_size", context),
+                "allocated_size": _int_field(segment, "allocated_size", context),
+                "active_size": _int_field(segment, "active_size", context),
+                "requested_size": _int_field(segment, "requested_size", context),
                 "blocks": tuple(blocks),
-                "frames": tuple(segment.get("frames") or ()),
+                "frames": _frames_field(segment, context),
             }
         )
     return tuple(normalized)
@@ -114,18 +126,22 @@ def trace_device_indices(snapshot: AllocatorSnapshotData) -> tuple[int, ...]:
 
     if not isinstance(snapshot, Mapping):
         return ()
-    raw_traces = snapshot.get("device_traces", ()) or ()
+    raw_traces = snapshot.get("device_traces", ())
+    if raw_traces is None:
+        raise TypeError("device_traces must be a sequence when present")
     if not isinstance(raw_traces, Sequence) or isinstance(
         raw_traces, (str, bytes, bytearray)
     ):
-        return ()
-    return tuple(
-        device_index
-        for device_index, device_trace in enumerate(raw_traces)
-        if isinstance(device_trace, Sequence)
-        and not isinstance(device_trace, (str, bytes, bytearray))
-        and bool(device_trace)
-    )
+        raise TypeError("device_traces must be a sequence")
+    devices = []
+    for device_index, device_trace in enumerate(raw_traces):
+        if isinstance(device_trace, (str, bytes, bytearray)) or not isinstance(
+            device_trace, Sequence
+        ):
+            raise TypeError(f"device_traces[{device_index}] must be a sequence")
+        if device_trace:
+            devices.append(device_index)
+    return tuple(devices)
 
 
 def raw_device_trace(
@@ -135,18 +151,20 @@ def raw_device_trace(
 
     if not isinstance(snapshot, Mapping) or device_index < 0:
         return ()
-    raw_traces = snapshot.get("device_traces", ()) or ()
+    raw_traces = snapshot.get("device_traces", ())
+    if raw_traces is None:
+        raise TypeError("device_traces must be a sequence when present")
     if not isinstance(raw_traces, Sequence) or isinstance(
         raw_traces, (str, bytes, bytearray)
     ):
-        return ()
+        raise TypeError("device_traces must be a sequence")
     if device_index >= len(raw_traces):
         return ()
     device_trace = raw_traces[device_index]
     if not isinstance(device_trace, Sequence) or isinstance(
         device_trace, (str, bytes, bytearray)
     ):
-        return ()
+        raise TypeError(f"device_traces[{device_index}] must be a sequence")
     return device_trace
 
 
@@ -168,7 +186,9 @@ def normalize_device_trace_entries(
     for trace_index in range(lower, upper):
         raw = device_trace[trace_index]
         if not isinstance(raw, Mapping):
-            continue
+            raise TypeError(
+                f"device_traces[{device_index}][{trace_index}] must be a mapping"
+            )
         entries.append(_normalize_trace_entry(raw, device_index, trace_index))
     return tuple(entries)
 
@@ -182,13 +202,13 @@ def _normalize_trace_entry(
     return AllocatorTraceEntry(
         device_index=device_index,
         trace_index=trace_index,
-        action=str(raw.get("action", "unknown")),
-        addr=_optional_int(addr),
-        size_bytes=_int(raw.get("size")),
+        action=_string_field(raw, "action", f"trace[{trace_index}]", "unknown"),
+        addr=_optional_int_value(addr, f"trace[{trace_index}].addr"),
+        size_bytes=_int_field(raw, "size", f"trace[{trace_index}]"),
         stream=normalize_stream(raw.get("stream", UNKNOWN_STREAM)),
-        frames=tuple(raw.get("frames") or ()),
-        time_us=_optional_int(raw.get("time_us")),
-        user_metadata=str(raw.get("user_metadata", "")),
+        frames=_frames_field(raw, f"trace[{trace_index}]"),
+        time_us=_optional_int_field(raw, "time_us", f"trace[{trace_index}]"),
+        user_metadata=_string_field(raw, "user_metadata", f"trace[{trace_index}]", ""),
         pool_id=(
             normalize_pool_id(raw.get("pool_id"))
             if raw.get("pool_id") is not None
@@ -271,15 +291,17 @@ def compare_observation_lifecycle(
 
 
 def frame_location(frame: Mapping[str, Any]) -> str:
-    filename = str(frame.get("filename", "<unknown>"))
+    filename = _string_field(frame, "filename", "frame", "<unknown>")
     line = _int(frame.get("line"))
-    name = str(frame.get("name", "<module>"))
+    name = _string_field(frame, "name", "frame", "<module>")
     return f"{filename}:{line}:{name}"
 
 
 def stack_key_from_frames(
     frames: Sequence[Mapping[str, Any]], *, depth: int = 2
 ) -> str:
+    if type(depth) is not int:
+        raise TypeError("stack depth must be an integer")
     if depth < 1:
         raise ValueError("stack depth must be >= 1")
     if not frames:
@@ -318,10 +340,19 @@ def _segments_from_snapshot(
     snapshot: AllocatorSnapshotData,
 ) -> Sequence[Mapping[str, Any]]:
     if isinstance(snapshot, Mapping):
-        segments = snapshot.get("segments", [])
+        segments = snapshot.get("segments", ())
     else:
         segments = snapshot
-    return [segment for segment in segments or [] if isinstance(segment, Mapping)]
+    if isinstance(segments, (str, bytes, bytearray)) or not isinstance(
+        segments, Sequence
+    ):
+        raise TypeError("allocator snapshot segments must be a sequence")
+    result = []
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, Mapping):
+            raise TypeError(f"allocator snapshot segment[{index}] must be a mapping")
+        result.append(segment)
+    return result
 
 
 def _summarize_group(
@@ -384,18 +415,84 @@ def _block_map(
 
 
 def _int(value: Any) -> int:
-    try:
-        if value is None:
-            return 0
-        return int(value)
-    except (TypeError, ValueError):
+    if value is None:
         return 0
+    if type(value) is not int:
+        raise TypeError("allocator value must be an integer")
+    if value < 0:
+        raise ValueError("allocator value must be non-negative")
+    return value
 
 
 def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+    if type(value) is not int:
+        raise TypeError("allocator value must be an integer or None")
+    if value < 0:
+        raise ValueError("allocator value must be non-negative")
+    return value
+
+
+def _int_field(
+    value: Mapping[str, Any], name: str, context: str, default: int = 0
+) -> int:
+    if name not in value:
+        return default
+    raw = value[name]
+    if type(raw) is not int:
+        raise TypeError(f"{context}.{name} must be an integer")
+    if raw < 0:
+        raise ValueError(f"{context}.{name} must be non-negative")
+    return raw
+
+
+def _optional_int_field(
+    value: Mapping[str, Any], name: str, context: str
+) -> int | None:
+    if name not in value or value[name] is None:
         return None
+    return _optional_int_value(value[name], f"{context}.{name}")
+
+
+def _optional_int_value(value: Any, context: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int:
+        raise TypeError(f"{context} must be an integer or None")
+    if value < 0:
+        raise ValueError(f"{context} must be non-negative")
+    return value
+
+
+def _string_field(
+    value: Mapping[str, Any], name: str, context: str, default: str
+) -> str:
+    if name not in value:
+        return default
+    raw = value[name]
+    if not isinstance(raw, str):
+        raise TypeError(f"{context}.{name} must be a string")
+    return raw
+
+
+def _mapping_sequence_field(
+    value: Mapping[str, Any], name: str, context: str
+) -> tuple[Mapping[str, Any], ...]:
+    if name not in value:
+        return ()
+    raw = value[name]
+    if isinstance(raw, (str, bytes, bytearray)) or not isinstance(raw, Sequence):
+        raise TypeError(f"{context}.{name} must be a sequence")
+    result = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            raise TypeError(f"{context}.{name}[{index}] must be a mapping")
+        result.append(item)
+    return tuple(result)
+
+
+def _frames_field(
+    value: Mapping[str, Any], context: str
+) -> tuple[Mapping[str, Any], ...]:
+    return _mapping_sequence_field(value, "frames", context)

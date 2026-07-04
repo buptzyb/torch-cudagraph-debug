@@ -314,3 +314,86 @@ def test_context_exception_persists_incomplete_terminal_run(tmp_path: Path) -> N
     assert [point.label for point in loaded.points] == ["inside"]
     with pytest.raises(MemoryDebugError, match="finished"):
         recorder.record_point("late")
+
+
+def test_manifest_failures_do_not_commit_memory_recorder_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = [snapshot(segment(active=10)), snapshot(segment(active=20))]
+    recorder = MemoryRecorder._from_snapshot_provider(
+        lambda marker: pending.pop(0),
+        bundle_dir=tmp_path / "transaction.tcgd-memory",
+    )
+    original = recorder._write_manifest
+    failed_point = False
+    failed_finish = False
+
+    def flaky(**kwargs: object) -> None:
+        nonlocal failed_point, failed_finish
+        complete = kwargs["complete"]
+        if not complete and not failed_point:
+            failed_point = True
+            raise MemoryBundleError("injected manifest failure")
+        if complete and not failed_finish:
+            failed_finish = True
+            raise MemoryBundleError("injected manifest failure")
+        original(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(recorder, "_write_manifest", flaky)
+    with pytest.raises(MemoryBundleError, match="injected"):
+        recorder.record_point("point")
+    assert recorder.snapshot_run().points == ()
+
+    recorder.record_point("point")
+    with pytest.raises(MemoryBundleError, match="injected"):
+        recorder.finish()
+    assert recorder._result is None
+    assert recorder.finish().complete is True
+
+
+def test_memory_bundle_load_rejects_lossy_scalar_coercions(tmp_path: Path) -> None:
+    bundle = tmp_path / "strict.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=1))],
+        bundle_dir=bundle,
+        labels=("point",),
+    )
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    manifest["complete"] = 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(MemoryBundleError, match="boolean"):
+        MemoryRun.load(bundle)
+
+    manifest["complete"] = True
+    manifest["points"][0]["index"] = 0.0
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(MemoryBundleError, match="integer"):
+        MemoryRun.load(bundle)
+
+    manifest["points"][0]["index"] = 0
+    manifest["created_at"] = float("nan")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(MemoryBundleError, match="non-finite"):
+        MemoryRun.load(bundle)
+
+
+def test_memory_recorder_rejects_bad_environment_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WORLD_SIZE", "not-an-integer")
+
+    with pytest.raises(ValueError, match="environment variable WORLD_SIZE"):
+        MemoryRecorder()
+
+
+def test_memory_recorder_context_rejects_reentry_and_explicit_finish() -> None:
+    recorder = MemoryRecorder._from_snapshot_provider(lambda marker: snapshot())
+
+    with recorder:
+        with pytest.raises(MemoryDebugError, match="re-entered"):
+            recorder.__enter__()
+        with pytest.raises(MemoryDebugError, match="inside its context"):
+            recorder.finish()

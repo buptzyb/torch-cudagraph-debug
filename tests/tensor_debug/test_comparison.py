@@ -198,6 +198,29 @@ def test_series_rejects_an_empty_candidate_run() -> None:
         compare_point_series(reference["reference"], empty)
 
 
+def test_series_requires_a_real_candidate_run() -> None:
+    reference = make_tensor_run([("reference", [("x", torch.ones(1), "full")])])
+
+    with pytest.raises(TypeError, match="TensorRun"):
+        compare_point_series(reference["reference"], reference.points)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    (
+        {"rtol": float("nan")},
+        {"atol": float("inf")},
+        {"limit": True},
+        {"equal_nan": 1},
+    ),
+)
+def test_comparison_options_reject_lossy_scalar_types(
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        TensorComparisonOptions(**kwargs)  # type: ignore[arg-type]
+
+
 def test_series_first_issue_text_labels_inconclusive_summary() -> None:
     reference = make_tensor_run(
         [("reference", [("x", torch.tensor([1.0]), "summary")])]

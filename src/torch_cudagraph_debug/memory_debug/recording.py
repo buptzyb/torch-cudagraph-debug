@@ -5,9 +5,9 @@ from __future__ import annotations
 import gzip
 import json
 import math
-import os
 import time
 import uuid
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from functools import cached_property
@@ -18,6 +18,20 @@ from typing import TYPE_CHECKING, Any
 from torch_cudagraph_debug._provenance import (
     initialized_device_provenance,
     runtime_provenance,
+)
+from torch_cudagraph_debug._validation import (
+    json_value,
+    require_bool,
+    require_exact_fields,
+    require_finite_number,
+    require_json_mapping,
+    require_nonempty_string,
+    require_nonnegative_int,
+    require_optional_int,
+    require_optional_nonempty_string,
+    resolve_distributed_identity,
+    strict_json_loads,
+    validate_group_identity,
 )
 
 from ._pool_identity import PoolId
@@ -33,7 +47,7 @@ from .errors import MemoryBundleError, MemoryDebugError, MemoryOwnershipError
 from .stats import MemoryStats
 
 if TYPE_CHECKING:
-    from .attribution import MemoryAttributionOptions
+    from .attribution import MemoryAttributionOptions, MemoryLifetimeOptions
     from .reports import (
         MemoryAllocationLifetimeAnalysis,
         MemoryPointComparison,
@@ -82,6 +96,12 @@ class MemoryObservation:
     stream: Any
     stats: MemoryStats
 
+    def __post_init__(self) -> None:
+        if type(self.order) is not int or self.order < 0:
+            raise ValueError("memory observation order must be non-negative")
+        object.__setattr__(self, "pool_id", normalize_pool_id(self.pool_id))
+        object.__setattr__(self, "stream", normalize_stream(self.stream))
+
     @property
     def key(self) -> MemoryObservationKey:
         return MemoryObservationKey(self.pool_id, self.stream)
@@ -112,6 +132,27 @@ class MemoryPoint:
         default_factory=dict, repr=False, compare=False
     )
     _cache_snapshots: bool = field(default=True, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.run_id or not self.label:
+            raise ValueError("memory point run_id and label must be non-empty")
+        if type(self.index) is not int or self.index < 0:
+            raise ValueError("memory point index must be non-negative")
+        if (
+            isinstance(self.timestamp, bool)
+            or not isinstance(self.timestamp, (int, float))
+            or not math.isfinite(float(self.timestamp))
+        ):
+            raise ValueError("memory point timestamp must be finite")
+        if not self.boundary_marker:
+            raise ValueError("memory point boundary_marker must be non-empty")
+        if [item.order for item in self.observations] != list(
+            range(len(self.observations))
+        ):
+            raise ValueError("memory observations must be contiguous and ordered")
+        keys = [item.key for item in self.observations]
+        if len(keys) != len(set(keys)):
+            raise ValueError("memory observations must have unique keys")
 
     @cached_property
     def by_key(self) -> Mapping[MemoryObservationKey, MemoryObservation]:
@@ -151,11 +192,16 @@ class MemoryPoint:
             raise MemoryBundleError(f"point {self.label!r} has no snapshot payload")
         try:
             with gzip.open(self._snapshot_path, "rt", encoding="utf-8") as handle:
-                snapshot = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:
+                text = handle.read()
+        except OSError as exc:
             raise MemoryBundleError(
                 f"could not load snapshot for point {self.label!r}: {exc}"
             ) from exc
+        snapshot = strict_json_loads(
+            text,
+            error_type=MemoryBundleError,
+            context=f"snapshot for point {self.label!r}",
+        )
         if not isinstance(snapshot, (Mapping, list)):
             raise MemoryBundleError(
                 f"snapshot for point {self.label!r} has an invalid root type"
@@ -193,6 +239,32 @@ class MemoryRun:
         default_factory=lambda: MappingProxyType({})
     )
     bundle_dir: Path | None = field(default=None, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.run_id or not self.name:
+            raise ValueError("memory run run_id and name must be non-empty")
+        validate_group_identity(self.rank, self.group_id, self.world_size)
+        if type(self.complete) is not bool:
+            raise TypeError("complete must be a boolean")
+        if (
+            isinstance(self.created_at, bool)
+            or not isinstance(self.created_at, (int, float))
+            or not math.isfinite(float(self.created_at))
+        ):
+            raise ValueError("created_at must be finite")
+        if self.finished_at is not None and (
+            isinstance(self.finished_at, bool)
+            or not isinstance(self.finished_at, (int, float))
+            or not math.isfinite(float(self.finished_at))
+        ):
+            raise ValueError("finished_at must be finite or None")
+        labels: set[str] = set()
+        for expected_index, point in enumerate(self.points):
+            if point.run_id != self.run_id or point.index != expected_index:
+                raise ValueError("memory run points must be owned and ordered")
+            if point.label in labels:
+                raise ValueError(f"duplicate memory point label {point.label!r}")
+            labels.add(point.label)
 
     def descriptor(self) -> dict[str, object]:
         return {
@@ -282,11 +354,11 @@ class MemoryRun:
             tuple[str | int | MemoryPoint, str | int | MemoryPoint] | None
         ) = None,
         through: str | int | MemoryPoint | None = None,
-        attribution: MemoryAttributionOptions | None = None,
+        options: MemoryLifetimeOptions | None = None,
     ) -> MemoryAllocationLifetimeAnalysis:
         """Analyze allocation cohorts across points in this run."""
 
-        from .attribution import MemoryAttributionOptions
+        from .attribution import MemoryLifetimeOptions
         from .lifetimes import analyze_allocation_lifetimes
 
         if not self.points:
@@ -305,14 +377,7 @@ class MemoryRun:
             raise ValueError("through point must not come before the lifetime anchor")
         if birth_range is not None and end.index < birth_range.end.index:
             raise ValueError("through point must not come before born_between end")
-        options = attribution or MemoryAttributionOptions(
-            stacks=True,
-            events=True,
-            lifetimes=True,
-            on_missing="warn",
-            stack_depth=4,
-            limit=20,
-        )
+        selected = options or MemoryLifetimeOptions()
         return analyze_allocation_lifetimes(
             self,
             start=start,
@@ -321,7 +386,7 @@ class MemoryRun:
             born_between=(
                 (birth_range.start, birth_range.end) if birth_range else None
             ),
-            options=options,
+            options=selected,
         )
 
     @classmethod
@@ -334,23 +399,35 @@ class MemoryRun:
         root = Path(bundle_dir).resolve()
         manifest_path = root / "manifest.json"
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+        except OSError as exc:
             raise MemoryBundleError(
                 f"could not read memory bundle {root}: {exc}"
             ) from exc
+        manifest = strict_json_loads(
+            manifest_text,
+            error_type=MemoryBundleError,
+            context=f"memory bundle {root}",
+        )
         if not isinstance(manifest, Mapping):
             raise MemoryBundleError("memory bundle manifest must be a JSON object")
         if manifest.get("schema") != BUNDLE_SCHEMA:
             raise MemoryBundleError(
                 f"unsupported memory bundle schema {manifest.get('schema')!r}"
             )
-        _require_exact_fields(manifest, _MANIFEST_FIELDS, "memory bundle manifest")
+        require_exact_fields(
+            manifest,
+            _MANIFEST_FIELDS,
+            "memory bundle manifest",
+            error_type=MemoryBundleError,
+        )
 
-        run_id = str(manifest["run_id"])
-        name = str(manifest["name"])
-        if not run_id or not name:
-            raise MemoryBundleError("memory bundle is missing run_id or name")
+        run_id = require_nonempty_string(
+            manifest["run_id"], "run_id", error_type=MemoryBundleError
+        )
+        name = require_nonempty_string(
+            manifest["name"], "name", error_type=MemoryBundleError
+        )
 
         raw_points = manifest.get("points")
         if not isinstance(raw_points, list):
@@ -362,13 +439,18 @@ class MemoryRun:
                 raise MemoryBundleError(
                     f"memory point {expected_index} must be a JSON object"
                 )
-            _require_exact_fields(
+            require_exact_fields(
                 raw,
                 _POINT_FIELDS,
                 f"memory point {expected_index}",
+                error_type=MemoryBundleError,
             )
-            index = int(raw["index"])
-            label = str(raw["label"])
+            index = require_nonnegative_int(
+                raw["index"], "memory point index", error_type=MemoryBundleError
+            )
+            label = require_nonempty_string(
+                raw["label"], "memory point label", error_type=MemoryBundleError
+            )
             if index != expected_index:
                 raise MemoryBundleError(
                     "memory bundle point indices must be contiguous and ordered"
@@ -378,7 +460,9 @@ class MemoryRun:
                     f"memory bundle has an empty or duplicate label {label!r}"
                 )
             labels.add(label)
-            snapshot_path = _safe_bundle_path(root, raw.get("snapshot_file"))
+            snapshot_path = _safe_bundle_path(
+                root, raw["snapshot_file"], expected_index=expected_index
+            )
             if not snapshot_path.is_file():
                 raise MemoryBundleError(
                     f"snapshot file for point {label!r} does not exist"
@@ -401,16 +485,16 @@ class MemoryRun:
                     )
                 keys.add(observation.key)
                 observations.append(observation)
-            metadata = raw["metadata"]
-            if not isinstance(metadata, Mapping):
-                raise MemoryBundleError(
-                    f"metadata for point {label!r} must be a JSON object"
-                )
-            boundary_marker = raw["boundary_marker"]
-            if not isinstance(boundary_marker, str):
-                raise MemoryBundleError(
-                    f"boundary_marker for point {label!r} must be a string"
-                )
+            metadata = require_json_mapping(
+                raw["metadata"],
+                f"metadata for point {label!r}",
+                error_type=MemoryBundleError,
+            )
+            boundary_marker = require_nonempty_string(
+                raw["boundary_marker"],
+                f"boundary_marker for point {label!r}",
+                error_type=MemoryBundleError,
+            )
             warnings = raw["warnings"]
             if not isinstance(warnings, list) or not all(
                 isinstance(item, str) for item in warnings
@@ -418,48 +502,80 @@ class MemoryRun:
                 raise MemoryBundleError(
                     f"warnings for point {label!r} must be a JSON string list"
                 )
-            points.append(
-                MemoryPoint(
+            try:
+                point = MemoryPoint(
                     run_id=run_id,
                     index=index,
                     label=label,
-                    timestamp=float(raw["timestamp"]),
-                    metadata=MappingProxyType(dict(metadata)),
+                    timestamp=require_finite_number(
+                        raw["timestamp"],
+                        f"timestamp for point {label!r}",
+                        error_type=MemoryBundleError,
+                    ),
+                    metadata=MappingProxyType(metadata),
                     boundary_marker=boundary_marker,
                     observations=tuple(observations),
                     warnings=tuple(warnings),
                     _snapshot_path=snapshot_path,
                     _cache_snapshots=cache_snapshots,
                 )
-            )
+            except (TypeError, ValueError) as exc:
+                raise MemoryBundleError(
+                    f"invalid memory point {label!r}: {exc}"
+                ) from exc
+            points.append(point)
 
-        rank_value = manifest["rank"]
-        rank = int(rank_value) if rank_value is not None else None
-        group_value = manifest["group_id"]
-        group_id = str(group_value) if group_value is not None else None
-        world_size_value = manifest["world_size"]
-        world_size = int(world_size_value) if world_size_value is not None else None
-        provenance = manifest["provenance"]
-        run_metadata = manifest["run_metadata"]
-        if not isinstance(provenance, Mapping):
-            raise MemoryBundleError("memory bundle provenance must be a JSON object")
-        if not isinstance(run_metadata, Mapping):
-            raise MemoryBundleError("memory bundle run_metadata must be a JSON object")
-        finished_value = manifest["finished_at"]
-        return cls(
-            run_id=run_id,
-            name=name,
-            rank=rank,
-            created_at=float(manifest["created_at"]),
-            finished_at=(float(finished_value) if finished_value is not None else None),
-            complete=bool(manifest["complete"]),
-            points=tuple(points),
-            group_id=group_id,
-            world_size=world_size,
-            provenance=MappingProxyType(dict(provenance)),
-            run_metadata=MappingProxyType(dict(run_metadata)),
-            bundle_dir=root,
+        rank = require_optional_int(
+            manifest["rank"], "rank", error_type=MemoryBundleError
         )
+        group_id = require_optional_nonempty_string(
+            manifest["group_id"], "group_id", error_type=MemoryBundleError
+        )
+        world_size = require_optional_int(
+            manifest["world_size"], "world_size", error_type=MemoryBundleError
+        )
+        try:
+            validate_group_identity(rank, group_id, world_size)
+        except (TypeError, ValueError) as exc:
+            raise MemoryBundleError(f"invalid memory run identity: {exc}") from exc
+        provenance = require_json_mapping(
+            manifest["provenance"], "provenance", error_type=MemoryBundleError
+        )
+        run_metadata = require_json_mapping(
+            manifest["run_metadata"], "run_metadata", error_type=MemoryBundleError
+        )
+        finished_value = manifest["finished_at"]
+        try:
+            return cls(
+                run_id=run_id,
+                name=name,
+                rank=rank,
+                created_at=require_finite_number(
+                    manifest["created_at"],
+                    "created_at",
+                    error_type=MemoryBundleError,
+                ),
+                finished_at=(
+                    require_finite_number(
+                        finished_value,
+                        "finished_at",
+                        error_type=MemoryBundleError,
+                    )
+                    if finished_value is not None
+                    else None
+                ),
+                complete=require_bool(
+                    manifest["complete"], "complete", error_type=MemoryBundleError
+                ),
+                points=tuple(points),
+                group_id=group_id,
+                world_size=world_size,
+                provenance=MappingProxyType(provenance),
+                run_metadata=MappingProxyType(run_metadata),
+                bundle_dir=root,
+            )
+        except (TypeError, ValueError) as exc:
+            raise MemoryBundleError(f"invalid memory run: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -498,24 +614,18 @@ class MemoryRecorder:
             raise ValueError("name must be non-empty")
         self.name = name
         self.bundle_dir = Path(bundle_dir).resolve() if bundle_dir is not None else None
-        self.rank = _default_rank() if rank is None else int(rank)
+        self.rank, self.world_size = resolve_distributed_identity(rank, world_size)
         self.group_id = group_id
-        if self.group_id is not None and not self.group_id:
-            raise ValueError("group_id must be non-empty when provided")
-        self.world_size = (
-            _default_world_size() if world_size is None else int(world_size)
+        validate_group_identity(self.rank, self.group_id, self.world_size)
+        serializable_metadata = json_value(
+            dict(run_metadata or {}),
+            "$.run_metadata",
+            error_type=MemoryBundleError,
         )
-        if self.world_size is not None and self.world_size < 1:
-            raise ValueError("world_size must be >= 1")
-        if (
-            self.rank is not None
-            and self.world_size is not None
-            and not 0 <= self.rank < self.world_size
-        ):
-            raise ValueError("rank must be in [0, world_size)")
-        serializable_metadata = _json_value(dict(run_metadata or {}), "$.run_metadata")
         assert isinstance(serializable_metadata, dict)
-        serializable_provenance = _json_value(runtime_provenance(), "$.provenance")
+        serializable_provenance = json_value(
+            runtime_provenance(), "$.provenance", error_type=MemoryBundleError
+        )
         assert isinstance(serializable_provenance, dict)
         self.run_metadata = MappingProxyType(serializable_metadata)
         self._provenance: dict[str, Any] = serializable_provenance
@@ -526,6 +636,7 @@ class MemoryRecorder:
         self._finished_at: float | None = None
         self._points: list[MemoryPoint] = []
         self._result: MemoryRun | None = None
+        self._context_active = False
 
         if self.bundle_dir is not None:
             if self.bundle_dir.exists() and any(self.bundle_dir.iterdir()):
@@ -569,10 +680,14 @@ class MemoryRecorder:
         capture = self._collector.capture(marker, synchronize=synchronize)
         snapshot = capture.raw_snapshot
         self._record_device_provenance()
-        serializable_snapshot = _json_value(snapshot, "$.snapshot")
+        serializable_snapshot = json_value(
+            snapshot, "$.snapshot", error_type=MemoryBundleError
+        )
         if not isinstance(serializable_snapshot, (dict, list)):
             raise MemoryBundleError("allocator snapshot root must be an object or list")
-        serializable_metadata = _json_value(dict(metadata or {}), "$.metadata")
+        serializable_metadata = json_value(
+            dict(metadata or {}), "$.metadata", error_type=MemoryBundleError
+        )
         assert isinstance(serializable_metadata, dict)
 
         observations = tuple(
@@ -603,8 +718,8 @@ class MemoryRecorder:
             _snapshot_path=snapshot_path,
             _snapshot_cache=cache,
         )
+        self._write_manifest(complete=False, points=(*self._points, point))
         self._points.append(point)
-        self._write_manifest(complete=False)
         return point
 
     def snapshot_run(self) -> MemoryRun:
@@ -617,28 +732,41 @@ class MemoryRecorder:
     def finish(self) -> MemoryRun:
         """Finish collection and return the immutable run; idempotent."""
 
+        if self._context_active:
+            raise MemoryDebugError(
+                "cannot finish a memory recorder inside its context manager"
+            )
+        return self._finish()
+
+    def _finish(self) -> MemoryRun:
         if self._result is not None:
             return self._result
-        self._finished_at = time.time()
-        self._result = self._build_run(complete=True)
-        self._write_manifest(complete=True)
-        return self._result
+        finished_at = time.time()
+        candidate = self._build_run(complete=True, finished_at=finished_at)
+        self._write_manifest(complete=True, finished_at=finished_at)
+        self._finished_at = finished_at
+        self._result = candidate
+        return candidate
 
     def _abort(self) -> MemoryRun:
         if self._result is not None:
             return self._result
-        self._finished_at = time.time()
-        self._result = self._build_run(complete=False)
-        self._write_manifest(complete=False)
-        return self._result
+        finished_at = time.time()
+        candidate = self._build_run(complete=False, finished_at=finished_at)
+        self._write_manifest(complete=False, finished_at=finished_at)
+        self._finished_at = finished_at
+        self._result = candidate
+        return candidate
 
-    def _build_run(self, *, complete: bool) -> MemoryRun:
+    def _build_run(
+        self, *, complete: bool, finished_at: float | None = None
+    ) -> MemoryRun:
         return MemoryRun(
             run_id=self._run_id,
             name=self.name,
             rank=self.rank,
             created_at=self._created_at,
-            finished_at=self._finished_at,
+            finished_at=self._finished_at if finished_at is None else finished_at,
             complete=complete,
             points=tuple(self._points),
             group_id=self.group_id,
@@ -655,13 +783,31 @@ class MemoryRecorder:
         return self._result
 
     def __enter__(self) -> "MemoryRecorder":
+        if self._context_active:
+            raise MemoryDebugError("memory recorder context cannot be re-entered")
+        if self._result is not None:
+            raise MemoryDebugError("cannot enter a finished memory recorder")
+        self._context_active = True
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        if exc_type is None:
-            self.finish()
-        else:
-            self._abort()
+        if not self._context_active:
+            raise MemoryDebugError("memory recorder context is not active")
+        try:
+            if exc_type is None:
+                self._finish()
+            else:
+                try:
+                    self._abort()
+                except Exception as cleanup_error:
+                    warnings.warn(
+                        "could not persist aborted memory run: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+        finally:
+            self._context_active = False
 
     def _write_snapshot(self, index: int, snapshot: AllocatorSnapshotData) -> Path:
         assert self.bundle_dir is not None
@@ -689,7 +835,13 @@ class MemoryRecorder:
             temporary.unlink(missing_ok=True)
         return path
 
-    def _write_manifest(self, *, complete: bool) -> None:
+    def _write_manifest(
+        self,
+        *,
+        complete: bool,
+        points: tuple[MemoryPoint, ...] | None = None,
+        finished_at: float | None = None,
+    ) -> None:
         if self.bundle_dir is None:
             return
         payload = {
@@ -700,12 +852,13 @@ class MemoryRecorder:
             "group_id": self.group_id,
             "world_size": self.world_size,
             "created_at": self._created_at,
-            "finished_at": self._finished_at,
+            "finished_at": self._finished_at if finished_at is None else finished_at,
             "complete": complete,
             "provenance": self._provenance,
             "run_metadata": dict(self.run_metadata),
             "points": [
-                _point_manifest(point, self.bundle_dir) for point in self._points
+                _point_manifest(point, self.bundle_dir)
+                for point in (self._points if points is None else points)
             ],
         }
         path = self.bundle_dir / "manifest.json"
@@ -767,43 +920,33 @@ def _observation_from_manifest(
         raise MemoryBundleError(
             f"memory observation {expected_order} must be a JSON object"
         )
-    _require_exact_fields(
+    require_exact_fields(
         row,
         _OBSERVATION_FIELDS,
         f"memory observation {expected_order}",
+        error_type=MemoryBundleError,
     )
-    order = int(row["order"])
+    order = require_nonnegative_int(
+        row["order"], "memory observation order", error_type=MemoryBundleError
+    )
     if order != expected_order:
         raise MemoryBundleError(
             "memory observation order must be contiguous and ordered"
         )
-    return MemoryObservation(
-        order=order,
-        pool_id=normalize_pool_id(row["pool_id"]),
-        stream=normalize_stream(row["stream"]),
-        stats=MemoryStats.from_dict(row),
-    )
+    try:
+        return MemoryObservation(
+            order=order,
+            pool_id=normalize_pool_id(row["pool_id"]),
+            stream=normalize_stream(row["stream"]),
+            stats=MemoryStats.from_dict(row),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MemoryBundleError(
+            f"invalid memory observation {expected_order}: {exc}"
+        ) from exc
 
 
-def _require_exact_fields(
-    value: Mapping[str, Any],
-    expected: frozenset[str],
-    context: str,
-) -> None:
-    actual = frozenset(value)
-    missing = sorted(expected - actual)
-    unexpected = sorted(actual - expected)
-    if not missing and not unexpected:
-        return
-    details = []
-    if missing:
-        details.append(f"missing {missing!r}")
-    if unexpected:
-        details.append(f"unexpected {unexpected!r}")
-    raise MemoryBundleError(f"{context} has invalid fields: {', '.join(details)}")
-
-
-def _safe_bundle_path(root: Path, raw_path: Any) -> Path:
+def _safe_bundle_path(root: Path, raw_path: Any, *, expected_index: int) -> Path:
     if not isinstance(raw_path, str) or not raw_path:
         raise MemoryBundleError("memory point is missing snapshot_file")
     relative = Path(raw_path)
@@ -816,61 +959,7 @@ def _safe_bundle_path(root: Path, raw_path: Any) -> Path:
         raise MemoryBundleError(
             f"snapshot_file escapes the memory bundle: {raw_path!r}"
         ) from exc
-    if resolved.suffixes[-2:] != [".json", ".gz"]:
-        raise MemoryBundleError(f"snapshot_file must end in .json.gz: {raw_path!r}")
+    expected = f"snapshots/{expected_index:04d}.json.gz"
+    if raw_path != expected:
+        raise MemoryBundleError(f"snapshot_file must be {expected!r}")
     return resolved
-
-
-def _json_value(value: Any, path: str) -> Any:
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise MemoryBundleError(f"{path} contains a non-finite float")
-        return value
-    if isinstance(value, (list, tuple)):
-        return [
-            _json_value(item, f"{path}[{index}]") for index, item in enumerate(value)
-        ]
-    if isinstance(value, Mapping):
-        output = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise MemoryBundleError(
-                    f"{path} contains non-string mapping key {key!r}"
-                )
-            output[key] = _json_value(item, f"{path}.{key}")
-        return output
-    raise MemoryBundleError(f"{path} contains unsupported value {type(value).__name__}")
-
-
-def _default_rank() -> int | None:
-    value = os.environ.get("RANK")
-    if value is not None:
-        try:
-            return int(value)
-        except ValueError:
-            pass
-    try:
-        import torch.distributed as distributed
-    except ImportError:
-        return None
-    if not distributed.is_available() or not distributed.is_initialized():
-        return None
-    return int(distributed.get_rank())
-
-
-def _default_world_size() -> int | None:
-    value = os.environ.get("WORLD_SIZE")
-    if value is not None:
-        try:
-            return int(value)
-        except ValueError:
-            pass
-    try:
-        import torch.distributed as distributed
-    except ImportError:
-        return None
-    if not distributed.is_available() or not distributed.is_initialized():
-        return None
-    return int(distributed.get_world_size())

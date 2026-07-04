@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -42,8 +43,14 @@ class MemoryProbeSnapshot:
             raise ValueError("probe_id must be non-empty")
         if not self.probe_name:
             raise ValueError("probe_name must be non-empty")
-        if self.index < 0:
-            raise ValueError("snapshot index must be non-negative")
+        if type(self.index) is not int or self.index < 0:
+            raise ValueError("snapshot index must be a non-negative integer")
+        if (
+            isinstance(self.timestamp, bool)
+            or not isinstance(self.timestamp, (int, float))
+            or not math.isfinite(float(self.timestamp))
+        ):
+            raise ValueError("snapshot timestamp must be finite")
         if not self.boundary_marker:
             raise ValueError("boundary_marker must be non-empty")
         expected = list(range(len(self.observations)))

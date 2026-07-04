@@ -71,3 +71,16 @@ def test_check_rejects_non_cpu_expected() -> None:
 
     with pytest.raises(ValueError, match="CPU"):
         CheckAction([torch.ones(1, device="cuda")])._to_native()
+
+
+def test_actions_reject_lossy_scalar_types() -> None:
+    with pytest.raises(TypeError, match="max_items"):
+        PrintAction(max_items=True)
+    with pytest.raises(TypeError, match="every"):
+        PrintAction(every=1.5)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="enabled"):
+        RecordAction(enabled=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="rtol must be finite"):
+        CheckAction(torch.ones(1), rtol=float("nan"))
+    with pytest.raises(TypeError, match="equal_nan"):
+        CheckAction(torch.ones(1), equal_nan=1)  # type: ignore[arg-type]

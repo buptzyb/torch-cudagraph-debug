@@ -14,6 +14,7 @@ import torch
 
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
+    MemoryLifetimeOptions,
     MemoryHistoryError,
     MemoryRecorder,
     MemoryRun,
@@ -95,7 +96,7 @@ def _record_without_history(output_dir: Path) -> None:
     inferred = run.lifetimes(
         born_between=("before", "after_alloc"),
         through="after_free",
-        attribution=MemoryAttributionOptions(
+        options=MemoryLifetimeOptions(
             events=False,
             on_missing="warn",
             stack_depth=4,

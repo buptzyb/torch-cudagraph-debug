@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from ._pool_identity import PoolId
@@ -70,12 +70,14 @@ class _MemoryStateView:
 def _load_state(
     state: _MemoryState,
     options: MemoryAttributionOptions,
+    *,
+    raw: AllocatorSnapshotData | None = None,
 ) -> _MemoryStateView:
-    raw = state.raw_snapshot()
-    segments = normalize_snapshot(raw)
+    snapshot = state.raw_snapshot() if raw is None else raw
+    segments = normalize_snapshot(snapshot)
     return _MemoryStateView(
         state=state,
-        raw=raw,
+        raw=snapshot,
         segments=segments,
         stacks=(
             _build_allocation_stack_index(
@@ -105,11 +107,12 @@ def compare_snapshots(
         raise ValueError("pool_mapping is only valid for cross-Probe comparison")
 
     if same_probe:
+        interval_views = _load_interval_views((reference, candidate), options)
         comparison = _compare_same_identity_views(
-            _load_state(reference, options),
-            _load_state(candidate, options),
+            interval_views[0],
+            interval_views[-1],
             options,
-            interval_states=(reference, candidate),
+            interval_views=interval_views,
             lifetime_run=None,
             match="same_probe",
         )
@@ -292,30 +295,48 @@ def compare_phases(
 ) -> MemoryPhaseComparison:
     """Decompose candidate-vs-baseline phase memory using four points."""
 
+    if baseline.run.run_id == candidate.run.run_id:
+        raise ValueError(
+            "baseline and candidate phases must come from independent runs"
+        )
     options = attribution or MemoryAttributionOptions()
-    baseline_start_view = _load_state(baseline.start, options)
-    baseline_end_view = _load_state(baseline.end, options)
+    baseline_states = (
+        baseline.run.points[baseline.start.index : baseline.end.index + 1]
+        if options.events or options.lifetimes
+        else (baseline.start, baseline.end)
+    )
+    baseline_views = _load_interval_views(baseline_states, options)
+    baseline_start_view = baseline_views[0]
+    baseline_end_view = baseline_views[-1]
     baseline_change = _compare_same_run_views(
         baseline.run,
         baseline_start_view,
         baseline_end_view,
         options,
+        interval_views=baseline_views,
     )
     baseline_start_stacks = baseline_start_view.stacks
     baseline_end_stacks = baseline_end_view.stacks
-    del baseline_start_view, baseline_end_view
+    del baseline_views, baseline_start_view, baseline_end_view
 
-    candidate_start_view = _load_state(candidate.start, options)
-    candidate_end_view = _load_state(candidate.end, options)
+    candidate_states = (
+        candidate.run.points[candidate.start.index : candidate.end.index + 1]
+        if options.events or options.lifetimes
+        else (candidate.start, candidate.end)
+    )
+    candidate_views = _load_interval_views(candidate_states, options)
+    candidate_start_view = candidate_views[0]
+    candidate_end_view = candidate_views[-1]
     candidate_change = _compare_same_run_views(
         candidate.run,
         candidate_start_view,
         candidate_end_view,
         options,
+        interval_views=candidate_views,
     )
     candidate_start_stacks = candidate_start_view.stacks
     candidate_end_stacks = candidate_end_view.stacks
-    del candidate_start_view, candidate_end_view
+    del candidate_views, candidate_start_view, candidate_end_view
 
     cross_options = MemoryAttributionOptions(
         stacks=options.stacks,
@@ -371,11 +392,18 @@ def _compare_same_run(
     candidate: MemoryPoint,
     options: MemoryAttributionOptions,
 ) -> MemoryPointComparison:
+    states = (
+        run.points[reference.index : candidate.index + 1]
+        if options.events or options.lifetimes
+        else (reference, candidate)
+    )
+    interval_views = _load_interval_views(states, options)
     return _compare_same_run_views(
         run,
-        _load_state(reference, options),
-        _load_state(candidate, options),
+        interval_views[0],
+        interval_views[-1],
         options,
+        interval_views=interval_views,
     )
 
 
@@ -384,16 +412,23 @@ def _compare_same_run_views(
     reference_view: _MemoryStateView,
     candidate_view: _MemoryStateView,
     options: MemoryAttributionOptions,
+    *,
+    interval_views: Sequence[_MemoryStateView] | None = None,
 ) -> MemoryPointComparison:
     reference = reference_view.state
     candidate = candidate_view.state
     assert isinstance(reference, MemoryPoint)
     assert isinstance(candidate, MemoryPoint)
+    selected_views = (
+        tuple(interval_views)
+        if interval_views is not None
+        else (reference_view, candidate_view)
+    )
     comparison = _compare_same_identity_views(
         reference_view,
         candidate_view,
         options,
-        interval_states=run.points[reference.index : candidate.index + 1],
+        interval_views=selected_views,
         lifetime_run=run,
         match="same_run",
     )
@@ -406,7 +441,7 @@ def _compare_same_identity_views(
     candidate_view: _MemoryStateView,
     options: MemoryAttributionOptions,
     *,
-    interval_states: Sequence[_MemoryState],
+    interval_views: Sequence[_MemoryStateView],
     lifetime_run: MemoryRun | None,
     match: Literal["same_run", "same_probe"],
 ) -> MemoryPointComparison | MemorySnapshotComparison:
@@ -503,10 +538,10 @@ def _compare_same_identity_views(
         entries = []
         events_available = True
         event_devices = _segment_device_indices(reference_segments, candidate_segments)
-        for reference_block, candidate_block in zip(
-            interval_states, interval_states[1:]
-        ):
-            current_snapshot = candidate_block.raw_snapshot()
+        for reference_block, candidate_block in zip(interval_views, interval_views[1:]):
+            reference_state = reference_block.state
+            candidate_state = candidate_block.state
+            current_snapshot = candidate_block.raw
             interval_devices = tuple(
                 sorted(set(event_devices) | set(trace_device_indices(current_snapshot)))
             )
@@ -515,9 +550,9 @@ def _compare_same_identity_views(
                     extract_event_window_from_snapshot(
                         current_snapshot,
                         device_index=device,
-                        start_marker=reference_block.boundary_marker,
-                        end_marker=candidate_block.boundary_marker,
-                        start_label=f"{_state_label(reference_block)} on device {device}",
+                        start_marker=reference_state.boundary_marker,
+                        end_marker=candidate_state.boundary_marker,
+                        start_label=f"{_state_label(reference_state)} on device {device}",
                     )
                     for device in interval_devices
                 )
@@ -525,9 +560,9 @@ def _compare_same_identity_views(
                 windows = (
                     extract_event_window(
                         normalize_trace_entries(current_snapshot),
-                        start_marker=reference_block.boundary_marker,
-                        end_marker=candidate_block.boundary_marker,
-                        start_label=_state_label(reference_block),
+                        start_marker=reference_state.boundary_marker,
+                        end_marker=candidate_state.boundary_marker,
+                        start_label=_state_label(reference_state),
                     ),
                 )
             for window in windows:
@@ -553,7 +588,7 @@ def _compare_same_identity_views(
 
     allocation_lifetimes = None
     if options.lifetimes:
-        lifetime_options = replace(options, lifetimes=False)
+        lifetime_options = options.lifetime_options()
         if lifetime_run is None:
             assert isinstance(reference, MemoryProbeSnapshot)
             assert isinstance(candidate, MemoryProbeSnapshot)
@@ -561,6 +596,7 @@ def _compare_same_identity_views(
                 reference,
                 candidate,
                 options=lifetime_options,
+                _raw_snapshots=tuple(view.raw for view in interval_views),
             )
         else:
             assert isinstance(reference, MemoryPoint)
@@ -572,6 +608,7 @@ def _compare_same_identity_views(
                 active_at=None,
                 born_between=None,
                 options=lifetime_options,
+                _raw_snapshots=tuple(view.raw for view in interval_views),
             )
         warnings.extend(allocation_lifetimes.warnings)
 
@@ -595,6 +632,13 @@ def _compare_same_identity_views(
         lifecycle_available=True,
         warnings=tuple(dict.fromkeys(warnings)),
     )
+
+
+def _load_interval_views(
+    states: Sequence[_MemoryState],
+    options: MemoryAttributionOptions,
+) -> tuple[_MemoryStateView, ...]:
+    return tuple(_load_state(state, options) for state in states)
 
 
 def _state_label(state: _MemoryState) -> str:
@@ -708,7 +752,7 @@ def _unmatched_independent_observations(
         sorted(
             rows,
             key=lambda item: (
-                pool_id_label(item.candidate_pool_id or item.reference_pool_id or ()),
+                _optional_pool_label(item.candidate_pool_id or item.reference_pool_id),
                 stream_label(
                     item.candidate_stream
                     if item.candidate_pool_id is not None
@@ -790,6 +834,7 @@ def _phase_decomposition(
             "active_bytes",
             "inactive_bytes",
             "requested_bytes",
+            "fragmentation_bytes",
         ):
             baseline_value = int(getattr(baseline_change_comparison.delta, metric))
             candidate_value = int(getattr(candidate_change_comparison.delta, metric))
@@ -847,6 +892,7 @@ def _scope_phase_decomposition(
             "active_bytes",
             "inactive_bytes",
             "requested_bytes",
+            "fragmentation_bytes",
         ):
             baseline_value = int(getattr(baseline_change_comparison.delta, metric))
             candidate_value = int(getattr(candidate_change_comparison.delta, metric))
@@ -871,9 +917,21 @@ def _scope_phase_decomposition(
 
 def _pool_comparison_sort_key(
     item: MemoryPoolComparison,
-) -> tuple[str, str, str]:
+) -> tuple[int, str, str]:
+    match_order = {
+        "default": 0,
+        "mapped": 1,
+        "same_run": 0,
+        "same_probe": 0,
+        "reference_only": 2,
+        "candidate_only": 3,
+    }
     return (
-        pool_id_label(item.reference_pool_id or ()),
-        pool_id_label(item.candidate_pool_id or ()),
-        item.match,
+        match_order[item.match],
+        _optional_pool_label(item.reference_pool_id),
+        _optional_pool_label(item.candidate_pool_id),
     )
+
+
+def _optional_pool_label(pool_id: PoolId | None) -> str:
+    return "" if pool_id is None else pool_id_label(pool_id)

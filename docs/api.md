@@ -119,10 +119,6 @@ probe.compare(
     *,
     options: TensorComparisonOptions | None = None,
 ) -> TensorSnapshotComparison
-probe.clear_snapshot(
-    *,
-    synchronize: bool | torch.cuda.Stream | torch.device = True,
-) -> None
 probe.check_status(
     *,
     synchronize: bool | torch.cuda.Stream | torch.device = True,
@@ -169,9 +165,6 @@ raises `TensorDebugError` when no `RecordAction` is enabled or no slot has recor
 
 `compare()` accepts two snapshots owned by this probe in chronological replay
 order and returns the same result type as top-level `compare_snapshots()`.
-
-`clear_snapshot()` synchronizes according to the same policy before zeroing
-retained host storage. It does not remove graph nodes or release the probe.
 
 `check_status()` returns:
 
@@ -558,6 +551,7 @@ from torch_cudagraph_debug.memory_debug import (
     MemoryRunGroupPhaseComparison,
     MemoryAllocationLifetimeAnalysis,
     MemoryAttributionOptions,
+    MemoryLifetimeOptions,
     compare_snapshots,
     compare_points,
     compare_phases,
@@ -767,7 +761,7 @@ run.lifetimes(
     *,
     born_between=None,
     through=None,
-    attribution=None,
+    options=None,
 ) \
     -> MemoryAllocationLifetimeAnalysis
 ```
@@ -851,6 +845,22 @@ another device's boundary.
 Missing requested history adds a warning or raises `MemoryHistoryError`
 according to `on_missing`.
 
+### MemoryLifetimeOptions
+
+```python
+MemoryLifetimeOptions(
+    events: bool = True,
+    on_missing: Literal["warn", "error"] = "warn",
+    stack_depth: int = 4,
+    limit: int = 20,
+)
+```
+
+This focused policy configures direct `run.lifetimes()` analysis. Allocation
+cohorts are always grouped by allocation stack, so the direct API does not
+accept the comparison-only `stacks` or `lifetimes` switches from
+`MemoryAttributionOptions`.
+
 ### Allocation Cohort Lifetimes
 
 ```python
@@ -862,7 +872,7 @@ run.lifetimes(
         str | int | MemoryPoint,
     ] | None = None,
     through: str | int | MemoryPoint | None = None,
-    attribution: MemoryAttributionOptions | None = None,
+    options: MemoryLifetimeOptions | None = None,
 ) -> MemoryAllocationLifetimeAnalysis
 ```
 
@@ -907,7 +917,7 @@ the same address and shape entirely between two points.
 
 Calling `run.lifetimes()` without explicit options defaults to stack depth 4,
 event attribution, warning on missing history, and the top 20 cohorts. Use
-`MemoryAttributionOptions(events=False, ...)` for snapshot-only analysis.
+`MemoryLifetimeOptions(events=False, ...)` for snapshot-only analysis.
 Cohorts are ranked by bytes born for `born_between`, by bytes active at an
 anchor, or by peak-to-minimum impact when there is no selection.
 
@@ -1052,7 +1062,8 @@ and serialization. Their main programmatic fields are:
 - `MemoryRunGroupPhaseComparison`: `baseline_group`, `candidate_group`,
   `rank_comparisons`, `rank_decomposition`, `phase_aggregates`, and `warnings`.
 
-Rendering and serialization use:
+State comparisons, timelines, phase comparisons, and group phase comparisons
+use:
 
 ```python
 result.to_text(include_unchanged=True) -> str
@@ -1064,6 +1075,15 @@ result.write(output_dir, include_unchanged=True) -> dict[str, Path]
 `include_unchanged=False` filters zero-change rows from text, HTML, and CSV.
 `to_dict()` and `report.json` always retain complete data. Timeline and phase
 objects aggregate warnings from their component comparisons at the top level.
+
+Lifetime analyses and run-group summaries do not have unchanged rows and use:
+
+```python
+result.to_text() -> str
+result.to_dict() -> dict
+result.to_html() -> str
+result.write(output_dir) -> dict[str, Path]
+```
 
 Comparison data uses nested absolute and delta state:
 
@@ -1140,9 +1160,10 @@ in the reference run; `--pool-map` is valid only across independent runs.
 `compare-run-group-phases` accept the common attribution and presentation
 options: `--stacks`, `--events`, `--lifetimes`,
 `--on-missing {warn,error}`, `--stack-depth`, `--limit`, and `--only-changed`.
-`allocation-lifetimes` accepts the same options, always groups by allocation
-stack, enables events by default, and uses stack depth 4; `--no-events`
-requests snapshot-only inference. `summary` accepts one bundle and writes to
+`allocation-lifetimes` instead accepts `--no-events`,
+`--on-missing {warn,error}`, `--stack-depth`, `--limit`, and `--output`. It
+always groups by allocation stack, enables events by default, and uses stack
+depth 4; `--no-events` requests snapshot-only inference. `summary` accepts one bundle and writes to
 standard output. `summarize-run-group` accepts one group directory plus
 `--output`, without attribution options. Cross-run event and lifetime requests
 are rejected. Pool IDs use comma-separated components, for example
@@ -1212,6 +1233,11 @@ advanced.compare_allocation_stacks(
     include_unchanged=False,
 )
 ```
+
+`AllocationStackDelta` stores `reference_pool_id` and `candidate_pool_id`
+separately because explicitly mapped private pools can have different IDs.
+Its size, requested-byte, and count fields each retain reference, candidate,
+and delta values.
 
 Allocator-event types and helpers:
 

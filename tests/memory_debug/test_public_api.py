@@ -33,6 +33,7 @@ def test_memory_facade_is_intentionally_small() -> None:
         "MemoryRunGroupPhaseComparison",
         "MemoryAllocationLifetimeAnalysis",
         "MemoryAttributionOptions",
+        "MemoryLifetimeOptions",
         "compare_snapshots",
         "compare_points",
         "compare_phases",

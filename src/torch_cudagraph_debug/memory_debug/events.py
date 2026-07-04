@@ -185,6 +185,14 @@ def summarize_allocator_events(
 ) -> tuple[AllocatorEventSummary, ...]:
     """Aggregate historical events separately from active allocation stacks."""
 
+    if type(stack_depth) is not int:
+        raise TypeError("stack_depth must be an integer")
+    if stack_depth < 1:
+        raise ValueError("stack_depth must be >= 1")
+    if top is not None and type(top) is not int:
+        raise TypeError("top must be an integer or None")
+    if top is not None and top < 1:
+        raise ValueError("top must be >= 1")
     ranges = build_pool_range_index(candidate_segments, reference_segments)
     totals: dict[tuple[tuple[Any, ...], Any, str, str, str], Counter[str]] = (
         defaultdict(Counter)

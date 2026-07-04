@@ -44,6 +44,18 @@ def test_probe_snapshot_aggregates_all_invocations() -> None:
     assert not hasattr(captured.observation(), "point_index")
 
 
+def test_observation_tensor_returns_independent_clones() -> None:
+    captured = make_probe_snapshot(torch.tensor([1.0, 2.0]))
+    observation = captured.observation()
+    digest = observation.sha256
+
+    first = observation.tensor()
+    first.add_(100)
+
+    assert torch.equal(observation.tensor(), torch.tensor([1.0, 2.0]))
+    assert observation.sha256 == digest
+
+
 def test_probe_snapshot_supports_named_observations() -> None:
     run = make_tensor_run(
         [

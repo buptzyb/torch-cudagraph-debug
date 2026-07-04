@@ -159,7 +159,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             "observations",
             &torch_cudagraph_debug::tensor_debug::ProbeContext::observations,
             py::arg("replay_index") = py::none())
-        .def("clear_observations", &torch_cudagraph_debug::tensor_debug::ProbeContext::clear_observations)
         .def("check_status", &torch_cudagraph_debug::tensor_debug::ProbeContext::check_status)
         .def(
             "_debug_resource_counts",

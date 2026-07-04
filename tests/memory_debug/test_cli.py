@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from torch_cudagraph_debug.memory_debug.cli import main
+import pytest
+from torch_cudagraph_debug.memory_debug.cli import build_parser, main
 
 from ._helpers import make_run, segment, snapshot
 
@@ -273,3 +274,18 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
     )
     assert (phase_output / "rank_decomposition.csv").exists()
     assert (phase_output / "phase_aggregates.csv").exists()
+
+
+def test_lifetime_cli_does_not_expose_irrelevant_common_flags() -> None:
+    parser = build_parser()
+    for flag in ("--only-changed", "--stacks", "--lifetimes", "--events"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "allocation-lifetimes",
+                    "bundle",
+                    "--output",
+                    "report",
+                    flag,
+                ]
+            )

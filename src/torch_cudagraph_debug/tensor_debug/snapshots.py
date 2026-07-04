@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
@@ -29,6 +30,22 @@ class TensorCheckStatus:
     name: str | None
     invocation_index: int
 
+    def __post_init__(self) -> None:
+        if type(self.ok) is not bool:
+            raise TypeError("ok must be a boolean")
+        if not isinstance(self.message, str):
+            raise TypeError("message must be a string")
+        if type(self.replay_index) is not int or self.replay_index < 0:
+            raise ValueError("replay_index must be a non-negative integer")
+        if type(self.order) is not int or type(self.invocation_index) is not int:
+            raise TypeError("order and invocation_index must be integers")
+        if self.ok:
+            if self.order != -1 or self.name is not None or self.invocation_index != -1:
+                raise ValueError("successful check status must not identify a failure")
+        else:
+            if self.order < 0 or self.invocation_index < 0 or not self.name:
+                raise ValueError("failed check status must identify one observation")
+
     @property
     def key(self) -> TensorObservationKey | None:
         if self.name is None or self.invocation_index < 0:
@@ -51,8 +68,14 @@ class TensorProbeSnapshot:
             raise ValueError("probe_id must be non-empty")
         if not self.probe_name:
             raise ValueError("probe_name must be non-empty")
-        if self.replay_index < 0:
-            raise ValueError("replay_index must be non-negative")
+        if type(self.replay_index) is not int or self.replay_index < 0:
+            raise ValueError("replay_index must be a non-negative integer")
+        if (
+            isinstance(self.timestamp, bool)
+            or not isinstance(self.timestamp, (int, float))
+            or not math.isfinite(float(self.timestamp))
+        ):
+            raise ValueError("timestamp must be finite")
         _validate_observation_sequence(self.observations, owner="tensor snapshot")
 
     @cached_property

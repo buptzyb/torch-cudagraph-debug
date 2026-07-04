@@ -8,6 +8,7 @@ import torch
 
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
+    MemoryLifetimeOptions,
     MemoryRecorder,
     MemoryRun,
 )
@@ -132,7 +133,7 @@ def test_real_full_history_attributes_allocation_lifetime_release() -> None:
         report = recorder.finish().lifetimes(
             "anchor",
             through="released",
-            attribution=MemoryAttributionOptions(
+            options=MemoryLifetimeOptions(
                 events=True,
                 on_missing="error",
                 stack_depth=4,
@@ -176,7 +177,7 @@ def test_real_full_history_keeps_event_only_born_and_freed_generation() -> None:
 
         report = recorder.finish().lifetimes(
             born_between=("before", "after"),
-            attribution=MemoryAttributionOptions(
+            options=MemoryLifetimeOptions(
                 events=True,
                 on_missing="error",
                 stack_depth=4,

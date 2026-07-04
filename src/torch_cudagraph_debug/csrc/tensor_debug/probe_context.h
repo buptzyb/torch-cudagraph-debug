@@ -106,7 +106,6 @@ class ProbeContext {
         const std::string& observation_name,
         uint64_t invocation_index);
     pybind11::list observations(std::optional<uint64_t> replay_index);
-    void clear_observations();
     pybind11::dict check_status();
     pybind11::dict debug_resource_counts() const;
     void reclaim_retired_staging();

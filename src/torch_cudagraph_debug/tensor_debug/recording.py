@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
 import time
 import uuid
+import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -24,6 +24,20 @@ from torch_cudagraph_debug._provenance import (
     initialized_device_provenance,
     runtime_provenance,
 )
+from torch_cudagraph_debug._validation import (
+    json_value,
+    require_bool,
+    require_exact_fields,
+    require_finite_number,
+    require_json_mapping,
+    require_nonempty_string,
+    require_nonnegative_int,
+    require_optional_int,
+    require_optional_nonempty_string,
+    resolve_distributed_identity,
+    strict_json_loads,
+    validate_group_identity,
+)
 
 from .actions import NonContiguousPolicy, RecordAction, validate_non_contiguous_policy
 from .errors import (
@@ -32,7 +46,12 @@ from .errors import (
     TensorOwnershipError,
     TensorPayloadUnavailableError,
 )
-from ._collector import _EagerTensorCollector, _TensorCollector
+from ._collector import (
+    _EagerTensorCollector,
+    _TensorCollector,
+    synchronize_tensor_results,
+    validate_synchronize_target,
+)
 
 BUNDLE_SCHEMA = "torch-cudagraph-debug/tensor-run"
 ExecutionMode = Literal["eager", "cuda_graph"]
@@ -110,12 +129,16 @@ _SUMMARY_CHUNK_ELEMENTS = 1_000_000
 
 
 def validate_execution_mode(value: str) -> ExecutionMode:
+    if not isinstance(value, str):
+        raise TypeError("execution must be a string")
     if value not in {"eager", "cuda_graph"}:
         raise ValueError('execution must be either "eager" or "cuda_graph"')
     return value  # type: ignore[return-value]
 
 
 def validate_payload_kind(value: str) -> PayloadKind:
+    if not isinstance(value, str):
+        raise TypeError("payload must be a string")
     if value not in {"full", "summary"}:
         raise ValueError('payload must be either "full" or "summary"')
     return value  # type: ignore[return-value]
@@ -136,6 +159,11 @@ class TensorObservationKey:
     name: str
     invocation_index: int
 
+    def __post_init__(self) -> None:
+        _validate_observation_name(self.name)
+        if type(self.invocation_index) is not int or self.invocation_index < 0:
+            raise ValueError("invocation_index must be a non-negative integer")
+
 
 @dataclass(frozen=True)
 class TensorValueSummary:
@@ -152,6 +180,28 @@ class TensorValueSummary:
     mean: float | None
     std: float | None
     l2_norm: float | None
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.numel,
+            self.finite_count,
+            self.nan_count,
+            self.pos_inf_count,
+            self.neg_inf_count,
+            self.zero_count,
+        )
+        if any(type(value) is not int or value < 0 for value in counts):
+            raise ValueError("tensor summary counts must be non-negative integers")
+        if sum(counts[1:5]) != self.numel:
+            raise ValueError("tensor summary counts do not add up to numel")
+        for name in ("minimum", "maximum", "mean", "std", "l2_norm"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"tensor summary {name} must be finite or None")
 
     def to_dict(self) -> dict[str, int | float | None]:
         return {
@@ -170,7 +220,12 @@ class TensorValueSummary:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "TensorValueSummary":
-        _require_exact_fields(value, _SUMMARY_FIELDS, "tensor summary")
+        require_exact_fields(
+            value,
+            _SUMMARY_FIELDS,
+            "tensor summary",
+            error_type=TensorBundleError,
+        )
         integer_fields = (
             "numel",
             "finite_count",
@@ -179,17 +234,12 @@ class TensorValueSummary:
             "neg_inf_count",
             "zero_count",
         )
-        integers = {name: int(value[name]) for name in integer_fields}
-        if any(item < 0 for item in integers.values()):
-            raise TensorBundleError("tensor summary counts must be non-negative")
-        if (
-            integers["finite_count"]
-            + integers["nan_count"]
-            + integers["pos_inf_count"]
-            + integers["neg_inf_count"]
-            != integers["numel"]
-        ):
-            raise TensorBundleError("tensor summary counts do not add up to numel")
+        integers = {
+            name: require_nonnegative_int(
+                value[name], f"tensor summary {name}", error_type=TensorBundleError
+            )
+            for name in integer_fields
+        }
 
         optional: dict[str, float | None] = {}
         for name in ("minimum", "maximum", "mean", "std", "l2_norm"):
@@ -197,11 +247,13 @@ class TensorValueSummary:
             if raw is None:
                 optional[name] = None
                 continue
-            number = float(raw)
-            if not math.isfinite(number):
-                raise TensorBundleError(f"tensor summary {name} must be finite")
-            optional[name] = number
-        return cls(**integers, **optional)
+            optional[name] = require_finite_number(
+                raw, f"tensor summary {name}", error_type=TensorBundleError
+            )
+        try:
+            return cls(**integers, **optional)
+        except ValueError as exc:
+            raise TensorBundleError(str(exc)) from exc
 
 
 @dataclass(frozen=True, eq=False)
@@ -224,6 +276,35 @@ class TensorObservation:
         default_factory=dict, repr=False, compare=False
     )
     _cache_tensors: bool = field(default=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if type(self.order) is not int or self.order < 0:
+            raise ValueError("observation order must be a non-negative integer")
+        _validate_observation_name(self.name)
+        if type(self.invocation_index) is not int or self.invocation_index < 0:
+            raise ValueError("invocation_index must be a non-negative integer")
+        if any(type(value) is not int or value < 0 for value in self.shape):
+            raise ValueError("shape values must be non-negative integers")
+        if any(type(value) is not int or value < 0 for value in self.stride):
+            raise ValueError("stride values must be non-negative integers")
+        if len(self.shape) != len(self.stride):
+            raise ValueError("tensor stride rank must equal shape rank")
+        if self.dtype not in _DTYPE_NAMES:
+            raise ValueError(f"unsupported tensor dtype {self.dtype}")
+        if not self.source_device:
+            raise ValueError("source_device must be non-empty")
+        if type(self.nbytes) is not int or self.nbytes < 0:
+            raise ValueError("nbytes must be a non-negative integer")
+        expected_nbytes = (
+            math.prod(self.shape) * torch.empty((), dtype=self.dtype).element_size()
+        )
+        if self.nbytes != expected_nbytes:
+            raise ValueError(f"nbytes={self.nbytes}; expected {expected_nbytes}")
+        validate_payload_kind(self.payload)
+        if not _SHA256_RE.fullmatch(self.sha256):
+            raise ValueError("sha256 must contain 64 lowercase hexadecimal digits")
+        if self.summary.numel != math.prod(self.shape):
+            raise ValueError("tensor summary numel does not match shape")
 
     @property
     def key(self) -> TensorObservationKey:
@@ -249,7 +330,12 @@ class TensorObservation:
         }
 
     def tensor(self) -> torch.Tensor:
-        """Materialize the CPU tensor, validating its content digest."""
+        """Return an independent CPU tensor with validated payload content."""
+
+        return self._materialize_tensor().clone()
+
+    def _materialize_tensor(self) -> torch.Tensor:
+        """Return the canonical private payload used by internal analysis."""
 
         if self.payload != "full":
             raise TensorPayloadUnavailableError(
@@ -284,6 +370,10 @@ class TensorObservation:
             self._tensor_cache["tensor"] = tensor
         return tensor
 
+    def _verify_payload(self) -> None:
+        if self.payload == "full" and "tensor" not in self._tensor_cache:
+            self._materialize_tensor()
+
 
 def _validate_observation_sequence(
     observations: Sequence[TensorObservation],
@@ -317,6 +407,22 @@ class TensorPoint:
     observations: tuple[TensorObservation, ...]
 
     def __post_init__(self) -> None:
+        if not self.run_id:
+            raise ValueError("run_id must be non-empty")
+        if type(self.index) is not int or self.index < 0:
+            raise ValueError("point index must be a non-negative integer")
+        if not self.label:
+            raise ValueError("point label must be non-empty")
+        if (
+            isinstance(self.timestamp, bool)
+            or not isinstance(self.timestamp, (int, float))
+            or not math.isfinite(float(self.timestamp))
+        ):
+            raise ValueError("point timestamp must be finite")
+        if self.replay_index is not None and (
+            type(self.replay_index) is not int or self.replay_index < 1
+        ):
+            raise ValueError("point replay_index must be a positive integer or None")
         _validate_observation_sequence(self.observations, owner="tensor point")
 
     @cached_property
@@ -368,6 +474,44 @@ class TensorRun:
         default_factory=lambda: MappingProxyType({})
     )
     bundle_dir: Path | None = field(default=None, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.run_id or not self.name:
+            raise ValueError("run_id and name must be non-empty")
+        validate_execution_mode(self.execution)
+        validate_payload_kind(self.default_payload)
+        validate_group_identity(self.rank, self.group_id, self.world_size)
+        if type(self.complete) is not bool:
+            raise TypeError("complete must be a boolean")
+        if (
+            isinstance(self.created_at, bool)
+            or not isinstance(self.created_at, (int, float))
+            or not math.isfinite(float(self.created_at))
+        ):
+            raise ValueError("created_at must be finite")
+        if self.finished_at is not None and (
+            isinstance(self.finished_at, bool)
+            or not isinstance(self.finished_at, (int, float))
+            or not math.isfinite(float(self.finished_at))
+        ):
+            raise ValueError("finished_at must be finite or None")
+        labels: set[str] = set()
+        last_replay = 0
+        for expected_index, point in enumerate(self.points):
+            if point.run_id != self.run_id or point.index != expected_index:
+                raise ValueError("run points must be owned, contiguous, and ordered")
+            if point.label in labels:
+                raise ValueError(f"duplicate point label {point.label!r}")
+            labels.add(point.label)
+            if self.execution == "eager":
+                if point.replay_index is not None:
+                    raise ValueError("eager points must not have replay_index")
+            else:
+                if point.replay_index is None or point.replay_index <= last_replay:
+                    raise ValueError(
+                        "CUDA Graph replay indices must be positive and increasing"
+                    )
+                last_replay = point.replay_index
 
     def descriptor(self) -> dict[str, object]:
         return {
@@ -439,32 +583,52 @@ class TensorRun:
         root = Path(bundle_dir).resolve()
         manifest_path = root / "manifest.json"
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+        except OSError as exc:
             raise TensorBundleError(
                 f"could not read tensor bundle {root}: {exc}"
             ) from exc
+        manifest = strict_json_loads(
+            manifest_text,
+            error_type=TensorBundleError,
+            context=f"tensor bundle {root}",
+        )
         if not isinstance(manifest, Mapping):
             raise TensorBundleError("tensor bundle manifest must be a JSON object")
         if manifest.get("schema") != BUNDLE_SCHEMA:
             raise TensorBundleError(
                 f"unsupported tensor bundle schema {manifest.get('schema')!r}"
             )
-        _require_exact_fields(manifest, _MANIFEST_FIELDS, "tensor bundle manifest")
+        require_exact_fields(
+            manifest,
+            _MANIFEST_FIELDS,
+            "tensor bundle manifest",
+            error_type=TensorBundleError,
+        )
 
-        run_id = _nonempty_string(manifest["run_id"], "run_id")
-        name = _nonempty_string(manifest["name"], "name")
+        run_id = require_nonempty_string(
+            manifest["run_id"], "run_id", error_type=TensorBundleError
+        )
+        name = require_nonempty_string(
+            manifest["name"], "name", error_type=TensorBundleError
+        )
         try:
-            execution = validate_execution_mode(str(manifest["execution"]))
-            default_payload = validate_payload_kind(str(manifest["default_payload"]))
-        except ValueError as exc:
+            execution = validate_execution_mode(manifest["execution"])
+            default_payload = validate_payload_kind(manifest["default_payload"])
+        except (TypeError, ValueError) as exc:
             raise TensorBundleError(f"invalid tensor bundle mode: {exc}") from exc
-        rank = _optional_int(manifest["rank"], "rank")
-        group_id = _optional_nonempty_string(manifest["group_id"], "group_id")
-        world_size = _optional_int(manifest["world_size"], "world_size")
+        rank = require_optional_int(
+            manifest["rank"], "rank", error_type=TensorBundleError
+        )
+        group_id = require_optional_nonempty_string(
+            manifest["group_id"], "group_id", error_type=TensorBundleError
+        )
+        world_size = require_optional_int(
+            manifest["world_size"], "world_size", error_type=TensorBundleError
+        )
         try:
-            _validate_group_identity(rank, group_id, world_size)
-        except ValueError as exc:
+            validate_group_identity(rank, group_id, world_size)
+        except (TypeError, ValueError) as exc:
             raise TensorBundleError(f"invalid tensor run identity: {exc}") from exc
 
         raw_points = manifest["points"]
@@ -477,13 +641,22 @@ class TensorRun:
                 raise TensorBundleError(
                     f"tensor point {expected_index} must be a JSON object"
                 )
-            _require_exact_fields(
+            require_exact_fields(
                 raw_point,
                 _POINT_FIELDS,
                 f"tensor point {expected_index}",
+                error_type=TensorBundleError,
             )
-            index = int(raw_point["index"])
-            label = _nonempty_string(raw_point["label"], "tensor point label")
+            index = require_nonnegative_int(
+                raw_point["index"],
+                "tensor point index",
+                error_type=TensorBundleError,
+            )
+            label = require_nonempty_string(
+                raw_point["label"],
+                "tensor point label",
+                error_type=TensorBundleError,
+            )
             if index != expected_index:
                 raise TensorBundleError(
                     "tensor bundle point indices must be contiguous and ordered"
@@ -493,12 +666,18 @@ class TensorRun:
                     f"tensor bundle has duplicate point label {label!r}"
                 )
             labels.add(label)
-            metadata = _mapping_value(raw_point["metadata"], "point metadata")
-            replay_index = _optional_int(
-                raw_point["replay_index"], "tensor point replay_index"
+            metadata = require_json_mapping(
+                raw_point["metadata"],
+                "point metadata",
+                error_type=TensorBundleError,
             )
-            if replay_index is not None and replay_index < 0:
-                raise TensorBundleError("point replay_index must be non-negative")
+            replay_index = require_optional_int(
+                raw_point["replay_index"],
+                "tensor point replay_index",
+                error_type=TensorBundleError,
+            )
+            if replay_index is not None and replay_index < 1:
+                raise TensorBundleError("point replay_index must be positive")
             raw_observations = raw_point["observations"]
             if not isinstance(raw_observations, list):
                 raise TensorBundleError(
@@ -525,7 +704,11 @@ class TensorRun:
                     run_id=run_id,
                     index=index,
                     label=label,
-                    timestamp=float(raw_point["timestamp"]),
+                    timestamp=require_finite_number(
+                        raw_point["timestamp"],
+                        "tensor point timestamp",
+                        error_type=TensorBundleError,
+                    ),
                     metadata=MappingProxyType(metadata),
                     observations=tuple(observations),
                     replay_index=replay_index,
@@ -534,25 +717,46 @@ class TensorRun:
                 raise TensorBundleError(str(exc)) from exc
             points.append(point)
 
-        provenance = _mapping_value(manifest["provenance"], "provenance")
-        run_metadata = _mapping_value(manifest["run_metadata"], "run_metadata")
-        finished_at = manifest["finished_at"]
-        return cls(
-            run_id=run_id,
-            name=name,
-            execution=execution,
-            rank=rank,
-            created_at=float(manifest["created_at"]),
-            finished_at=float(finished_at) if finished_at is not None else None,
-            complete=bool(manifest["complete"]),
-            default_payload=default_payload,
-            points=tuple(points),
-            group_id=group_id,
-            world_size=world_size,
-            provenance=MappingProxyType(provenance),
-            run_metadata=MappingProxyType(run_metadata),
-            bundle_dir=root,
+        provenance = require_json_mapping(
+            manifest["provenance"], "provenance", error_type=TensorBundleError
         )
+        run_metadata = require_json_mapping(
+            manifest["run_metadata"], "run_metadata", error_type=TensorBundleError
+        )
+        finished_at = manifest["finished_at"]
+        try:
+            return cls(
+                run_id=run_id,
+                name=name,
+                execution=execution,
+                rank=rank,
+                created_at=require_finite_number(
+                    manifest["created_at"],
+                    "created_at",
+                    error_type=TensorBundleError,
+                ),
+                finished_at=(
+                    require_finite_number(
+                        finished_at,
+                        "finished_at",
+                        error_type=TensorBundleError,
+                    )
+                    if finished_at is not None
+                    else None
+                ),
+                complete=require_bool(
+                    manifest["complete"], "complete", error_type=TensorBundleError
+                ),
+                default_payload=default_payload,
+                points=tuple(points),
+                group_id=group_id,
+                world_size=world_size,
+                provenance=MappingProxyType(provenance),
+                run_metadata=MappingProxyType(run_metadata),
+                bundle_dir=root,
+            )
+        except (TypeError, ValueError) as exc:
+            raise TensorBundleError(f"invalid tensor run: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -616,16 +820,19 @@ class TensorRecorder:
         self.bundle_dir = Path(bundle_dir).resolve() if bundle_dir is not None else None
         self.default_payload = validate_payload_kind(payload)
         self.non_contiguous = validate_non_contiguous_policy(non_contiguous)
-        _validate_synchronize_target(synchronize)
+        validate_synchronize_target(synchronize)
         self.synchronize = synchronize
-        self.rank = _default_rank() if rank is None else int(rank)
+        self.rank, self.world_size = resolve_distributed_identity(rank, world_size)
         self.group_id = group_id
-        self.world_size = (
-            _default_world_size() if world_size is None else int(world_size)
+        validate_group_identity(self.rank, self.group_id, self.world_size)
+        metadata = json_value(
+            dict(run_metadata or {}),
+            "$.run_metadata",
+            error_type=TensorBundleError,
         )
-        _validate_group_identity(self.rank, self.group_id, self.world_size)
-        metadata = _json_value(dict(run_metadata or {}), "$.run_metadata")
-        provenance = _json_value(runtime_provenance(), "$.provenance")
+        provenance = json_value(
+            runtime_provenance(), "$.provenance", error_type=TensorBundleError
+        )
         assert isinstance(metadata, dict)
         assert isinstance(provenance, dict)
         self.run_metadata = MappingProxyType(metadata)
@@ -636,6 +843,7 @@ class TensorRecorder:
         self._points: list[TensorPoint] = []
         self._result: TensorRun | None = None
         self._closed = False
+        self._context_active = False
         self._active_point: _ActivePoint | None = None
         self._capture_slots: list[_CaptureSlot] = []
         self._capture_invocation_counts: dict[str, int] = {}
@@ -707,8 +915,9 @@ class TensorRecorder:
             )
             return tensor
 
-        if not torch.cuda.is_current_stream_capturing():
-            return tensor
+        with torch.cuda.device(tensor.device):
+            if not torch.cuda.is_current_stream_capturing():
+                return tensor
         self._validate_tensor(tensor)
         assert self._collector is not None
         invocation_index = self._capture_invocation_counts.get(name, 0)
@@ -776,16 +985,19 @@ class TensorRecorder:
             raise ValueError(f"tensor point label {label!r} already exists")
         if self._active_point is not None:
             raise TensorDebugError("tensor point contexts cannot be nested")
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "TensorRecorder.record_point() cannot run during CUDA graph capture; "
-                "capture observe() calls first, then wrap graph.replay()"
-            )
+        if self._device is not None:
+            with torch.cuda.device(self._device):
+                if torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "TensorRecorder.record_point() cannot run during CUDA graph "
+                        "capture; capture observe() calls first, then wrap graph.replay()"
+                    )
         target = self.synchronize if synchronize is None else synchronize
-        _validate_synchronize_target(target)
-        serializable_metadata = _json_value(
+        validate_synchronize_target(target)
+        serializable_metadata = json_value(
             dict(metadata or {}),
             "$.point.metadata",
+            error_type=TensorBundleError,
         )
         assert isinstance(serializable_metadata, dict)
         active = _ActivePoint(
@@ -811,24 +1023,35 @@ class TensorRecorder:
         return self._build_run(complete=False)
 
     def finish(self) -> TensorRun:
+        if self._context_active:
+            raise TensorDebugError(
+                "cannot finish a tensor recorder inside its context manager"
+            )
+        return self._finish()
+
+    def _finish(self) -> TensorRun:
         if self._result is not None:
             return self._result
         if self._active_point is not None:
             raise TensorDebugError("cannot finish while a tensor point is active")
-        self._finished_at = time.time()
-        self._result = self._build_run(complete=True)
-        self._write_manifest(complete=True)
-        return self._result
+        finished_at = time.time()
+        candidate = self._build_run(complete=True, finished_at=finished_at)
+        self._write_manifest(complete=True, finished_at=finished_at)
+        self._finished_at = finished_at
+        self._result = candidate
+        return candidate
 
     def _abort(self) -> TensorRun:
         if self._result is not None:
             return self._result
         if self._active_point is not None:
             self._abort_point(self._active_point)
-        self._finished_at = time.time()
-        self._result = self._build_run(complete=False)
-        self._write_manifest(complete=False)
-        return self._result
+        finished_at = time.time()
+        candidate = self._build_run(complete=False, finished_at=finished_at)
+        self._write_manifest(complete=False, finished_at=finished_at)
+        self._finished_at = finished_at
+        self._result = candidate
+        return candidate
 
     @property
     def result(self) -> TensorRun:
@@ -845,7 +1068,7 @@ class TensorRecorder:
 
         if self._closed:
             return
-        _validate_synchronize_target(synchronize)
+        validate_synchronize_target(synchronize)
         if self._active_point is not None:
             raise TensorDebugError("cannot close while a tensor point is active")
         if self._collector is not None:
@@ -855,16 +1078,41 @@ class TensorRecorder:
 
     def __enter__(self) -> "TensorRecorder":
         self._ensure_open()
+        if self._context_active:
+            raise TensorDebugError("tensor recorder context cannot be re-entered")
+        self._context_active = True
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if not self._context_active:
+            raise TensorDebugError("tensor recorder context is not active")
         try:
             if exc_type is None:
-                self.finish()
+                self._finish()
             else:
-                self._abort()
+                try:
+                    self._abort()
+                except Exception as cleanup_error:
+                    warnings.warn(
+                        "could not persist aborted tensor run: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
         finally:
-            self.close(synchronize=self.synchronize)
+            try:
+                self.close(synchronize=self.synchronize)
+            except Exception as cleanup_error:
+                if exc_type is None:
+                    raise
+                warnings.warn(
+                    "could not close tensor recorder after application error: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            finally:
+                self._context_active = False
 
     def _next_eager_invocation(self, name: str) -> int:
         assert self._active_point is not None
@@ -925,7 +1173,7 @@ class TensorRecorder:
             raise TensorDebugError(
                 "CUDA Graph tensor recorder captured no observations"
             )
-        _synchronize_results(self._device, active.synchronize)
+        synchronize_tensor_results(self._device, active.synchronize)
         snapshots = self._collector.collect(synchronize=False)
         if len(snapshots) != len(self._capture_slots):
             raise TensorDebugError(
@@ -1048,9 +1296,9 @@ class TensorRecorder:
             observations=tuple(observations),
             replay_index=replay_index,
         )
-        self._points.append(point)
         self._record_device_provenance()
-        self._write_manifest(complete=False)
+        self._write_manifest(complete=False, points=(*self._points, point))
+        self._points.append(point)
         return point
 
     def _write_blob(self, digest: str, raw: bytes) -> Path:
@@ -1083,7 +1331,13 @@ class TensorRecorder:
             temporary.unlink(missing_ok=True)
         return path
 
-    def _write_manifest(self, *, complete: bool) -> None:
+    def _write_manifest(
+        self,
+        *,
+        complete: bool,
+        points: Sequence[TensorPoint] | None = None,
+        finished_at: float | None = None,
+    ) -> None:
         if self.bundle_dir is None:
             return
         payload = {
@@ -1095,13 +1349,14 @@ class TensorRecorder:
             "group_id": self.group_id,
             "world_size": self.world_size,
             "created_at": self._created_at,
-            "finished_at": self._finished_at,
+            "finished_at": self._finished_at if finished_at is None else finished_at,
             "complete": complete,
             "default_payload": self.default_payload,
             "provenance": self._provenance,
             "run_metadata": dict(self.run_metadata),
             "points": [
-                _point_manifest(point, self.bundle_dir) for point in self._points
+                _point_manifest(point, self.bundle_dir)
+                for point in (self._points if points is None else points)
             ],
         }
         path = self.bundle_dir / "manifest.json"
@@ -1126,14 +1381,16 @@ class TensorRecorder:
         if device is not None:
             self._provenance["device"] = device
 
-    def _build_run(self, *, complete: bool) -> TensorRun:
+    def _build_run(
+        self, *, complete: bool, finished_at: float | None = None
+    ) -> TensorRun:
         return TensorRun(
             run_id=self._run_id,
             name=self.name,
             execution=self.execution,
             rank=self.rank,
             created_at=self._created_at,
-            finished_at=self._finished_at,
+            finished_at=self._finished_at if finished_at is None else finished_at,
             complete=complete,
             default_payload=self.default_payload,
             points=tuple(self._points),
@@ -1197,31 +1454,42 @@ def _observation_from_manifest(
         raise TensorBundleError(
             f"tensor observation {expected_order} must be a JSON object"
         )
-    _require_exact_fields(
+    require_exact_fields(
         raw,
         _OBSERVATION_FIELDS,
         f"tensor observation {expected_order}",
+        error_type=TensorBundleError,
     )
-    order = int(raw["order"])
+    order = require_nonnegative_int(
+        raw["order"], "tensor observation order", error_type=TensorBundleError
+    )
     if order != expected_order:
         raise TensorBundleError(
             "tensor observation order must be contiguous and ordered"
         )
-    name = _nonempty_string(raw["name"], "name")
-    invocation_index = int(raw["invocation_index"])
-    if invocation_index < 0:
-        raise TensorBundleError("invocation_index must be non-negative")
-    shape = _integer_tuple(raw["shape"], "shape", non_negative=True)
-    stride = _integer_tuple(raw["stride"], "stride", non_negative=True)
+    name = require_nonempty_string(raw["name"], "name", error_type=TensorBundleError)
+    invocation_index = require_nonnegative_int(
+        raw["invocation_index"],
+        "invocation_index",
+        error_type=TensorBundleError,
+    )
+    shape = _strict_integer_tuple(raw["shape"], "shape")
+    stride = _strict_integer_tuple(raw["stride"], "stride")
     if len(stride) != len(shape):
         raise TensorBundleError("tensor stride rank must equal shape rank")
-    dtype_name = str(raw["dtype"])
+    dtype_name = require_nonempty_string(
+        raw["dtype"], "dtype", error_type=TensorBundleError
+    )
     try:
         dtype = _NAME_DTYPES[dtype_name]
     except KeyError as exc:
         raise TensorBundleError(f"unsupported tensor dtype {dtype_name!r}") from exc
-    source_device = _nonempty_string(raw["source_device"], "source_device")
-    nbytes = int(raw["nbytes"])
+    source_device = require_nonempty_string(
+        raw["source_device"], "source_device", error_type=TensorBundleError
+    )
+    nbytes = require_nonnegative_int(
+        raw["nbytes"], "nbytes", error_type=TensorBundleError
+    )
     expected_nbytes = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
     if nbytes != expected_nbytes:
         raise TensorBundleError(
@@ -1229,10 +1497,12 @@ def _observation_from_manifest(
             f"expected {expected_nbytes}"
         )
     try:
-        payload = validate_payload_kind(str(raw["payload"]))
-    except ValueError as exc:
+        payload = validate_payload_kind(raw["payload"])
+    except (TypeError, ValueError) as exc:
         raise TensorBundleError(f"invalid observation payload: {exc}") from exc
-    digest = str(raw["sha256"])
+    digest = require_nonempty_string(
+        raw["sha256"], "sha256", error_type=TensorBundleError
+    )
     if not _SHA256_RE.fullmatch(digest):
         raise TensorBundleError("tensor observation has an invalid SHA-256")
     summary_raw = raw["summary"]
@@ -1256,21 +1526,26 @@ def _observation_from_manifest(
     elif raw["blob_file"] is not None:
         raise TensorBundleError("summary-only observations must not reference a blob")
 
-    return TensorObservation(
-        order=order,
-        name=name,
-        invocation_index=invocation_index,
-        shape=shape,
-        stride=stride,
-        dtype=dtype,
-        source_device=source_device,
-        nbytes=nbytes,
-        payload=payload,
-        sha256=digest,
-        summary=summary,
-        _blob_path=blob_path,
-        _cache_tensors=cache_tensors,
-    )
+    try:
+        return TensorObservation(
+            order=order,
+            name=name,
+            invocation_index=invocation_index,
+            shape=shape,
+            stride=stride,
+            dtype=dtype,
+            source_device=source_device,
+            nbytes=nbytes,
+            payload=payload,
+            sha256=digest,
+            summary=summary,
+            _blob_path=blob_path,
+            _cache_tensors=cache_tensors,
+        )
+    except (TypeError, ValueError) as exc:
+        raise TensorBundleError(
+            f"invalid tensor observation {expected_order}: {exc}"
+        ) from exc
 
 
 def _summarize_tensor(tensor: torch.Tensor) -> TensorValueSummary:
@@ -1368,48 +1643,6 @@ def _resolve_cuda_device(device: DeviceLike | None) -> torch.device:
     return resolved
 
 
-def _validate_synchronize_target(synchronize: SynchronizeTarget) -> None:
-    if not isinstance(synchronize, (bool, torch.cuda.Stream, torch.device)):
-        raise TypeError(
-            "synchronize must be a bool, torch.cuda.Stream, or torch.device"
-        )
-
-
-def _synchronize_results(
-    recorder_device: torch.device,
-    synchronize: SynchronizeTarget,
-) -> None:
-    _validate_synchronize_target(synchronize)
-    if isinstance(synchronize, bool):
-        if not synchronize:
-            return
-        target_device = recorder_device
-        stream = None
-    elif isinstance(synchronize, torch.cuda.Stream):
-        target_device = torch.device(synchronize.device)
-        stream = synchronize
-    else:
-        target_device = synchronize
-        stream = None
-    if target_device.type != "cuda":
-        raise ValueError("synchronize target must identify a CUDA device")
-    if target_device.index is None:
-        target_device = torch.device("cuda", torch.cuda.current_device())
-    if target_device != recorder_device:
-        raise ValueError(
-            f"synchronize target {target_device} does not match recorder device "
-            f"{recorder_device}"
-        )
-    if torch.cuda.is_current_stream_capturing():
-        raise RuntimeError(
-            "cannot synchronize TensorRecorder results during CUDA graph capture"
-        )
-    if stream is not None:
-        stream.synchronize()
-    else:
-        torch.cuda.synchronize(target_device)
-
-
 def _safe_blob_path(root: Path, raw: Any, digest: str) -> Path:
     expected = f"blobs/{digest}.bin"
     if raw != expected:
@@ -1424,134 +1657,12 @@ def _safe_blob_path(root: Path, raw: Any, digest: str) -> Path:
     return resolved
 
 
-def _require_exact_fields(
-    value: Mapping[str, Any],
-    expected: frozenset[str],
-    context: str,
-) -> None:
-    actual = frozenset(value)
-    missing = sorted(expected - actual)
-    unexpected = sorted(actual - expected)
-    if not missing and not unexpected:
-        return
-    details = []
-    if missing:
-        details.append(f"missing {missing!r}")
-    if unexpected:
-        details.append(f"unexpected {unexpected!r}")
-    raise TensorBundleError(f"{context} has invalid fields: {', '.join(details)}")
-
-
-def _json_value(value: Any, path: str) -> Any:
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise TensorBundleError(f"{path} contains a non-finite float")
-        return value
-    if isinstance(value, (list, tuple)):
-        return [
-            _json_value(item, f"{path}[{index}]") for index, item in enumerate(value)
-        ]
-    if isinstance(value, Mapping):
-        output = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TensorBundleError(
-                    f"{path} contains non-string mapping key {key!r}"
-                )
-            output[key] = _json_value(item, f"{path}.{key}")
-        return output
-    raise TensorBundleError(f"{path} contains unsupported value {type(value).__name__}")
-
-
-def _mapping_value(value: Any, context: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise TensorBundleError(f"{context} must be a JSON object")
-    result = _json_value(dict(value), f"$.{context}")
-    assert isinstance(result, dict)
-    return result
-
-
-def _integer_tuple(
-    value: Any,
-    context: str,
-    *,
-    non_negative: bool,
-) -> tuple[int, ...]:
+def _strict_integer_tuple(value: Any, context: str) -> tuple[int, ...]:
     if not isinstance(value, list):
         raise TensorBundleError(f"tensor {context} must be a JSON list")
-    result = tuple(int(item) for item in value)
-    if non_negative and any(item < 0 for item in result):
-        raise TensorBundleError(f"tensor {context} values must be non-negative")
-    return result
-
-
-def _nonempty_string(value: Any, context: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise TensorBundleError(f"{context} must be a non-empty string")
-    return value
-
-
-def _optional_nonempty_string(value: Any, context: str) -> str | None:
-    if value is None:
-        return None
-    return _nonempty_string(value, context)
-
-
-def _optional_int(value: Any, context: str) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise TensorBundleError(f"{context} must be an integer or null")
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise TensorBundleError(f"{context} must be an integer or null") from exc
-
-
-def _validate_group_identity(
-    rank: int | None,
-    group_id: str | None,
-    world_size: int | None,
-) -> None:
-    if group_id is not None and not group_id:
-        raise ValueError("group_id must be non-empty when provided")
-    if world_size is not None and world_size < 1:
-        raise ValueError("world_size must be >= 1")
-    if rank is not None and rank < 0:
-        raise ValueError("rank must be non-negative")
-    if rank is not None and world_size is not None and rank >= world_size:
-        raise ValueError("rank must be in [0, world_size)")
-
-
-def _default_rank() -> int | None:
-    value = os.environ.get("RANK")
-    if value is not None:
-        try:
-            return int(value)
-        except ValueError:
-            pass
-    try:
-        import torch.distributed as distributed
-    except ImportError:
-        return None
-    if not distributed.is_available() or not distributed.is_initialized():
-        return None
-    return int(distributed.get_rank())
-
-
-def _default_world_size() -> int | None:
-    value = os.environ.get("WORLD_SIZE")
-    if value is not None:
-        try:
-            return int(value)
-        except ValueError:
-            pass
-    try:
-        import torch.distributed as distributed
-    except ImportError:
-        return None
-    if not distributed.is_available() or not distributed.is_initialized():
-        return None
-    return int(distributed.get_world_size())
+    return tuple(
+        require_nonnegative_int(
+            item, f"tensor {context} value", error_type=TensorBundleError
+        )
+        for item in value
+    )

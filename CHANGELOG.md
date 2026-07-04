@@ -34,6 +34,9 @@
 - Result-owned text, nested JSON, flattened CSV, and standalone HTML reports.
   `include_unchanged=False` consistently filters text, HTML, and CSV while
   JSON remains complete.
+- Consistent allocated, reserved, active, and requested metrics at allocator,
+  pool, and pool/stream scope, with structural and fragmentation details shown
+  as diagnostics when they explain a change.
 - The `tcgd-memory` CLI with summary, timeline, allocation-lifetime,
   point-comparison, phase-comparison, and multi-rank run-group commands.
 - Public experimental allocator helpers under `memory_debug.advanced` using
@@ -73,9 +76,23 @@
   an enabled probe is rejected during CUDA Graph capture.
 - Eager `when="always"` probes lock one CUDA stream, allow eager work before
   capture, and reject eager work after capture establishes graph ownership.
+- Direct allocation-lifetime analysis uses `MemoryLifetimeOptions`; embedded
+  comparison and timeline attribution continues to use
+  `MemoryAttributionOptions`.
 
 ### Fixed
 
+- Reject malformed manifests, non-finite JSON, invalid scalar coercions,
+  inconsistent ownership, invalid allocator frame fields, and partial recorder
+  writes instead of accepting ambiguous persisted state. Missing per-device
+  trace slots remain unavailable history rather than malformed data.
+- Verify content-addressed tensor payloads even when two observations advertise
+  the same digest, and return defensive tensor copies from public observations.
+- Render all four core allocator metrics consistently for pool/stream rows and
+  timeline charts, preserve stream-only stack attribution when pool aggregates
+  cancel, clean stale optional report artifacts, and return absolute report paths.
+- Preserve allocation identity by device, address, and generation so distinct
+  same-sized blocks are not merged during lifetime analysis.
 - Reclaim eager callback payloads, non-contiguous eager source temporaries, and
   replaced pinned staging instead of retaining them for the full Probe
   lifetime. Unsynchronized close now reports pending eager callbacks.

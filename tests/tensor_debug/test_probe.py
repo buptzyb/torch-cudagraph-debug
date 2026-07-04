@@ -68,9 +68,6 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
                 }
             ]
 
-        def clear_observations(self) -> None:
-            pass
-
         def check_status(self) -> dict[str, object]:
             return {
                 "ok": True,
@@ -296,7 +293,6 @@ def test_all_disabled_probe_is_noop_without_native(
         invocation_index=-1,
     )
     probe.assert_check_ok()
-    probe.clear_snapshot()
     probe.close(synchronize=False)
 
     with pytest.raises(RuntimeError, match="closed"):
@@ -430,14 +426,10 @@ def test_snapshot_reuses_callback_counter_staging(
     class FakeHandle:
         def __init__(self) -> None:
             self.observation_arguments: list[int | None] = []
-            self.clear_count = 0
 
         def observations(self, replay_index: int | None) -> list[dict[str, object]]:
             self.observation_arguments.append(replay_index)
             return []
-
-        def clear_observations(self) -> None:
-            self.clear_count += 1
 
         def check_status(self) -> dict[str, object]:
             return {
@@ -487,11 +479,6 @@ def test_snapshot_reuses_callback_counter_staging(
     with pytest.raises(TensorDebugError, match="no recorded invocation"):
         probe.snapshot()
     assert handle.observation_arguments == [None]
-    assert synchronize_calls == [(torch.device("cuda:0"), True)]
-
-    synchronize_calls.clear()
-    probe.clear_snapshot()
-    assert handle.clear_count == 1
     assert synchronize_calls == [(torch.device("cuda:0"), True)]
 
     synchronize_calls.clear()

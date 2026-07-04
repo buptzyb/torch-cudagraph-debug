@@ -77,7 +77,14 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
     assert end_active["max_value"] == 35
     assert end_active["worst_rank"] == 1
     assert end_active["spread_value"] == 5
-    assert "not summed across ranks" in report.to_text()
+    text = report.to_text()
+    assert "not summed across ranks" in text
+    assert "allocated_bytes" in text
+    assert "reserved_bytes" in text
+    assert "active_bytes" in text
+    assert "requested_bytes" in text
+    assert "inactive_bytes" not in text
+    assert "fragmentation_bytes" not in text
 
     paths = report.write(tmp_path / "summary")
     assert set(paths) == {
@@ -90,6 +97,12 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
     payload = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert payload["aggregation"] == "per_rank_extrema_no_sum"
     assert payload["kind"] == "run-group-summary"
+    assert any(
+        row["metric"] == "fragmentation_bytes" for row in payload["point_aggregates"]
+    )
+    html = paths["html"].read_text(encoding="utf-8")
+    assert "active_bytes" in html
+    assert "fragmentation_bytes" not in html
 
     cached = MemoryRunGroup.load(root, cache_snapshots=True)
     assert cached[0]["end"].raw_snapshot()["segments"]
@@ -178,7 +191,7 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
     )
 
     assert tuple(report.rank_comparisons) == (0, 1)
-    assert len(report.rank_decomposition) == 30
+    assert len(report.rank_decomposition) == 36
     active = next(
         row
         for row in report.phase_aggregates

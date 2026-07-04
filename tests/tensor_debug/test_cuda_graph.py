@@ -585,31 +585,6 @@ def test_always_mode_eager_calls_do_not_claim_capture_ownership() -> None:
     probe.close()
 
 
-def test_clear_snapshot_zeroes_latest_buffers_without_dropping_slots() -> None:
-    if not torch.cuda.is_available() or not _native.extension_available():
-        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
-
-    x = torch.arange(4, device="cuda", dtype=torch.float32)
-    expected = x.detach().cpu() + 1
-    probe = TensorProbe("clear-snapshot", actions=[RecordAction()])
-
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
-        probe(x + 1)
-
-    g.replay()
-    torch.cuda.synchronize()
-    assert torch.equal(probe.snapshot().tensor(), expected)
-
-    probe.clear_snapshot()
-    assert torch.equal(probe.snapshot().tensor(), torch.zeros_like(expected))
-
-    g.replay()
-    torch.cuda.synchronize()
-    assert torch.equal(probe.snapshot().tensor(), expected)
-    probe.close()
-
-
 def test_tensor_check_uses_expected_list_by_invocation() -> None:
     if not torch.cuda.is_available() or not _native.extension_available():
         pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")

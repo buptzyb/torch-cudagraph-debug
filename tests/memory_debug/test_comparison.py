@@ -45,6 +45,68 @@ def test_same_run_keeps_pool_totals_and_stream_deltas_separate() -> None:
     assert comparison.pool_comparisons[0].candidate.active_bytes == 30
 
 
+def test_same_size_blocks_keep_distinct_address_lifecycle_identity() -> None:
+    before = segment(active=20, total=30, address=1000)
+    before["blocks"] = [
+        {
+            "address": 1000,
+            "size": 10,
+            "requested_size": 10,
+            "state": "active_allocated",
+            "frames": [],
+        },
+        {
+            "address": 1010,
+            "size": 10,
+            "requested_size": 10,
+            "state": "active_allocated",
+            "frames": [],
+        },
+        {
+            "address": 1020,
+            "size": 10,
+            "requested_size": 0,
+            "state": "inactive",
+            "frames": [],
+        },
+    ]
+    after = segment(active=20, total=30, address=1000)
+    after["blocks"] = [
+        {
+            "address": 1000,
+            "size": 10,
+            "requested_size": 0,
+            "state": "inactive",
+            "frames": [],
+        },
+        {
+            "address": 1010,
+            "size": 10,
+            "requested_size": 10,
+            "state": "active_allocated",
+            "frames": [],
+        },
+        {
+            "address": 1020,
+            "size": 10,
+            "requested_size": 10,
+            "state": "active_allocated",
+            "frames": [],
+        },
+    ]
+    run = make_run(
+        [snapshot(before), snapshot(after)],
+        labels=("before", "after"),
+    )
+
+    comparison = run.compare("before", "after")
+    lifecycle = comparison.pool_comparisons[0].lifecycle
+
+    assert lifecycle is not None
+    assert lifecycle.newly_active_bytes == 10
+    assert lifecycle.released_bytes == 10
+
+
 def test_cross_run_matches_only_default_pool_without_mapping() -> None:
     before = make_run(
         [
@@ -217,6 +279,30 @@ def test_missing_stack_history_warns_or_errors() -> None:
         )
 
 
+def test_missing_device_trace_is_reported_as_unavailable() -> None:
+    before = segment(active=10)
+    after = segment(active=20)
+    before["device"] = 0
+    after["device"] = 0
+    run = make_run(
+        [snapshot(before), snapshot(after)],
+        labels=("before", "after"),
+    )
+
+    comparison = run.compare(
+        "before",
+        "after",
+        attribution=MemoryAttributionOptions(events=True),
+    )
+
+    assert comparison.events_available is False
+    assert comparison.events_complete is False
+    assert any(
+        "allocator event history is unavailable" in warning
+        for warning in comparison.warnings
+    )
+
+
 def test_event_history_uses_point_boundary_marker() -> None:
     markers: list[str] = []
 
@@ -333,7 +419,7 @@ def test_timeline_reports_absolute_state_and_zero_deltas() -> None:
     assert released.delta.reserved_bytes == -20
     assert "steady" in timeline.to_text(include_unchanged=True)
     compact = timeline.to_text(include_unchanged=False)
-    assert "steady" in compact
+    assert "steady" not in compact
     assert "allocated=10 B (delta +0 B)" not in compact
 
 
@@ -539,3 +625,16 @@ def test_attributed_timeline_and_phase_load_each_point_once(monkeypatch) -> None
         (candidate.run_id, 0),
         (candidate.run_id, 1),
     ]
+
+
+def test_phase_comparison_rejects_ranges_from_the_same_run() -> None:
+    run = make_run(
+        [snapshot(segment(active=10)), snapshot(segment(active=20))],
+        labels=("start", "end"),
+    )
+
+    with pytest.raises(ValueError, match="independent runs"):
+        compare_phases(
+            run.between("start", "end"),
+            run.between("start", "end"),
+        )
