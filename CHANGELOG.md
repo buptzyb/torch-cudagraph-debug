@@ -68,6 +68,8 @@
 - Categorized, runnable Tensor Debug, Memory Debug, CLI, distributed, and
   TensorBoard examples with quickstarts and complete synthetic workflows.
 - Concise root quick starts with dedicated Tensor Debug and Memory Debug guides.
+- Repository-scoped `tcgd-case-study` skill and `tcgd-debugger` custom agent for
+  Codex and Claude Code, with one shared tool-first investigation workflow.
 
 ### Changed
 

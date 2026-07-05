@@ -1,4 +1,9 @@
 include README.md
+include AGENTS.md
+include CLAUDE.md
+recursive-include .agents *.md
+recursive-include .claude *.md
+recursive-include .codex *.toml
 include CHANGELOG.md
 include LICENSE
 include CONTRIBUTING.md

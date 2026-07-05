@@ -237,6 +237,15 @@ Continue with the [Memory Debug guide](docs/memory_debug.md), the
 [API reference](docs/api.md#memory-debug), or the
 [`tcgd-memory` CLI reference](docs/api.md#cli).
 
+## Agent Workflows
+
+The repository includes a `tcgd-case-study` skill and a `tcgd-debugger` custom
+agent for running fresh, evidence-backed investigations against real
+applications. Both workflows start with the public Probe or Recorder APIs and
+preserve commands, logs, bundles, and reports for review.
+
+See [Agent Workflows](docs/agent_workflows.md) for Codex and Claude Code usage.
+
 ## Documentation
 
 | Resource | Purpose |
@@ -246,6 +255,7 @@ Continue with the [Memory Debug guide](docs/memory_debug.md), the
 | [Memory Debug guide](docs/memory_debug.md) | Quick probes, recording, history policy, timelines, lifetimes, phases, groups, reports, CLI |
 | [API reference](docs/api.md) | Public signatures, result models, errors, and experimental helpers |
 | [Examples](examples/README.md) | Ordered runnable workflows and integration examples |
+| [Agent workflows](docs/agent_workflows.md) | Repository-scoped case-study skill and custom-agent entry points |
 
 ## Development
 

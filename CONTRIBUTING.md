@@ -33,6 +33,18 @@ python -m twine check dist/*
 GPU tests are marked with `pytest.mark.gpu` but are included in the default test
 suite; they skip automatically when CUDA or the native extension is unavailable.
 
+## Agent Assets
+
+The canonical case-study skill lives at
+`.agents/skills/tcgd-case-study/SKILL.md`. Claude Code discovers that same
+directory through `.claude/skills/tcgd-case-study`; keep it as a symbolic link
+and do not copy the skill content into a second location.
+
+Codex and Claude custom-agent files contain only runtime-specific metadata and
+the shared role contract. Put investigation procedure changes in the canonical
+skill, then run `python -m pytest -q tests/test_agent_assets.py` to validate
+metadata, links, and referenced examples.
+
 ## Native Extension Notes
 
 The host callback path must not call Python or CUDA APIs. Keep callback work to
