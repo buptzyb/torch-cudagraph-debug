@@ -127,6 +127,7 @@ bash "${TCGD_REPO_ROOT}/examples/tensor_debug/cli/workflows.sh" \
   "${EXAMPLE_ROOT}/tensor-cli"
 
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/quickstart.py"
+python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/private_pool_inactive.py"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/snapshot_comparison.py"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/timeline_and_reports.py" \
   --output-dir "${EXAMPLE_ROOT}/timeline"

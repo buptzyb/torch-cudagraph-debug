@@ -11,10 +11,14 @@ shows shell automation over persisted bundles.
 state with one `MemoryProbe`. It discovers all pools present in
 `torch.cuda.memory._snapshot()` and performs an immediate same-probe comparison.
 
+`probe/private_pool_inactive.py` releases a transient capture allocation, then
+shows why the graph private pool remains reserved even though most of its
+capacity is inactive.
+
 `probe/snapshot_comparison.py` compares endpoints from independent probes. Use
 this pattern when the two snapshots do not share one Probe lifecycle.
 
-Neither Probe example requires allocator history.
+None of the Probe examples require allocator history.
 
 ## Recorder And Run Workflow
 

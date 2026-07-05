@@ -161,6 +161,11 @@ Use public comparison, timeline, lifetime, run-group, and report APIs or the
   data permits it.
 - For distributed memory results, keep rank-local values visible. Do not sum
   unrelated per-GPU allocator totals into a misleading global allocation.
+- Treat high reserved and low active memory in a CUDA Graph private pool as
+  retained pool capacity first, not as a demonstrated tensor leak. Inactive
+  blocks remain unavailable to the default pool while the graph retains its
+  replay-safe addresses; inspect capture peaks, sharing, fragmentation, and
+  graph lifetime before assigning cause.
 
 Copy the exact public output into the `Tool Evidence` section of `REPORT.md` or
 link to the saved log containing it.

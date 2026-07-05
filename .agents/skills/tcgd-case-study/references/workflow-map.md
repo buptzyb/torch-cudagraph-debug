@@ -23,6 +23,7 @@ requirement.
 | Question | Workflow | Public API | Starting example |
 |---|---|---|---|
 | Which allocator pools and streams changed between two points? | Probe | `MemoryProbe.snapshot()`, `MemoryProbe.compare()` | `examples/memory_debug/probe/quickstart.py` |
+| Why is a CUDA Graph private pool mostly inactive but still reserved? | Probe | `MemoryStats.inactive_bytes` | `examples/memory_debug/probe/private_pool_inactive.py` |
 | How do independently collected endpoints differ? | Probe | `compare_snapshots()` | `examples/memory_debug/probe/snapshot_comparison.py` |
 | Where in a phase did memory grow? | Recorder | `MemoryRecorder`, `MemoryRun.timeline()` | `examples/memory_debug/recorder/timeline_and_reports.py` |
 | Which stacks or allocator events caused growth? | Recorder plus application-owned history | `MemoryAttributionOptions` | `examples/memory_debug/recorder/stack_and_event_attribution.py` |

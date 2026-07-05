@@ -81,6 +81,10 @@ MAJOR_WORKFLOW_COVERAGE = {
         "probe.snapshot(",
         "probe.compare(",
     ),
+    "memory_debug/probe/private_pool_inactive.py": (
+        "inactive_bytes",
+        "graph.replay()",
+    ),
     "memory_debug/probe/snapshot_comparison.py": ("compare_snapshots(",),
     "memory_debug/recorder/timeline_and_reports.py": (
         'record_point("during_capture")',

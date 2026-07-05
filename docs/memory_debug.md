@@ -65,6 +65,34 @@ stream)` pair. Its `pool_stats` and `allocator_scope_stats` are derived views.
 Ownership and workflow metadata live on the snapshot or point, not on an
 observation.
 
+## Interpreting CUDA Graph Private-Pool Inactive Memory
+
+`MemoryStats` separates allocator capacity from current block use:
+
+- `reserved_bytes` is the total size of CUDA segments retained by the pool.
+- `active_bytes` is memory allocated or still awaiting a stream-safe free.
+- `inactive_bytes` is derived as `reserved_bytes - active_bytes` and is
+  currently reusable under that pool's allocator rules.
+
+For a CUDA Graph private pool, inactive does not mean that the memory is
+available to the default pool or has been returned to the CUDA driver. Capture
+records kernel arguments, including device addresses. Replay submits those
+recorded kernels without rerunning the Python allocation and deallocation calls
+that constructed the captured workload, so the graph must retain its address
+space across replays. PyTorch keeps the private pool alive until the graph and
+the tensors created during capture go out of scope; see
+[Graph memory management](https://docs.pytorch.org/docs/main/notes/cuda.html#graph-memory-management).
+
+A graph may therefore reach a high reserved-memory watermark during capture,
+then show low active memory after transient activations or workspaces are freed.
+The difference appears as inactive private-pool capacity. This is not by itself
+evidence of a tensor leak, but it is still unavailable to unrelated default-pool
+allocations. Investigate capture-time peaks, graph count and pool sharing,
+segment layout, and graph lifetime before deciding whether the reservation is
+necessary. The
+[private-pool inactive example](../examples/memory_debug/probe/private_pool_inactive.py)
+demonstrates this state without allocator history.
+
 ## Quick Two-Point Comparison
 
 Use `MemoryProbe` when labels, persistence, and multi-point analysis are not

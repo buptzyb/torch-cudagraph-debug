@@ -215,6 +215,10 @@ Read the report top-down:
 The main signal here is `total[private]`: graph capture added a 16 MiB active
 allocation in a private pool. The small default-pool change is separate
 allocator/runtime activity; this state-only report does not identify its owner.
+Private-pool capacity can remain reserved after its blocks become inactive; see
+the [guide](docs/memory_debug.md#interpreting-cuda-graph-private-pool-inactive-memory)
+and [focused example](examples/memory_debug/probe/private_pool_inactive.py) for
+the correct interpretation.
 
 Absolute values, allocator rounding, pool and stream IDs, incidental
 default-pool activity, and the changed rows that appear can vary with the
