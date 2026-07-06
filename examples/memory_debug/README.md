@@ -30,7 +30,7 @@ mode required by its analysis and disables it during cleanup:
 | `timeline_and_reports.py` | state | live allocation stacks, capture points, persistence, all report formats |
 | `history_requirements.py` | disabled | state comparison, warn/error policy, snapshot-inferred lifetimes |
 | `stack_and_event_attribution.py` | all | allocation stacks, exact events, embedded lifetimes |
-| `allocation_lifetimes.py` | all | active-at and born-between cohorts with exact releases |
+| `allocation_lifetimes.py` | all | active-at and born-between cohorts with exact free transitions |
 | `compare_runs_and_phases.py` | disabled | cross-run point/phase comparison and explicit private-pool mapping |
 | `distributed_run_groups.py` | disabled | rank-local bundles, group extrema, group phase comparison |
 

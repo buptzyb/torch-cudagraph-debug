@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -14,12 +16,15 @@ from .events import (
     extract_event_window_from_snapshot,
 )
 from .allocator_snapshot import (
+    ALLOCATION_LIFETIME_ACTIONS,
     ACTIVE_STATES,
+    AWAITING_FREE_STATES,
     AllocatorTraceEntry,
+    KNOWN_TRACE_ACTIONS,
+    OWNER_ACTIVE_STATES,
     normalize_pool_id,
     normalize_snapshot,
     normalize_trace_entries,
-    stack_key_from_frames,
     trace_device_indices,
 )
 
@@ -31,22 +36,105 @@ if TYPE_CHECKING:
 
 
 LifetimeConfidence = Literal["event_exact", "snapshot_inferred"]
+LifetimeTerminalState = Literal[
+    "owner_active", "awaiting_free", "free_completed", "unknown"
+]
+_STACK_FIELDS = (
+    "filename",
+    "line",
+    "name",
+    "fx_node_op",
+    "fx_node_name",
+    "fx_original_trace",
+)
+
+
+def _normalize_frames(
+    frames: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    return tuple(
+        {
+            key: int(frame[key]) if key == "line" else str(frame[key])
+            for key in _STACK_FIELDS
+            if frame.get(key) is not None
+        }
+        for frame in frames
+    )
+
+
+def _stack_key(
+    frames: Sequence[Mapping[str, Any]],
+    *,
+    depth: int | None = None,
+    fallback: str = "<unattributed>",
+) -> str:
+    if not frames:
+        return fallback
+    selected = frames if depth is None else frames[:depth]
+    return " <- ".join(
+        f"{frame.get('filename', '<unknown>')}:{frame.get('line', 0)}:"
+        f"{frame.get('name', '<unknown>')}"
+        for frame in selected
+    )
+
+
+def _stack_fingerprint(frames: Sequence[Mapping[str, Any]]) -> str:
+    if not frames:
+        return "unattributed"
+    encoded = json.dumps(
+        list(frames), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cohort_id(
+    device: int | None,
+    pool_id: tuple[Any, ...],
+    stack_fingerprint: str,
+    unattributed_size: tuple[int, int] | None,
+) -> str:
+    payload = [device, list(pool_id), stack_fingerprint, unattributed_size]
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    return f"cohort-{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
 @dataclass(frozen=True)
 class CohortPointState:
-    """Active allocation state for one cohort at one memory point."""
+    """Owner-active and stream-waiting state at one memory point."""
 
     point_index: int
     point_label: str
-    active_bytes: int
-    requested_bytes: int
-    block_count: int
+    owner_active_bytes: int
+    owner_requested_bytes: int
+    owner_active_count: int
+    awaiting_free_bytes: int
+    awaiting_free_requested_bytes: int
+    awaiting_free_count: int
+
+    @property
+    def active_bytes(self) -> int:
+        return self.owner_active_bytes + self.awaiting_free_bytes
+
+    @property
+    def requested_bytes(self) -> int:
+        return self.owner_requested_bytes + self.awaiting_free_requested_bytes
+
+    @property
+    def block_count(self) -> int:
+        return self.owner_active_count + self.awaiting_free_count
 
     def to_dict(self) -> dict[str, object]:
         return {
             "point_index": self.point_index,
             "point_label": self.point_label,
+            "owner_active_bytes": self.owner_active_bytes,
+            "owner_requested_bytes": self.owner_requested_bytes,
+            "owner_active_count": self.owner_active_count,
+            "awaiting_free_bytes": self.awaiting_free_bytes,
+            "awaiting_free_requested_bytes": self.awaiting_free_requested_bytes,
+            "awaiting_free_count": self.awaiting_free_count,
             "active_bytes": self.active_bytes,
             "requested_bytes": self.requested_bytes,
             "block_count": self.block_count,
@@ -78,15 +166,46 @@ class CohortSizeBucket:
 
 
 @dataclass(frozen=True)
+class CohortSizeOutcome:
+    """Allocation sizes correlated with their state at the analysis end."""
+
+    size_bytes: int
+    requested_bytes: int
+    terminal_state: LifetimeTerminalState
+    count: int
+    total_bytes: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "size_bytes": self.size_bytes,
+            "requested_bytes": self.requested_bytes,
+            "terminal_state": self.terminal_state,
+            "count": self.count,
+            "total_bytes": self.total_bytes,
+        }
+
+    def to_row(self, cohort_id: str) -> dict[str, object]:
+        return {"cohort_id": cohort_id, **self.to_dict()}
+
+
+@dataclass(frozen=True)
 class _CohortTransition:
     start_index: int
     end_index: int
     start_label: str
     end_label: str
-    stack_key: str
+    stack_frames: tuple[Mapping[str, Any], ...]
+    stack_fallback: str
     confidence: LifetimeConfidence
     size_bytes: int
     count: int
+
+    @property
+    def stack_key(self) -> str:
+        return _stack_key(self.stack_frames, fallback=self.stack_fallback)
+
+    def display_stack(self, depth: int) -> str:
+        return _stack_key(self.stack_frames, depth=depth, fallback=self.stack_fallback)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -96,6 +215,7 @@ class _CohortTransition:
             "end_label": self.end_label,
             "stack_key": self.stack_key,
             "confidence": self.confidence,
+            "stack_frames": [dict(frame) for frame in self.stack_frames],
             "size_bytes": self.size_bytes,
             "count": self.count,
         }
@@ -105,13 +225,18 @@ class _CohortTransition:
 
 
 @dataclass(frozen=True)
-class CohortRelease(_CohortTransition):
-    """Owner-release observations grouped by interval and free stack."""
+class CohortBirth(_CohortTransition):
+    """Allocation births grouped by marker interval and allocation stack."""
 
 
 @dataclass(frozen=True)
-class CohortBirth(_CohortTransition):
-    """Allocation births grouped by marker interval and allocation stack."""
+class CohortFreeRequest(_CohortTransition):
+    """Storage free requests grouped by interval and request stack."""
+
+
+@dataclass(frozen=True)
+class CohortFreeCompletion(_CohortTransition):
+    """Allocator reuse-ready transitions grouped by marker interval."""
 
 
 @dataclass(frozen=True)
@@ -119,18 +244,25 @@ class AllocationCohort:
     """Allocation instances sharing a device, pool, and allocation stack."""
 
     cohort_id: str
+    display_rank: int
     device: int | None
     pool_id: tuple[Any, ...]
-    stack_key: str
+    stack_fingerprint: str
+    stack_frames: tuple[Mapping[str, Any], ...]
     streams: tuple[Any, ...]
     points: tuple[CohortPointState, ...]
     size_histogram: tuple[CohortSizeBucket, ...]
+    size_outcomes: tuple[CohortSizeOutcome, ...]
     births: tuple[CohortBirth, ...]
-    releases: tuple[CohortRelease, ...]
+    free_requests: tuple[CohortFreeRequest, ...]
+    free_completions: tuple[CohortFreeCompletion, ...]
     peak_active_bytes: int
-    peak_live_bytes: int
+    peak_owner_active_bytes: int
+    peak_awaiting_free_bytes: int
+    event_owner_peak_bytes: int
+    event_unreusable_peak_bytes: int
     peak_block_count: int
-    impact_bytes: int
+    snapshot_active_span_bytes: int
     first_seen_index: int
     first_seen_label: str
     last_seen_index: int
@@ -141,24 +273,57 @@ class AllocationCohort:
     event_exact_birth_count: int
     snapshot_inferred_birth_bytes: int
     snapshot_inferred_birth_count: int
-    event_exact_release_bytes: int
-    event_exact_release_count: int
-    snapshot_inferred_release_bytes: int
-    snapshot_inferred_release_count: int
-    still_active_bytes: int
-    still_active_count: int
+    event_exact_free_requested_bytes: int
+    event_exact_free_requested_count: int
+    snapshot_inferred_free_requested_bytes: int
+    snapshot_inferred_free_requested_count: int
+    event_exact_free_completed_bytes: int
+    event_exact_free_completed_count: int
+    snapshot_inferred_free_completed_bytes: int
+    snapshot_inferred_free_completed_count: int
+    owner_active_at_end_bytes: int
+    owner_active_at_end_count: int
+    awaiting_free_at_end_bytes: int
+    awaiting_free_at_end_count: int
+
+    @property
+    def stack_key(self) -> str:
+        return _stack_key(self.stack_frames)
+
+    def display_stack(self, depth: int) -> str:
+        return _stack_key(self.stack_frames, depth=depth)
+
+    @property
+    def free_requested_bytes(self) -> int:
+        return (
+            self.event_exact_free_requested_bytes
+            + self.snapshot_inferred_free_requested_bytes
+        )
+
+    @property
+    def free_completed_bytes(self) -> int:
+        return (
+            self.event_exact_free_completed_bytes
+            + self.snapshot_inferred_free_completed_bytes
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "cohort_id": self.cohort_id,
+            "display_rank": self.display_rank,
             "device": self.device,
             "pool_id": list(self.pool_id),
             "stack_key": self.stack_key,
+            "stack_fingerprint": self.stack_fingerprint,
+            "stack_frames": [dict(frame) for frame in self.stack_frames],
             "streams": list(self.streams),
             "peak_active_bytes": self.peak_active_bytes,
-            "peak_live_bytes": self.peak_live_bytes,
+            "peak_owner_active_bytes": self.peak_owner_active_bytes,
+            "peak_awaiting_free_bytes": self.peak_awaiting_free_bytes,
+            "event_owner_peak_bytes": self.event_owner_peak_bytes,
+            "event_unreusable_peak_bytes": self.event_unreusable_peak_bytes,
             "peak_block_count": self.peak_block_count,
-            "impact_bytes": self.impact_bytes,
+            "snapshot_active_span_bytes": self.snapshot_active_span_bytes,
             "first_seen_index": self.first_seen_index,
             "first_seen_label": self.first_seen_label,
             "last_seen_index": self.last_seen_index,
@@ -169,29 +334,44 @@ class AllocationCohort:
             "event_exact_birth_count": self.event_exact_birth_count,
             "snapshot_inferred_birth_bytes": self.snapshot_inferred_birth_bytes,
             "snapshot_inferred_birth_count": self.snapshot_inferred_birth_count,
-            "event_exact_release_bytes": self.event_exact_release_bytes,
-            "event_exact_release_count": self.event_exact_release_count,
-            "snapshot_inferred_release_bytes": self.snapshot_inferred_release_bytes,
-            "snapshot_inferred_release_count": self.snapshot_inferred_release_count,
-            "still_active_bytes": self.still_active_bytes,
-            "still_active_count": self.still_active_count,
+            "free_requested_bytes": self.free_requested_bytes,
+            "event_exact_free_requested_bytes": self.event_exact_free_requested_bytes,
+            "event_exact_free_requested_count": self.event_exact_free_requested_count,
+            "snapshot_inferred_free_requested_bytes": self.snapshot_inferred_free_requested_bytes,
+            "snapshot_inferred_free_requested_count": self.snapshot_inferred_free_requested_count,
+            "free_completed_bytes": self.free_completed_bytes,
+            "event_exact_free_completed_bytes": self.event_exact_free_completed_bytes,
+            "event_exact_free_completed_count": self.event_exact_free_completed_count,
+            "snapshot_inferred_free_completed_bytes": self.snapshot_inferred_free_completed_bytes,
+            "snapshot_inferred_free_completed_count": self.snapshot_inferred_free_completed_count,
+            "owner_active_at_end_bytes": self.owner_active_at_end_bytes,
+            "owner_active_at_end_count": self.owner_active_at_end_count,
+            "awaiting_free_at_end_bytes": self.awaiting_free_at_end_bytes,
+            "awaiting_free_at_end_count": self.awaiting_free_at_end_count,
             "points": [item.to_dict() for item in self.points],
             "size_histogram": [item.to_dict() for item in self.size_histogram],
+            "size_outcomes": [item.to_dict() for item in self.size_outcomes],
             "births": [item.to_dict() for item in self.births],
-            "releases": [item.to_dict() for item in self.releases],
+            "free_requests": [item.to_dict() for item in self.free_requests],
+            "free_completions": [item.to_dict() for item in self.free_completions],
         }
 
     def to_row(self) -> dict[str, object]:
         return {
             "cohort_id": self.cohort_id,
+            "display_rank": self.display_rank,
             "device": "unknown" if self.device is None else self.device,
             "pool_id": "pool[" + ",".join(str(item) for item in self.pool_id) + "]",
             "streams": ";".join(f"stream[{item}]" for item in self.streams),
             "stack_key": self.stack_key,
+            "stack_fingerprint": self.stack_fingerprint,
             "peak_active_bytes": self.peak_active_bytes,
-            "peak_live_bytes": self.peak_live_bytes,
+            "peak_owner_active_bytes": self.peak_owner_active_bytes,
+            "peak_awaiting_free_bytes": self.peak_awaiting_free_bytes,
+            "event_owner_peak_bytes": self.event_owner_peak_bytes,
+            "event_unreusable_peak_bytes": self.event_unreusable_peak_bytes,
             "peak_block_count": self.peak_block_count,
-            "impact_bytes": self.impact_bytes,
+            "snapshot_active_span_bytes": self.snapshot_active_span_bytes,
             "first_seen_index": self.first_seen_index,
             "first_seen_label": self.first_seen_label,
             "last_seen_index": self.last_seen_index,
@@ -202,12 +382,20 @@ class AllocationCohort:
             "event_exact_birth_count": self.event_exact_birth_count,
             "snapshot_inferred_birth_bytes": self.snapshot_inferred_birth_bytes,
             "snapshot_inferred_birth_count": self.snapshot_inferred_birth_count,
-            "event_exact_release_bytes": self.event_exact_release_bytes,
-            "event_exact_release_count": self.event_exact_release_count,
-            "snapshot_inferred_release_bytes": self.snapshot_inferred_release_bytes,
-            "snapshot_inferred_release_count": self.snapshot_inferred_release_count,
-            "still_active_bytes": self.still_active_bytes,
-            "still_active_count": self.still_active_count,
+            "free_requested_bytes": self.free_requested_bytes,
+            "event_exact_free_requested_bytes": self.event_exact_free_requested_bytes,
+            "event_exact_free_requested_count": self.event_exact_free_requested_count,
+            "snapshot_inferred_free_requested_bytes": self.snapshot_inferred_free_requested_bytes,
+            "snapshot_inferred_free_requested_count": self.snapshot_inferred_free_requested_count,
+            "free_completed_bytes": self.free_completed_bytes,
+            "event_exact_free_completed_bytes": self.event_exact_free_completed_bytes,
+            "event_exact_free_completed_count": self.event_exact_free_completed_count,
+            "snapshot_inferred_free_completed_bytes": self.snapshot_inferred_free_completed_bytes,
+            "snapshot_inferred_free_completed_count": self.snapshot_inferred_free_completed_count,
+            "owner_active_at_end_bytes": self.owner_active_at_end_bytes,
+            "owner_active_at_end_count": self.owner_active_at_end_count,
+            "awaiting_free_at_end_bytes": self.awaiting_free_at_end_bytes,
+            "awaiting_free_at_end_count": self.awaiting_free_at_end_count,
         }
 
 
@@ -223,7 +411,7 @@ class _BlockObservation:
     size_bytes: int
     requested_bytes: int
     state: str
-    stack_key: str
+    stack_frames: tuple[Mapping[str, Any], ...]
 
 
 @dataclass
@@ -234,12 +422,14 @@ class _AllocationInstance:
     address: int | None
     size_bytes: int
     requested_bytes: int
-    stack_key: str
+    stack_frames: tuple[Mapping[str, Any], ...]
     observations: dict[int, _BlockObservation] = field(default_factory=dict)
     birth: CohortBirth | None = None
-    release: CohortRelease | None = None
+    free_request: CohortFreeRequest | None = None
+    free_completion: CohortFreeCompletion | None = None
     birth_order: int | None = None
-    release_order: int | None = None
+    free_request_order: int | None = None
+    free_completion_order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -327,13 +517,17 @@ def _analyze_allocation_lifetimes(
     observations, histories = _scan_points(
         points,
         events=options.events,
-        stack_depth=options.stack_depth,
         raw_snapshots=raw_snapshots,
     )
     warnings = [warning for point in points for warning in point.warnings]
     if options.events:
         for history in histories:
             warnings.extend(history.warnings)
+            unknown_actions = sorted(
+                {entry.action for entry in history.entries} - KNOWN_TRACE_ACTIONS
+            )
+            if unknown_actions:
+                warnings.append(f"unknown allocator actions: {unknown_actions}")
         if any(not item.available or not item.complete for item in histories):
             message = (
                 "allocator event history is unavailable or incomplete; "
@@ -343,7 +537,8 @@ def _analyze_allocation_lifetimes(
                 raise MemoryHistoryError(message)
             warnings.append(message)
 
-    instances = _track_instances(points, observations, histories, options.stack_depth)
+    instances, replay_warnings = _track_instances(points, observations, histories)
+    warnings.extend(replay_warnings)
     if active_at is not None:
         instances = [item for item in instances if active_at.index in item.observations]
     elif born_between is not None:
@@ -368,7 +563,7 @@ def _analyze_allocation_lifetimes(
             )
     total_instance_bytes = sum(item.size_bytes for item in instances)
     attributed_instance_bytes = sum(
-        item.size_bytes for item in instances if item.stack_key != "<unattributed>"
+        item.size_bytes for item in instances if item.stack_frames
     )
     if attributed_instance_bytes < total_instance_bytes:
         message = (
@@ -385,7 +580,6 @@ def _analyze_allocation_lifetimes(
         points,
         active_at=active_at,
         born_between=born_between,
-        limit=options.limit,
     )
     return MemoryAllocationLifetimeAnalysis(
         source_kind=source_kind,
@@ -401,6 +595,8 @@ def _analyze_allocation_lifetimes(
         history_complete=options.events and all(item.complete for item in histories),
         total_instance_bytes=total_instance_bytes,
         attributed_instance_bytes=attributed_instance_bytes,
+        display_stack_depth=options.stack_depth,
+        display_limit=options.limit,
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
@@ -416,7 +612,6 @@ def _scan_points(
     points: Sequence[Any],
     *,
     events: bool,
-    stack_depth: int,
     raw_snapshots: Sequence[Any] | None,
 ) -> tuple[
     dict[int, tuple[_BlockObservation, ...]],
@@ -430,17 +625,13 @@ def _scan_points(
     if raw_snapshots is not None and len(raw_snapshots) != len(points):
         raise ValueError("raw snapshot count must match lifetime points")
     snapshots = (
-        raw_snapshots
+        iter(raw_snapshots)
         if raw_snapshots is not None
-        else tuple(point.raw_snapshot() for point in points)
+        else (point.raw_snapshot() for point in points)
     )
     for point, snapshot in zip(points, snapshots):
         segments = normalize_snapshot(snapshot)
-        observations[point.index] = _active_blocks_from_segments(
-            point,
-            segments,
-            stack_depth=stack_depth,
-        )
+        observations[point.index] = _active_blocks_from_segments(point, segments)
         if previous is None or previous_segments is None:
             previous = point
             previous_segments = segments
@@ -509,8 +700,6 @@ def _scan_points(
 def _active_blocks_from_segments(
     point: Any,
     segments: Sequence[Mapping[str, Any]],
-    *,
-    stack_depth: int,
 ) -> tuple[_BlockObservation, ...]:
     rows: list[_BlockObservation] = []
     ordinal = 0
@@ -536,9 +725,7 @@ def _active_blocks_from_segments(
                     size_bytes=int(block.get("size", 0) or 0),
                     requested_bytes=int(block.get("requested_size", 0) or 0),
                     state=str(block.get("state")),
-                    stack_key=stack_key_from_frames(
-                        block.get("frames") or (), depth=stack_depth
-                    ),
+                    stack_frames=_normalize_frames(block.get("frames") or ()),
                 )
             )
             ordinal += 1
@@ -549,11 +736,11 @@ def _track_instances(
     points: Sequence[Any],
     observations: Mapping[int, Sequence[_BlockObservation]],
     histories: Sequence[_IntervalHistory],
-    stack_depth: int,
-) -> list[_AllocationInstance]:
+) -> tuple[list[_AllocationInstance], tuple[str, ...]]:
     instances: list[_AllocationInstance] = []
     current: dict[tuple[int | None, int], _AllocationInstance] = {}
     missing_address: list[_AllocationInstance] = []
+    warnings: list[str] = []
     event_order = 0
 
     def create_from_block(
@@ -569,13 +756,38 @@ def _track_instances(
             address=block.address,
             size_bytes=block.size_bytes,
             requested_bytes=block.requested_bytes,
-            stack_key=block.stack_key,
+            stack_frames=block.stack_frames,
             observations={block.point_index: block},
             birth=birth,
             birth_order=birth_order,
         )
         instances.append(item)
         return item
+
+    def infer_free_request(
+        history: _IntervalHistory, instance: _AllocationInstance
+    ) -> None:
+        nonlocal event_order
+        if instance.free_request is not None:
+            return
+        event_order += 1
+        instance.free_request = _transition_from_snapshot(
+            CohortFreeRequest, history, instance
+        )
+        instance.free_request_order = event_order
+
+    def infer_free_completion(
+        history: _IntervalHistory, instance: _AllocationInstance
+    ) -> None:
+        nonlocal event_order
+        infer_free_request(history, instance)
+        if instance.free_completion is not None:
+            return
+        event_order += 1
+        instance.free_completion = _transition_from_snapshot(
+            CohortFreeCompletion, history, instance
+        )
+        instance.free_completion_order = event_order
 
     for block in observations.get(points[0].index, ()):
         item = create_from_block(block)
@@ -587,7 +799,7 @@ def _track_instances(
     for history in histories:
         for entry in history.entries:
             event_order += 1
-            if entry.addr is None or entry.action not in {"alloc", "free_requested"}:
+            if entry.addr is None or entry.action not in ALLOCATION_LIFETIME_ACTIONS:
                 continue
             if entry.action == "alloc" and entry.size_bytes == 0:
                 continue
@@ -597,27 +809,56 @@ def _track_instances(
             if entry.action == "free_requested":
                 if instance is None or not _event_size_matches(entry, instance):
                     continue
-                instance.release = _release_from_event(
-                    history, instance, entry, stack_depth=stack_depth
-                )
-                instance.release_order = event_order
+                if instance.free_request is None:
+                    instance.free_request = _transition_from_event(
+                        CohortFreeRequest, history, instance, entry
+                    )
+                    instance.free_request_order = event_order
+                continue
+            if entry.action == "free_completed":
+                if instance is None or not _event_size_matches(entry, instance):
+                    warnings.append(
+                        "free_completed could not be matched to an active allocation "
+                        f"on device {entry.device_index} at address {entry.addr}"
+                    )
+                    continue
+                if instance.free_request is None:
+                    instance.free_request = _transition_from_snapshot(
+                        CohortFreeRequest, history, instance
+                    )
+                    instance.free_request_order = event_order
+                    event_order += 1
+                    warnings.append(
+                        "free_completed had no matching free_requested; inferred the request"
+                    )
+                if instance.free_completion is None:
+                    instance.free_completion = _transition_from_event(
+                        CohortFreeCompletion, history, instance, entry
+                    )
+                    instance.free_completion_order = event_order
                 assert key is not None
                 current.pop(key, None)
                 continue
+
             if instance is not None:
-                if instance.release is None:
-                    instance.release = _snapshot_release(history, instance)
-                    instance.release_order = event_order
+                infer_free_completion(history, instance)
+                warnings.append(
+                    "allocation address was reused before a matching free_completed "
+                    f"event was observed on device {entry.device_index} at "
+                    f"address {entry.addr}"
+                )
                 assert key is not None
                 current.pop(key, None)
             size = abs(entry.size_bytes)
             pool_id = _event_pool_id(entry, history.pool_ranges)
+            frames = _normalize_frames(entry.frames)
             birth = CohortBirth(
                 start_index=history.start.index,
                 end_index=history.end.index,
                 start_label=_state_label(history.start),
                 end_label=_state_label(history.end),
-                stack_key=stack_key_from_frames(entry.frames, depth=stack_depth),
+                stack_frames=frames,
+                stack_fallback="<unattributed>",
                 confidence="event_exact",
                 size_bytes=size,
                 count=1,
@@ -629,7 +870,7 @@ def _track_instances(
                 address=entry.addr,
                 size_bytes=size,
                 requested_bytes=size,
-                stack_key=birth.stack_key,
+                stack_frames=frames,
                 birth=birth,
                 birth_order=event_order,
             )
@@ -640,7 +881,7 @@ def _track_instances(
         exact_blocks, fallback_blocks = _block_indexes(end_blocks)
         consumed_after: set[int] = set()
         next_current: dict[tuple[int | None, int], _AllocationInstance] = {}
-        for key, instance in current.items():
+        for _key, instance in current.items():
             block_index = _matching_block_index(
                 exact_blocks,
                 fallback_blocks,
@@ -648,23 +889,30 @@ def _track_instances(
                 consumed_after,
             )
             if block_index is None:
-                if instance.release is None:
-                    event_order += 1
-                    instance.release = _snapshot_release(history, instance)
-                    instance.release_order = event_order
+                infer_free_completion(history, instance)
                 continue
             block = end_blocks[block_index]
+            previous = _latest_observation(instance)
+            generation_reused = (
+                previous is not None
+                and previous.state in AWAITING_FREE_STATES
+                and block.state in OWNER_ACTIVE_STATES
+            ) or (
+                instance.free_request is not None and block.state in OWNER_ACTIVE_STATES
+            )
+            if generation_reused:
+                infer_free_completion(history, instance)
+                continue
             consumed_after.add(block_index)
+            if block.state in AWAITING_FREE_STATES and instance.free_request is None:
+                infer_free_request(history, instance)
             instance.observations[block.point_index] = block
             _refine_instance_from_block(instance, block)
             assert block.address is not None
             next_current[(block.device, block.address)] = instance
 
         for instance in missing_address:
-            if instance.release is None:
-                event_order += 1
-                instance.release = _snapshot_release(history, instance)
-                instance.release_order = event_order
+            infer_free_completion(history, instance)
         missing_address = []
 
         for block_index, block in enumerate(end_blocks):
@@ -676,7 +924,8 @@ def _track_instances(
                 end_index=history.end.index,
                 start_label=_state_label(history.start),
                 end_label=_state_label(history.end),
-                stack_key=block.stack_key,
+                stack_frames=block.stack_frames,
+                stack_fallback="<unattributed>",
                 confidence="snapshot_inferred",
                 size_bytes=block.size_bytes,
                 count=1,
@@ -686,12 +935,14 @@ def _track_instances(
                 birth=birth,
                 birth_order=event_order,
             )
+            if block.state in AWAITING_FREE_STATES:
+                infer_free_request(history, item)
             if block.address is None:
                 missing_address.append(item)
             else:
                 next_current[(block.device, block.address)] = item
         current = next_current
-    return instances
+    return instances, tuple(dict.fromkeys(warnings))
 
 
 def _find_address_instance(
@@ -763,13 +1014,21 @@ def _event_size_matches(
     }
 
 
+def _latest_observation(
+    instance: _AllocationInstance,
+) -> _BlockObservation | None:
+    return max(
+        instance.observations.values(), key=lambda item: item.point_index, default=None
+    )
+
+
 def _refine_instance_from_block(
     instance: _AllocationInstance, block: _BlockObservation
 ) -> None:
     if instance.pool_id == ("unknown",):
         instance.pool_id = block.pool_id
-    if instance.stack_key == "<unattributed>" and block.stack_key != "<unattributed>":
-        instance.stack_key = block.stack_key
+    if not instance.stack_frames and block.stack_frames:
+        instance.stack_frames = block.stack_frames
     instance.device = block.device
     instance.stream = block.stream
     instance.address = block.address
@@ -788,34 +1047,38 @@ def _event_pool_id(
     return pool_ranges.find(entry.device_index, entry.addr) or ("unknown",)
 
 
-def _release_from_event(
+def _transition_from_event(
+    kind: type[TransitionT],
     history: _IntervalHistory,
     instance: _AllocationInstance,
     entry: AllocatorTraceEntry,
-    *,
-    stack_depth: int,
-) -> CohortRelease:
-    return CohortRelease(
+) -> TransitionT:
+    frames = _normalize_frames(entry.frames)
+    return kind(
         start_index=history.start.index,
         end_index=history.end.index,
         start_label=_state_label(history.start),
         end_label=_state_label(history.end),
-        stack_key=stack_key_from_frames(entry.frames, depth=stack_depth),
+        stack_frames=frames,
+        stack_fallback="<unavailable>",
         confidence="event_exact",
         size_bytes=instance.size_bytes,
         count=1,
     )
 
 
-def _snapshot_release(
-    history: _IntervalHistory, instance: _AllocationInstance
-) -> CohortRelease:
-    return CohortRelease(
+def _transition_from_snapshot(
+    kind: type[TransitionT],
+    history: _IntervalHistory,
+    instance: _AllocationInstance,
+) -> TransitionT:
+    return kind(
         start_index=history.start.index,
         end_index=history.end.index,
         start_label=_state_label(history.start),
         end_label=_state_label(history.end),
-        stack_key="<unavailable>",
+        stack_frames=(),
+        stack_fallback="<unavailable>",
         confidence="snapshot_inferred",
         size_bytes=instance.size_bytes,
         count=1,
@@ -828,30 +1091,55 @@ def _cohorts(
     *,
     active_at: Any | None,
     born_between: tuple[Any, Any] | None,
-    limit: int,
 ) -> tuple[AllocationCohort, ...]:
     grouped: dict[tuple[object, ...], list[_AllocationInstance]] = defaultdict(list)
     for instance in instances:
-        grouped[(instance.device, instance.pool_id, instance.stack_key)].append(
-            instance
+        fingerprint = _stack_fingerprint(instance.stack_frames)
+        unattributed_size = (
+            (instance.size_bytes, instance.requested_bytes)
+            if not instance.stack_frames
+            else None
         )
+        grouped[
+            (instance.device, instance.pool_id, fingerprint, unattributed_size)
+        ].append(instance)
 
     pending = []
-    for (device, pool_id, stack_key), members in grouped.items():
+    last_index = points[-1].index
+    for (
+        device,
+        pool_id,
+        stack_fingerprint,
+        unattributed_size,
+    ), members in grouped.items():
+        stack_frames = members[0].stack_frames
         point_states = []
         for point in points:
-            active = [
+            observed = [
                 member.observations[point.index]
                 for member in members
                 if point.index in member.observations
+            ]
+            owner_active = [
+                item for item in observed if item.state in OWNER_ACTIVE_STATES
+            ]
+            awaiting_free = [
+                item for item in observed if item.state in AWAITING_FREE_STATES
             ]
             point_states.append(
                 CohortPointState(
                     point_index=point.index,
                     point_label=_state_label(point),
-                    active_bytes=sum(item.size_bytes for item in active),
-                    requested_bytes=sum(item.requested_bytes for item in active),
-                    block_count=len(active),
+                    owner_active_bytes=sum(item.size_bytes for item in owner_active),
+                    owner_requested_bytes=sum(
+                        item.requested_bytes for item in owner_active
+                    ),
+                    owner_active_count=len(owner_active),
+                    awaiting_free_bytes=sum(item.size_bytes for item in awaiting_free),
+                    awaiting_free_requested_bytes=sum(
+                        item.requested_bytes for item in awaiting_free
+                    ),
+                    awaiting_free_count=len(awaiting_free),
                 )
             )
 
@@ -859,39 +1147,55 @@ def _cohorts(
         sizes: Counter[tuple[int, int]] = Counter(
             (member.size_bytes, member.requested_bytes) for member in members
         )
+        outcomes: Counter[tuple[int, int, LifetimeTerminalState]] = Counter(
+            (
+                member.size_bytes,
+                member.requested_bytes,
+                _terminal_state(member, last_index),
+            )
+            for member in members
+        )
         births = _aggregate_births(
             member.birth for member in members if member.birth is not None
         )
-        releases = _aggregate_releases(
-            member.release for member in members if member.release is not None
+        free_requests = _aggregate_free_requests(
+            member.free_request for member in members if member.free_request is not None
         )
-        exact_births = [
+        free_completions = _aggregate_free_completions(
+            member.free_completion
+            for member in members
+            if member.free_completion is not None
+        )
+        exact_births = _instances_by_confidence(members, "birth", "event_exact")
+        inferred_births = _instances_by_confidence(
+            members, "birth", "snapshot_inferred"
+        )
+        exact_requests = _instances_by_confidence(
+            members, "free_request", "event_exact"
+        )
+        inferred_requests = _instances_by_confidence(
+            members, "free_request", "snapshot_inferred"
+        )
+        exact_completions = _instances_by_confidence(
+            members, "free_completion", "event_exact"
+        )
+        inferred_completions = _instances_by_confidence(
+            members, "free_completion", "snapshot_inferred"
+        )
+        owner_active_at_end = [
             member
             for member in members
-            if member.birth and member.birth.confidence == "event_exact"
+            if _terminal_state(member, last_index) == "owner_active"
         ]
-        inferred_births = [
+        awaiting_free_at_end = [
             member
             for member in members
-            if member.birth and member.birth.confidence == "snapshot_inferred"
-        ]
-        exact = [
-            member
-            for member in members
-            if member.release and member.release.confidence == "event_exact"
-        ]
-        inferred = [
-            member
-            for member in members
-            if member.release and member.release.confidence == "snapshot_inferred"
-        ]
-        last_index = points[-1].index
-        still_active = [
-            member for member in members if last_index in member.observations
+            if _terminal_state(member, last_index) == "awaiting_free"
         ]
         active_values = [item.active_bytes for item in point_states]
-        impact = max(active_values) - min(active_values)
         born_bytes = sum(member.size_bytes for member in members if member.birth)
+        owner_peak, unreusable_peak = _event_peaks(members, points[0].index)
+        peak_active = max(active_values)
         if born_between is not None:
             anchor_bytes = born_bytes
         elif active_at is not None:
@@ -901,7 +1205,7 @@ def _cohorts(
                 if item.point_index == active_at.index
             )
         else:
-            anchor_bytes = impact
+            anchor_bytes = max(peak_active, unreusable_peak)
         if nonzero:
             first_seen_index = nonzero[0].point_index
             first_seen_label = nonzero[0].point_label
@@ -911,15 +1215,7 @@ def _cohorts(
             member_births = [member.birth for member in members if member.birth]
             assert member_births
             first_birth = min(member_births, key=lambda item: item.end_index)
-            last_boundary = max(
-                (
-                    member.release.end_index
-                    if member.release is not None
-                    else member.birth.end_index
-                )
-                for member in members
-                if member.birth is not None
-            )
+            last_boundary = max(_instance_last_boundary(member) for member in members)
             point_labels = {point.index: _state_label(point) for point in points}
             first_seen_index = first_birth.end_index
             first_seen_label = first_birth.end_label
@@ -929,7 +1225,9 @@ def _cohorts(
             {
                 "device": device,
                 "pool_id": pool_id,
-                "stack_key": stack_key,
+                "stack_fingerprint": stack_fingerprint,
+                "stack_frames": stack_frames,
+                "unattributed_size": unattributed_size,
                 "members": members,
                 "points": tuple(point_states),
                 "sizes": tuple(
@@ -944,22 +1242,42 @@ def _cohorts(
                         key=lambda item: (-item[0][0] * item[1], -item[1]),
                     )
                 ),
+                "outcomes": tuple(
+                    CohortSizeOutcome(
+                        size_bytes=size,
+                        requested_bytes=requested,
+                        terminal_state=terminal_state,
+                        count=count,
+                        total_bytes=size * count,
+                    )
+                    for (size, requested, terminal_state), count in sorted(
+                        outcomes.items(),
+                        key=lambda item: (
+                            -item[0][0] * item[1],
+                            item[0][2],
+                            -item[1],
+                        ),
+                    )
+                ),
                 "births": births,
-                "releases": releases,
-                "nonzero": nonzero,
+                "free_requests": free_requests,
+                "free_completions": free_completions,
                 "exact_births": exact_births,
                 "inferred_births": inferred_births,
-                "exact": exact,
-                "inferred": inferred,
-                "still_active": still_active,
-                "impact": impact,
+                "exact_requests": exact_requests,
+                "inferred_requests": inferred_requests,
+                "exact_completions": exact_completions,
+                "inferred_completions": inferred_completions,
+                "owner_active_at_end": owner_active_at_end,
+                "awaiting_free_at_end": awaiting_free_at_end,
                 "anchor_bytes": anchor_bytes,
                 "born_bytes": born_bytes,
+                "owner_peak": owner_peak,
+                "unreusable_peak": unreusable_peak,
                 "first_seen_index": first_seen_index,
                 "first_seen_label": first_seen_label,
                 "last_seen_index": last_seen_index,
                 "last_seen_label": last_seen_label,
-                "peak_live_bytes": _peak_live_bytes(members, points[0].index),
             }
         )
 
@@ -969,77 +1287,157 @@ def _cohorts(
             -max(point.active_bytes for point in item["points"]),
             str(item["device"]),
             str(item["pool_id"]),
-            str(item["stack_key"]),
+            str(item["stack_fingerprint"]),
+            str(item["unattributed_size"]),
         )
     )
     result = []
-    for index, item in enumerate(pending[:limit], start=1):
+    for display_rank, item in enumerate(pending, start=1):
         point_states = item["points"]
         members = item["members"]
         exact_births = item["exact_births"]
         inferred_births = item["inferred_births"]
-        exact = item["exact"]
-        inferred = item["inferred"]
-        still_active = item["still_active"]
+        exact_requests = item["exact_requests"]
+        inferred_requests = item["inferred_requests"]
+        exact_completions = item["exact_completions"]
+        inferred_completions = item["inferred_completions"]
+        owner_active_at_end = item["owner_active_at_end"]
+        awaiting_free_at_end = item["awaiting_free_at_end"]
+        active_values = [point.active_bytes for point in point_states]
         result.append(
             AllocationCohort(
-                cohort_id=f"cohort-{index:04d}",
+                cohort_id=_cohort_id(
+                    item["device"],
+                    item["pool_id"],
+                    item["stack_fingerprint"],
+                    item["unattributed_size"],
+                ),
+                display_rank=display_rank,
                 device=item["device"],
                 pool_id=item["pool_id"],
-                stack_key=item["stack_key"],
+                stack_fingerprint=item["stack_fingerprint"],
+                stack_frames=item["stack_frames"],
                 streams=tuple(sorted({member.stream for member in members}, key=str)),
                 points=point_states,
                 size_histogram=item["sizes"],
+                size_outcomes=item["outcomes"],
                 births=item["births"],
-                releases=item["releases"],
-                peak_active_bytes=max(point.active_bytes for point in point_states),
-                peak_live_bytes=item["peak_live_bytes"],
+                free_requests=item["free_requests"],
+                free_completions=item["free_completions"],
+                peak_active_bytes=max(active_values),
+                peak_owner_active_bytes=max(
+                    point.owner_active_bytes for point in point_states
+                ),
+                peak_awaiting_free_bytes=max(
+                    point.awaiting_free_bytes for point in point_states
+                ),
+                event_owner_peak_bytes=item["owner_peak"],
+                event_unreusable_peak_bytes=item["unreusable_peak"],
                 peak_block_count=max(point.block_count for point in point_states),
-                impact_bytes=item["impact"],
+                snapshot_active_span_bytes=max(active_values) - min(active_values),
                 first_seen_index=item["first_seen_index"],
                 first_seen_label=item["first_seen_label"],
                 last_seen_index=item["last_seen_index"],
                 last_seen_label=item["last_seen_label"],
                 born_bytes=item["born_bytes"],
                 born_count=len(exact_births) + len(inferred_births),
-                event_exact_birth_bytes=sum(
-                    member.size_bytes for member in exact_births
-                ),
+                event_exact_birth_bytes=_instance_bytes(exact_births),
                 event_exact_birth_count=len(exact_births),
-                snapshot_inferred_birth_bytes=sum(
-                    member.size_bytes for member in inferred_births
-                ),
+                snapshot_inferred_birth_bytes=_instance_bytes(inferred_births),
                 snapshot_inferred_birth_count=len(inferred_births),
-                event_exact_release_bytes=sum(member.size_bytes for member in exact),
-                event_exact_release_count=len(exact),
-                snapshot_inferred_release_bytes=sum(
-                    member.size_bytes for member in inferred
+                event_exact_free_requested_bytes=_instance_bytes(exact_requests),
+                event_exact_free_requested_count=len(exact_requests),
+                snapshot_inferred_free_requested_bytes=_instance_bytes(
+                    inferred_requests
                 ),
-                snapshot_inferred_release_count=len(inferred),
-                still_active_bytes=sum(member.size_bytes for member in still_active),
-                still_active_count=len(still_active),
+                snapshot_inferred_free_requested_count=len(inferred_requests),
+                event_exact_free_completed_bytes=_instance_bytes(exact_completions),
+                event_exact_free_completed_count=len(exact_completions),
+                snapshot_inferred_free_completed_bytes=_instance_bytes(
+                    inferred_completions
+                ),
+                snapshot_inferred_free_completed_count=len(inferred_completions),
+                owner_active_at_end_bytes=_instance_bytes(owner_active_at_end),
+                owner_active_at_end_count=len(owner_active_at_end),
+                awaiting_free_at_end_bytes=_instance_bytes(awaiting_free_at_end),
+                awaiting_free_at_end_count=len(awaiting_free_at_end),
             )
         )
     return tuple(result)
 
 
-def _peak_live_bytes(members: Sequence[_AllocationInstance], start_index: int) -> int:
-    live = sum(
-        member.size_bytes
+def _terminal_state(
+    instance: _AllocationInstance, last_index: int
+) -> LifetimeTerminalState:
+    observation = instance.observations.get(last_index)
+    if observation is not None:
+        if observation.state in OWNER_ACTIVE_STATES:
+            return "owner_active"
+        if observation.state in AWAITING_FREE_STATES:
+            return "awaiting_free"
+    if instance.free_completion is not None:
+        return "free_completed"
+    return "unknown"
+
+
+def _instances_by_confidence(
+    members: Sequence[_AllocationInstance],
+    attribute: Literal["birth", "free_request", "free_completion"],
+    confidence: LifetimeConfidence,
+) -> list[_AllocationInstance]:
+    return [
+        member
         for member in members
-        if member.birth is None and start_index in member.observations
-    )
-    peak = live
-    transitions = []
+        if (transition := getattr(member, attribute)) is not None
+        and transition.confidence == confidence
+    ]
+
+
+def _instance_bytes(instances: Sequence[_AllocationInstance]) -> int:
+    return sum(instance.size_bytes for instance in instances)
+
+
+def _instance_last_boundary(instance: _AllocationInstance) -> int:
+    if instance.free_completion is not None:
+        return instance.free_completion.end_index
+    if instance.free_request is not None:
+        return instance.free_request.end_index
+    assert instance.birth is not None
+    return instance.birth.end_index
+
+
+def _event_peaks(
+    members: Sequence[_AllocationInstance], start_index: int
+) -> tuple[int, int]:
+    owner_live = 0
+    unreusable = 0
+    for member in members:
+        if member.birth is not None:
+            continue
+        observation = member.observations.get(start_index)
+        if observation is None:
+            continue
+        unreusable += member.size_bytes
+        if observation.state in OWNER_ACTIVE_STATES:
+            owner_live += member.size_bytes
+    owner_peak = owner_live
+    unreusable_peak = unreusable
+    transitions: list[tuple[int, int, int]] = []
     for member in members:
         if member.birth_order is not None:
-            transitions.append((member.birth_order, member.size_bytes))
-        if member.release_order is not None:
-            transitions.append((member.release_order, -member.size_bytes))
-    for _order, delta in sorted(transitions):
-        live += delta
-        peak = max(peak, live)
-    return peak
+            transitions.append(
+                (member.birth_order, member.size_bytes, member.size_bytes)
+            )
+        if member.free_request_order is not None:
+            transitions.append((member.free_request_order, -member.size_bytes, 0))
+        if member.free_completion_order is not None:
+            transitions.append((member.free_completion_order, 0, -member.size_bytes))
+    for _order, owner_delta, unreusable_delta in sorted(transitions):
+        owner_live += owner_delta
+        unreusable += unreusable_delta
+        owner_peak = max(owner_peak, owner_live)
+        unreusable_peak = max(unreusable_peak, unreusable)
+    return owner_peak, unreusable_peak
 
 
 TransitionT = TypeVar("TransitionT", bound=_CohortTransition)
@@ -1057,7 +1455,8 @@ def _aggregate_transitions(
             transition.end_index,
             transition.start_label,
             transition.end_label,
-            transition.stack_key,
+            _stack_fingerprint(transition.stack_frames),
+            transition.stack_fallback,
             transition.confidence,
         )
         totals[key][0] += transition.size_bytes
@@ -1072,7 +1471,8 @@ def _aggregate_transitions(
                 end_index=example.end_index,
                 start_label=example.start_label,
                 end_label=example.end_label,
-                stack_key=example.stack_key,
+                stack_frames=example.stack_frames,
+                stack_fallback=example.stack_fallback,
                 confidence=example.confidence,
                 size_bytes=size_bytes,
                 count=count,
@@ -1093,7 +1493,13 @@ def _aggregate_births(births: Sequence[CohortBirth]) -> tuple[CohortBirth, ...]:
     return _aggregate_transitions(births, CohortBirth)
 
 
-def _aggregate_releases(
-    releases: Sequence[CohortRelease],
-) -> tuple[CohortRelease, ...]:
-    return _aggregate_transitions(releases, CohortRelease)
+def _aggregate_free_requests(
+    requests: Sequence[CohortFreeRequest],
+) -> tuple[CohortFreeRequest, ...]:
+    return _aggregate_transitions(requests, CohortFreeRequest)
+
+
+def _aggregate_free_completions(
+    completions: Sequence[CohortFreeCompletion],
+) -> tuple[CohortFreeCompletion, ...]:
+    return _aggregate_transitions(completions, CohortFreeCompletion)

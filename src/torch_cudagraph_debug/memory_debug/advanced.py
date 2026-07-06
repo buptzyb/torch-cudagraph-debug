@@ -21,9 +21,11 @@ from .stacks import (
     summarize_allocation_stacks,
 )
 from .allocator_snapshot import (
-    MemoryObservationKey,
+    ALLOCATION_LIFETIME_ACTIONS,
     AllocatorSnapshotData,
     AllocatorTraceEntry,
+    KNOWN_TRACE_ACTIONS,
+    MemoryObservationKey,
     format_comparison,
     format_bytes,
     format_delta_bytes,
@@ -47,6 +49,8 @@ __all__ = [
     "MemoryStats",
     "AllocatorSnapshotData",
     "AllocatorTraceEntry",
+    "ALLOCATION_LIFETIME_ACTIONS",
+    "KNOWN_TRACE_ACTIONS",
     "allocation_stack_coverage",
     "compare_allocation_stacks",
     "extract_event_window",

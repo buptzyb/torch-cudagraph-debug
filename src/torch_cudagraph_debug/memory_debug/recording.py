@@ -348,7 +348,7 @@ class MemoryRun:
 
     def lifetimes(
         self,
-        at: str | int | MemoryPoint | None = None,
+        active_at: str | int | MemoryPoint | None = None,
         *,
         born_between: (
             tuple[str | int | MemoryPoint, str | int | MemoryPoint] | None
@@ -363,15 +363,15 @@ class MemoryRun:
 
         if not self.points:
             raise MemoryDebugError("allocation lifetimes require at least one point")
-        if at is not None and born_between is not None:
-            raise ValueError("at and born_between are mutually exclusive")
-        active_at = self.point(at) if at is not None else None
+        if active_at is not None and born_between is not None:
+            raise ValueError("active_at and born_between are mutually exclusive")
+        active_point = self.point(active_at) if active_at is not None else None
         birth_range = (
             self.between(born_between[0], born_between[1])
             if born_between is not None
             else None
         )
-        start = active_at or (birth_range.start if birth_range else self.points[0])
+        start = active_point or (birth_range.start if birth_range else self.points[0])
         end = self.point(through) if through is not None else self.points[-1]
         if end.index < start.index:
             raise ValueError("through point must not come before the lifetime anchor")
@@ -382,7 +382,7 @@ class MemoryRun:
             self,
             start=start,
             end=end,
-            active_at=active_at,
+            active_at=active_point,
             born_between=(
                 (birth_range.start, birth_range.end) if birth_range else None
             ),

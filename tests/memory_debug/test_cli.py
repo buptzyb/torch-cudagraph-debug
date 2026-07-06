@@ -161,7 +161,7 @@ def test_cli_lifetimes_and_timeline_summary(tmp_path: Path) -> None:
             [
                 "allocation-lifetimes",
                 str(baseline),
-                "--at",
+                "--active-at",
                 "start",
                 "--through",
                 "end",

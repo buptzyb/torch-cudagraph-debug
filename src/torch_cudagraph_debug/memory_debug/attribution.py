@@ -50,7 +50,11 @@ class MemoryAttributionOptions:
 
 @dataclass(frozen=True)
 class MemoryLifetimeOptions:
-    """Allocator-history policy for direct allocation lifetime analysis."""
+    """Allocator-history and display policy for allocation lifetime analysis.
+
+    ``stack_depth`` and ``limit`` affect text and HTML presentation only. Cohort
+    identity and structured JSON/CSV data always use the complete analysis.
+    """
 
     events: bool = True
     on_missing: MissingPolicy = "warn"

@@ -97,10 +97,29 @@ def main() -> None:
         born_paths = born.write(output_dir / "born-in-interval")
 
         assert active.total_instance_bytes >= 96 * MIB
-        assert sum(item.still_active_bytes for item in active.cohorts) >= 32 * MIB
+        assert (
+            sum(item.owner_active_at_end_bytes for item in active.cohorts) >= 32 * MIB
+        )
         assert born.total_instance_bytes >= 16 * MIB
         assert sum(item.event_exact_birth_bytes for item in born.cohorts) >= 16 * MIB
+        assert (
+            sum(item.event_exact_free_requested_bytes for item in active.cohorts)
+            >= 64 * MIB
+        )
+        assert (
+            sum(item.event_exact_free_completed_bytes for item in active.cohorts)
+            >= 64 * MIB
+        )
+        assert sum(item.event_exact_free_requested_bytes for item in born.cohorts) >= (
+            16 * MIB
+        )
+        assert sum(item.event_exact_free_completed_bytes for item in born.cohorts) >= (
+            16 * MIB
+        )
         assert active_paths["json"].is_file()
+        assert active_paths["size_outcomes"].is_file()
+        assert active_paths["free_request_stacks"].is_file()
+        assert active_paths["free_completion_stacks"].is_file()
         assert born_paths["birth_stacks"].is_file()
         assert persistent_state.numel() == 32 * MIB
 

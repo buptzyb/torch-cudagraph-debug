@@ -38,8 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     lifetime_analysis.add_argument("bundle")
     lifetime_selection = lifetime_analysis.add_mutually_exclusive_group()
     lifetime_selection.add_argument(
-        "--at",
-        help="Only trace allocation instances active at this point",
+        "--active-at",
+        help="Only trace allocation generations not reusable at this point",
     )
     lifetime_selection.add_argument(
         "--born-between",
@@ -144,7 +144,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "allocation-lifetimes":
             run = _load_run(args.bundle)
             result = run.lifetimes(
-                args.at,
+                args.active_at,
                 born_between=(
                     tuple(args.born_between) if args.born_between is not None else None
                 ),

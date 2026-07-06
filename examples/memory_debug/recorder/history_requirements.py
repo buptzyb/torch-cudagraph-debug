@@ -106,15 +106,24 @@ def _record_without_history(output_dir: Path) -> None:
     assert sum(item.snapshot_inferred_birth_bytes for item in inferred.cohorts) >= (
         16 * MIB
     )
-    assert sum(item.snapshot_inferred_release_bytes for item in inferred.cohorts) >= (
-        16 * MIB
-    )
+    assert sum(
+        item.snapshot_inferred_free_completed_bytes for item in inferred.cohorts
+    ) >= (16 * MIB)
+    assert sum(
+        item.snapshot_inferred_free_requested_bytes for item in inferred.cohorts
+    ) >= (16 * MIB)
     assert sum(item.event_exact_birth_bytes for item in inferred.cohorts) == 0
-    assert sum(item.event_exact_release_bytes for item in inferred.cohorts) == 0
+    assert sum(item.event_exact_free_completed_bytes for item in inferred.cohorts) == 0
+    assert sum(item.event_exact_free_requested_bytes for item in inferred.cohorts) == 0
     assert any(
-        release.confidence == "snapshot_inferred"
+        request.confidence == "snapshot_inferred"
         for cohort in inferred.cohorts
-        for release in cohort.releases
+        for request in cohort.free_requests
+    )
+    assert any(
+        completion.confidence == "snapshot_inferred"
+        for cohort in inferred.cohorts
+        for completion in cohort.free_completions
     )
     assert any(
         "transient allocations may be missing" in item for item in inferred.warnings

@@ -53,8 +53,10 @@ _REPORT_ARTIFACTS = frozenset(
         "cohorts.csv",
         "cohort_points.csv",
         "size_histograms.csv",
+        "size_outcomes.csv",
         "birth_stacks.csv",
-        "release_stacks.csv",
+        "free_request_stacks.csv",
+        "free_completion_stacks.csv",
         "pool_decomposition.csv",
         "allocator_scope_decomposition.csv",
         "rank_point_entries.csv",
@@ -82,9 +84,12 @@ class MemoryAllocationLifetimeAnalysis:
     history_complete: bool
     total_instance_bytes: int
     attributed_instance_bytes: int
+    display_stack_depth: int
+    display_limit: int
     warnings: tuple[str, ...] = ()
 
     def cohort_rows(self) -> list[dict[str, object]]:
+        """Return every cohort; display limits never truncate structured data."""
         return [item.to_row() for item in self.cohorts]
 
     def point_rows(self) -> list[dict[str, object]]:
@@ -101,11 +106,11 @@ class MemoryAllocationLifetimeAnalysis:
             for item in cohort.size_histogram
         ]
 
-    def release_rows(self) -> list[dict[str, object]]:
+    def size_outcome_rows(self) -> list[dict[str, object]]:
         return [
             item.to_row(cohort.cohort_id)
             for cohort in self.cohorts
-            for item in cohort.releases
+            for item in cohort.size_outcomes
         ]
 
     def birth_rows(self) -> list[dict[str, object]]:
@@ -115,30 +120,66 @@ class MemoryAllocationLifetimeAnalysis:
             for item in cohort.births
         ]
 
-    def summary_lines(self, *, indent: str = "") -> list[str]:
-        lines = [f"{indent}top allocation cohorts:"]
+    def free_request_rows(self) -> list[dict[str, object]]:
+        return [
+            item.to_row(cohort.cohort_id)
+            for cohort in self.cohorts
+            for item in cohort.free_requests
+        ]
+
+    def free_completion_rows(self) -> list[dict[str, object]]:
+        return [
+            item.to_row(cohort.cohort_id)
+            for cohort in self.cohorts
+            for item in cohort.free_completions
+        ]
+
+    def summary_lines(
+        self,
+        *,
+        indent: str = "",
+        limit: int | None = None,
+        stack_depth: int | None = None,
+    ) -> list[str]:
+        visible = self._visible_cohorts(limit)
+        depth = self._display_stack_depth(stack_depth)
+        lines = [
+            f"{indent}allocation cohorts "
+            f"(showing {len(visible)} of {len(self.cohorts)}):"
+        ]
         if not self.cohorts:
-            lines.append(f"{indent}  no active allocation cohorts")
+            lines.append(f"{indent}  no allocation cohorts")
             return lines
-        for item in self.cohorts:
+        for item in visible:
             device = "unknown" if item.device is None else str(item.device)
             lines.append(
-                f"{indent}  {item.cohort_id} device[{device}] "
-                f"{pool_id_label(item.pool_id)} peak={format_bytes(item.peak_active_bytes)} "
-                f"event_peak={format_bytes(item.peak_live_bytes)} "
-                f"impact={format_bytes(item.impact_bytes)} "
-                f"blocks={item.peak_block_count} at {item.stack_key}"
+                f"{indent}  #{item.display_rank} {item.cohort_id} device[{device}] "
+                f"{pool_id_label(item.pool_id)} "
+                f"snapshot_peak={format_bytes(item.peak_active_bytes)} "
+                f"owner_event_peak={format_bytes(item.event_owner_peak_bytes)} "
+                f"unreusable_event_peak={format_bytes(item.event_unreusable_peak_bytes)} "
+                f"blocks={item.peak_block_count} at {item.display_stack(depth)}"
             )
             lines.append(
                 f"{indent}    born exact={format_bytes(item.event_exact_birth_bytes)} "
                 f"inferred={format_bytes(item.snapshot_inferred_birth_bytes)}; "
-                f"released exact={format_bytes(item.event_exact_release_bytes)} "
-                f"inferred={format_bytes(item.snapshot_inferred_release_bytes)}, "
-                f"still active={format_bytes(item.still_active_bytes)}"
+                f"free requested exact="
+                f"{format_bytes(item.event_exact_free_requested_bytes)} "
+                f"inferred={format_bytes(item.snapshot_inferred_free_requested_bytes)}; "
+                f"free completed exact="
+                f"{format_bytes(item.event_exact_free_completed_bytes)} "
+                f"inferred={format_bytes(item.snapshot_inferred_free_completed_bytes)}; "
+                f"end owner active={format_bytes(item.owner_active_at_end_bytes)}, "
+                f"awaiting free={format_bytes(item.awaiting_free_at_end_bytes)}"
             )
         return lines
 
-    def to_text(self) -> str:
+    def to_text(
+        self,
+        *,
+        limit: int | None = None,
+        stack_depth: int | None = None,
+    ) -> str:
         if self.active_at is not None:
             selection = f"active_at={_state_label(self.active_at)!r}"
         elif self.born_between is not None:
@@ -148,6 +189,8 @@ class MemoryAllocationLifetimeAnalysis:
             )
         else:
             selection = "all cohorts"
+        visible = self._visible_cohorts(limit)
+        depth = self._display_stack_depth(stack_depth)
         lines = [
             f"Allocation cohort lifetimes {self.source_name!r}: "
             f"{_state_label(self.start)!r} -> {_state_label(self.end)!r} ({selection})"
@@ -163,36 +206,56 @@ class MemoryAllocationLifetimeAnalysis:
                 "  allocator history: "
                 f"available={self.history_available}, complete={self.history_complete}"
             )
-        lines.extend(self.summary_lines(indent="  "))
-        for cohort in self.cohorts:
-            lines.append(f"  {cohort.cohort_id} point states:")
+        lines.extend(
+            self.summary_lines(indent="  ", limit=limit, stack_depth=stack_depth)
+        )
+        for cohort in visible:
+            lines.append(f"  #{cohort.display_rank} {cohort.cohort_id} point states:")
             for point in cohort.points:
                 lines.append(
                     "    "
                     f"[{point.point_index}] {point.point_label}: "
+                    f"owner_active={format_bytes(point.owner_active_bytes)} "
+                    f"({point.owner_active_count} blocks), "
+                    f"awaiting_free={format_bytes(point.awaiting_free_bytes)} "
+                    f"({point.awaiting_free_count} blocks), "
                     f"active={format_bytes(point.active_bytes)}, "
-                    f"requested={format_bytes(point.requested_bytes)}, "
-                    f"blocks={point.block_count}"
+                    f"requested={format_bytes(point.requested_bytes)}"
                 )
             if cohort.size_histogram:
                 sizes = ", ".join(
-                    f"{format_bytes(item.size_bytes)} x {item.count}"
+                    f"{format_bytes(item.size_bytes)} requested="
+                    f"{format_bytes(item.requested_bytes)} x {item.count}"
                     for item in cohort.size_histogram
                 )
                 lines.append(f"    sizes: {sizes}")
+            if cohort.size_outcomes:
+                outcomes = ", ".join(
+                    f"{format_bytes(item.size_bytes)} {item.terminal_state} "
+                    f"x {item.count}"
+                    for item in cohort.size_outcomes
+                )
+                lines.append(f"    size outcomes: {outcomes}")
             for birth in cohort.births:
                 lines.append(
                     "    birth "
                     f"{birth.start_label!r} -> {birth.end_label!r}: "
                     f"{format_bytes(birth.size_bytes)} in {birth.count} blocks "
-                    f"[{birth.confidence}] at {birth.stack_key}"
+                    f"[{birth.confidence}] at {birth.display_stack(depth)}"
                 )
-            for release in cohort.releases:
+            for request in cohort.free_requests:
                 lines.append(
-                    "    release "
-                    f"{release.start_label!r} -> {release.end_label!r}: "
-                    f"{format_bytes(release.size_bytes)} in {release.count} blocks "
-                    f"[{release.confidence}] at {release.stack_key}"
+                    "    free requested "
+                    f"{request.start_label!r} -> {request.end_label!r}: "
+                    f"{format_bytes(request.size_bytes)} in {request.count} blocks "
+                    f"[{request.confidence}] at {request.display_stack(depth)}"
+                )
+            for completion in cohort.free_completions:
+                lines.append(
+                    "    free completed "
+                    f"{completion.start_label!r} -> {completion.end_label!r}: "
+                    f"{format_bytes(completion.size_bytes)} in {completion.count} blocks "
+                    f"[{completion.confidence}] at {completion.display_stack(depth)}"
                 )
         return "\n".join(lines)
 
@@ -218,17 +281,43 @@ class MemoryAllocationLifetimeAnalysis:
             "history_complete": self.history_complete,
             "total_instance_bytes": self.total_instance_bytes,
             "attributed_instance_bytes": self.attributed_instance_bytes,
+            "display_stack_depth": self.display_stack_depth,
+            "display_limit": self.display_limit,
             "warnings": list(self.warnings),
             "cohorts": [item.to_dict() for item in self.cohorts],
         }
 
-    def to_html(self) -> str:
-        cohort_rows = self.cohort_rows()
-        point_rows = self.point_rows()
-        size_rows = self.size_rows()
-        birth_rows = self.birth_rows()
-        release_rows = self.release_rows()
+    def to_html(
+        self,
+        *,
+        limit: int | None = None,
+        stack_depth: int | None = None,
+    ) -> str:
+        visible = self._visible_cohorts(limit)
+        depth = self._display_stack_depth(stack_depth)
+        cohort_rows = self._display_cohort_rows(limit, stack_depth)
+        point_rows = [
+            item.to_row(cohort.cohort_id)
+            for cohort in visible
+            for item in cohort.points
+        ]
+        size_rows = [
+            item.to_row(cohort.cohort_id)
+            for cohort in visible
+            for item in cohort.size_histogram
+        ]
+        outcome_rows = [
+            item.to_row(cohort.cohort_id)
+            for cohort in visible
+            for item in cohort.size_outcomes
+        ]
+        birth_rows = self._display_transition_rows(visible, "births", depth)
+        request_rows = self._display_transition_rows(visible, "free_requests", depth)
+        completion_rows = self._display_transition_rows(
+            visible, "free_completions", depth
+        )
         sections = [
+            f"<p>Showing {len(visible)} of {len(self.cohorts)} cohorts.</p>",
             "<h2>Active Bytes by Cohort</h2>",
             _cohort_timeline_svg(point_rows),
             "<h2>Cohorts</h2>",
@@ -237,19 +326,25 @@ class MemoryAllocationLifetimeAnalysis:
             _render_table(point_rows, "No cohort point states"),
             "<h2>Size Histograms</h2>",
             _render_table(size_rows, "No allocation sizes"),
+            "<h2>Size Outcomes</h2>",
+            _render_table(outcome_rows, "No allocation outcomes"),
         ]
         if birth_rows:
             sections.extend(
-                [
-                    "<h2>Birth Stacks</h2>",
-                    _render_table(birth_rows, "No allocation births"),
-                ]
+                ["<h2>Birth Stacks</h2>", _render_table(birth_rows, "No births")]
             )
-        if release_rows:
+        if request_rows:
             sections.extend(
                 [
-                    "<h2>Release Stacks</h2>",
-                    _render_table(release_rows, "No releases"),
+                    "<h2>Free Request Stacks</h2>",
+                    _render_table(request_rows, "No free requests"),
+                ]
+            )
+        if completion_rows:
+            sections.extend(
+                [
+                    "<h2>Free Completion Stacks</h2>",
+                    _render_table(completion_rows, "No free completions"),
                 ]
             )
         return _html_document(
@@ -261,13 +356,16 @@ class MemoryAllocationLifetimeAnalysis:
     def write(
         self,
         output_dir: str | Path,
+        *,
+        limit: int | None = None,
+        stack_depth: int | None = None,
     ) -> dict[str, Path]:
         root = _prepare_output(output_dir)
         paths = _write_report_documents(
             root,
-            text=self.to_text(),
+            text=self.to_text(limit=limit, stack_depth=stack_depth),
             payload=self.to_dict(),
-            html=self.to_html(),
+            html=self.to_html(limit=limit, stack_depth=stack_depth),
         )
         paths.update(self.write_csv_files(root))
         return paths
@@ -276,20 +374,63 @@ class MemoryAllocationLifetimeAnalysis:
         cohort_rows = self.cohort_rows()
         point_rows = self.point_rows()
         size_rows = self.size_rows()
+        outcome_rows = self.size_outcome_rows()
         birth_rows = self.birth_rows()
-        release_rows = self.release_rows()
+        request_rows = self.free_request_rows()
+        completion_rows = self.free_completion_rows()
         paths = {
             "cohorts": _write_csv(root / "cohorts.csv", cohort_rows),
             "cohort_points": _write_csv(root / "cohort_points.csv", point_rows),
             "size_histograms": _write_csv(root / "size_histograms.csv", size_rows),
+            "size_outcomes": _write_csv(root / "size_outcomes.csv", outcome_rows),
         }
         if birth_rows:
             paths["birth_stacks"] = _write_csv(root / "birth_stacks.csv", birth_rows)
-        if release_rows:
-            paths["release_stacks"] = _write_csv(
-                root / "release_stacks.csv", release_rows
+        if request_rows:
+            paths["free_request_stacks"] = _write_csv(
+                root / "free_request_stacks.csv", request_rows
+            )
+        if completion_rows:
+            paths["free_completion_stacks"] = _write_csv(
+                root / "free_completion_stacks.csv", completion_rows
             )
         return paths
+
+    def _visible_cohorts(self, limit: int | None) -> tuple[AllocationCohort, ...]:
+        resolved = self.display_limit if limit is None else limit
+        if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved < 1:
+            raise ValueError("limit must be an integer >= 1")
+        return self.cohorts[:resolved]
+
+    def _display_stack_depth(self, stack_depth: int | None) -> int:
+        resolved = self.display_stack_depth if stack_depth is None else stack_depth
+        if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved < 1:
+            raise ValueError("stack_depth must be an integer >= 1")
+        return resolved
+
+    def _display_cohort_rows(
+        self, limit: int | None = None, stack_depth: int | None = None
+    ) -> list[dict[str, object]]:
+        depth = self._display_stack_depth(stack_depth)
+        return [
+            {**cohort.to_row(), "stack_key": cohort.display_stack(depth)}
+            for cohort in self._visible_cohorts(limit)
+        ]
+
+    @staticmethod
+    def _display_transition_rows(
+        cohorts: Sequence[AllocationCohort],
+        attribute: Literal["births", "free_requests", "free_completions"],
+        stack_depth: int,
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                **transition.to_row(cohort.cohort_id),
+                "stack_key": transition.display_stack(stack_depth),
+            }
+            for cohort in cohorts
+            for transition in getattr(cohort, attribute)
+        ]
 
 
 @dataclass(frozen=True)
@@ -515,7 +656,7 @@ class _MemoryStateComparison:
                 [
                     "<h2>Allocation Cohorts</h2>",
                     _render_table(
-                        self.allocation_lifetimes.cohort_rows(),
+                        self.allocation_lifetimes._display_cohort_rows(),
                         "No allocation cohorts",
                     ),
                 ]
@@ -806,7 +947,7 @@ class MemoryTimeline:
                     "<h2>Allocation Cohorts</h2>",
                     _cohort_timeline_svg(self.allocation_lifetimes.point_rows()),
                     _render_table(
-                        self.allocation_lifetimes.cohort_rows(),
+                        self.allocation_lifetimes._display_cohort_rows(),
                         "No allocation cohorts",
                     ),
                 ]
@@ -1016,7 +1157,7 @@ class MemoryPhaseComparison:
                 [
                     f"<h2>{name}</h2>",
                     _render_table(
-                        comparison.allocation_lifetimes.cohort_rows(),
+                        comparison.allocation_lifetimes._display_cohort_rows(),
                         "No allocation cohorts",
                     ),
                 ]
@@ -1117,15 +1258,25 @@ class MemoryPhaseComparison:
             for name, report in lifetime_reports
             for row in report.size_rows()
         ]
+        size_outcome_rows = [
+            {"comparison": name, **row}
+            for name, report in lifetime_reports
+            for row in report.size_outcome_rows()
+        ]
         birth_rows = [
             {"comparison": name, **row}
             for name, report in lifetime_reports
             for row in report.birth_rows()
         ]
-        release_rows = [
+        free_request_rows = [
             {"comparison": name, **row}
             for name, report in lifetime_reports
-            for row in report.release_rows()
+            for row in report.free_request_rows()
+        ]
+        free_completion_rows = [
+            {"comparison": name, **row}
+            for name, report in lifetime_reports
+            for row in report.free_completion_rows()
         ]
         if cohort_rows:
             paths["cohorts"] = _write_csv(root / "cohorts.csv", cohort_rows)
@@ -1135,11 +1286,18 @@ class MemoryPhaseComparison:
             paths["size_histograms"] = _write_csv(
                 root / "size_histograms.csv", size_rows
             )
+            paths["size_outcomes"] = _write_csv(
+                root / "size_outcomes.csv", size_outcome_rows
+            )
         if birth_rows:
             paths["birth_stacks"] = _write_csv(root / "birth_stacks.csv", birth_rows)
-        if release_rows:
-            paths["release_stacks"] = _write_csv(
-                root / "release_stacks.csv", release_rows
+        if free_request_rows:
+            paths["free_request_stacks"] = _write_csv(
+                root / "free_request_stacks.csv", free_request_rows
+            )
+        if free_completion_rows:
+            paths["free_completion_stacks"] = _write_csv(
+                root / "free_completion_stacks.csv", free_completion_rows
             )
         return paths
 

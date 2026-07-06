@@ -21,9 +21,11 @@
 - Optional live-allocation stack and marker-delimited allocator-event
   attribution with configurable warning or error policies.
 - Allocation cohort lifetime analysis with address-reuse generation splitting,
-  size histograms, event-backed birth and release stacks, transient
-  generations, live-byte peaks, snapshot-inferred confidence, and explicit
-  `run` or `probe` source metadata.
+  owner-active versus awaiting-free point states, event-backed birth,
+  free-request, and free-completion stacks, size-by-terminal-state outcomes,
+  transient generations, owner/unreusable event peaks, stable full-stack cohort
+  identity, lossless structured output, snapshot-inferred confidence, and
+  explicit `run` or `probe` source metadata.
 - Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
   summary and rank-paired phase analysis without summing memory across GPUs.
 - Canonical gzip JSON run bundles with atomic writes, exact manifest fields,

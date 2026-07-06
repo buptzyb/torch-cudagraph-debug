@@ -757,7 +757,7 @@ run.between(start, end) -> MemoryRange
 run.compare(reference, candidate, *, attribution=None) -> MemoryPointComparison
 run.timeline(*, attribution=None) -> MemoryTimeline
 run.lifetimes(
-    at=None,
+    active_at=None,
     *,
     born_between=None,
     through=None,
@@ -831,8 +831,15 @@ Coverage is reported for both points.
 call stack. Events begin after the earlier point's marker and end at the later
 snapshot endpoint. An event's reported pool ID is preferred; otherwise address
 ranges are used and unresolved events remain in `pool[unknown]`.
+The raw action taxonomy is `alloc`, `free_requested`, `free_completed`,
+`segment_alloc`, `segment_free`, `segment_map`, `segment_unmap`, `snapshot`, and
+`oom`. Unknown actions are preserved in event summaries and reported as
+lifetime warnings. A `free` label produced by PyTorch `memory_viz` is a
+visualization-level collapse of adjacent request/completion entries, not a raw
+trace action.
 
-`lifetimes=True` embeds a top-cohort lifetime summary in same-run comparisons
+
+`lifetimes=True` embeds a cohort lifetime summary in same-run comparisons
 and timelines. In a phase comparison it applies independently to the baseline
 and candidate change ranges. Cross-run lifetime requests are rejected.
 
@@ -859,13 +866,15 @@ MemoryLifetimeOptions(
 This focused policy configures direct `run.lifetimes()` analysis. Allocation
 cohorts are always grouped by allocation stack, so the direct API does not
 accept the comparison-only `stacks` or `lifetimes` switches from
-`MemoryAttributionOptions`.
+`MemoryAttributionOptions`. `stack_depth` and `limit` are presentation defaults
+for text and HTML; they do not alter cohort identity or truncate in-memory,
+JSON, or CSV data.
 
 ### Allocation Cohort Lifetimes
 
 ```python
 run.lifetimes(
-    at: str | int | MemoryPoint | None = None,
+    active_at: str | int | MemoryPoint | None = None,
     *,
     born_between: tuple[
         str | int | MemoryPoint,
@@ -876,50 +885,62 @@ run.lifetimes(
 ) -> MemoryAllocationLifetimeAnalysis
 ```
 
-With `at` set, the report starts there and retains only allocation instances
-active at that anchor. With `at=None`, it scans from the first point and keeps
-all cohorts observed through `through` or the final point. The end point must
-not precede the start point and must belong to the same run.
+With `active_at` set, the scan starts there and retains generations that are not
+allocator-reusable at that point. With `active_at=None`, it scans from the first
+point and keeps every generation observed through `through` or the final point.
+The end point must not precede the start point and must belong to the same run.
 
 `born_between=(start, end)` instead selects generations allocated in the
-half-open marker range `(start, end]`; it is mutually exclusive with `at`.
-With complete allocator events, a generation that is allocated and freed
-entirely between snapshots remains in the report. `peak_live_bytes` captures
-its event-derived peak even when every point state is zero. With events
-disabled or incomplete, visible snapshot births remain available with
-`snapshot_inferred` confidence and a warning that transient allocations may be
-missing.
+half-open marker range `(start, end]`; it is mutually exclusive with
+`active_at`. With complete allocator events, a generation allocated and fully
+freed between snapshots remains in the report. `event_owner_peak_bytes` tracks
+application-owned bytes, while `event_unreusable_peak_bytes` also includes bytes
+waiting for stream-ordered free completion. With events disabled or incomplete,
+visible snapshot births remain available with `snapshot_inferred` confidence
+and a warning that transient generations may be missing.
 
-An allocation instance is tracked by device, block address, size, requested
-size, pool, and stream. A matching `free_requested` followed by `alloc` at the
-same address splits the old and new generations. Event size matching accepts
-either the snapshot's allocator-rounded block size or its requested size
-because PyTorch traces may report the latter.
+An allocation generation is tracked by device, block address, size, requested
+size, pool, and stream. Its state transitions are:
 
-Instances are grouped into cohorts by device, pool, and allocation stack. Each
-cohort retains point-by-point active/requested bytes, block counts, stream IDs,
-a unique-instance size histogram, allocation births, release stacks, and
-point/event peaks.
+```text
+alloc -> free_requested -> free_completed
+```
 
-Release evidence is explicit:
+`free_requested` ends application ownership, but the block may remain
+`active_awaiting_free` until prior stream work completes. `free_completed` ends
+the generation because the allocator can then reuse the block. It does not imply
+that the containing segment was returned to CUDA. Address reuse after completion
+starts a new generation. Event size matching accepts either allocator-rounded
+block size or requested size because PyTorch traces may report the latter.
+Stream synchronization makes the dependency complete, but allocator bookkeeping
+may remain `active_awaiting_free` until a later allocator operation polls
+pending events and emits `free_completed`. A snapshot does not itself force that
+poll.
 
-- `event_exact` means a matching `free_requested` event exists in the
-  marker-delimited interval;
-- `snapshot_inferred` means an observed block disappeared without exact event
-  evidence;
-- `still_active_bytes` counts observed instances active at the end point.
 
-The application must enable full allocator history before the allocations of
-interest to obtain exact release timing and free call stacks. With events
-disabled or unavailable, snapshot-inferred results remain usable.
-Snapshot-only matching cannot detect a free-and-reallocate cycle that reuses
-the same address and shape entirely between two points.
+Instances are grouped into cohorts by device, pool, and the complete normalized
+allocation stack. `stack_depth` changes display only. Allocations without stack
+frames also include block and requested sizes in their cohort identity so
+unrelated unattributed sizes are not merged. Each cohort retains:
 
-Calling `run.lifetimes()` without explicit options defaults to stack depth 4,
-event attribution, warning on missing history, and the top 20 cohorts. Use
-`MemoryLifetimeOptions(events=False, ...)` for snapshot-only analysis.
-Cohorts are ranked by bytes born for `born_between`, by bytes active at an
-anchor, or by peak-to-minimum impact when there is no selection.
+- owner-active and awaiting-free bytes/counts at every point;
+- streams, a unique-generation size histogram, and size-by-terminal-state rows;
+- birth, free-request, and free-completion transitions with independent
+  `event_exact` or `snapshot_inferred` confidence;
+- snapshot peaks plus event-derived owner-active and unreusable peaks;
+- owner-active and awaiting-free terminal totals.
+
+Full allocator history must be enabled before the allocations of interest to
+obtain exact transition ordering and event stacks. With events disabled or
+unavailable, snapshot disappearance infers request and completion in the
+containing interval. Snapshot-only matching cannot detect a free-and-reallocate
+cycle that reuses the same address and shape entirely between two points.
+
+Calling `run.lifetimes()` without explicit options enables event attribution,
+warns on missing history, and displays up to 20 cohorts with four stack frames.
+The complete ordered cohort set remains available through `report.cohorts`,
+`to_dict()`, `report.json`, and CSV. Cohort IDs are stable fingerprints of
+identity; `display_rank` records the current report ordering.
 
 This API reports allocator-block evidence. It does not recover Python tensor
 names, object identity, dtype, shape, or higher-level ownership unless those
@@ -1076,14 +1097,18 @@ result.write(output_dir, include_unchanged=True) -> dict[str, Path]
 `to_dict()` and `report.json` always retain complete data. Timeline and phase
 objects aggregate warnings from their component comparisons at the top level.
 
-Lifetime analyses and run-group summaries do not have unchanged rows and use:
+Lifetime analyses accept presentation overrides without changing structured
+results:
 
 ```python
-result.to_text() -> str
+result.to_text(limit=None, stack_depth=None) -> str
 result.to_dict() -> dict
-result.to_html() -> str
-result.write(output_dir) -> dict[str, Path]
+result.to_html(limit=None, stack_depth=None) -> str
+result.write(output_dir, limit=None, stack_depth=None) -> dict[str, Path]
 ```
+
+Run-group summaries have no unchanged-row filter and use `to_text()`,
+`to_dict()`, `to_html()`, and `write(output_dir)`.
 
 Comparison data uses nested absolute and delta state:
 
@@ -1105,11 +1130,11 @@ Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
 `allocator_scope_decomposition.csv`.
 
 `MemoryAllocationLifetimeAnalysis` and pool-oriented results that embed one
-create `cohorts.csv`, `cohort_points.csv`, and `size_histograms.csv`. They add
-`birth_stacks.csv` or `release_stacks.csv` when those observations exist.
-Lifetime JSON keeps point states, histograms, birth/release confidence,
-point/event peaks, and exact/inferred/still-active totals nested under each
-cohort.
+create `cohorts.csv`, `cohort_points.csv`, `size_histograms.csv`, and
+`size_outcomes.csv`. They add `birth_stacks.csv`, `free_request_stacks.csv`, or
+`free_completion_stacks.csv` when those transitions exist. Lifetime JSON keeps
+full stack identity, split point states, size outcomes, transition confidence,
+and point/event peaks nested under each cohort.
 
 Group summaries create `rank_point_entries.csv` and `point_aggregates.csv`.
 Group phase reports create `rank_decomposition.csv` and
@@ -1138,7 +1163,7 @@ its own bundles and exercises every command below.
 ```text
 tcgd-memory summary BUNDLE
 tcgd-memory allocation-lifetimes BUNDLE \
-  [--at POINT | --born-between START END] [--through POINT] \
+  [--active-at POINT | --born-between START END] [--through POINT] \
   [--no-events] --output DIR
 tcgd-memory timeline BUNDLE --output DIR
 tcgd-memory compare-points REFERENCE_BUNDLE [CANDIDATE_BUNDLE] \
@@ -1187,6 +1212,8 @@ advanced.AllocatorSnapshotData
 advanced.MemoryObservationKey
 advanced.MemoryStats
 advanced.AllocatorTraceEntry
+advanced.KNOWN_TRACE_ACTIONS
+advanced.ALLOCATION_LIFETIME_ACTIONS
 ```
 
 Snapshot normalization and aggregation:

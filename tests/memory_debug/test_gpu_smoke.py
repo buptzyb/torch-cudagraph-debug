@@ -109,7 +109,7 @@ def test_real_full_history_produces_marker_delimited_events() -> None:
         _disable_history()
 
 
-def test_real_full_history_attributes_allocation_lifetime_release() -> None:
+def test_real_full_history_attributes_allocation_free_completion() -> None:
     _disable_history()
     torch.cuda.empty_cache()
     torch.cuda.memory._record_memory_history(
@@ -128,11 +128,11 @@ def test_real_full_history_attributes_allocation_lifetime_release() -> None:
         del tensor
         gc.collect()
         torch.cuda.synchronize()
-        recorder.record_point("released")
+        recorder.record_point("completed")
 
         report = recorder.finish().lifetimes(
             "anchor",
-            through="released",
+            through="completed",
             options=MemoryLifetimeOptions(
                 events=True,
                 on_missing="error",
@@ -145,10 +145,66 @@ def test_real_full_history_attributes_allocation_lifetime_release() -> None:
         matching = [
             cohort
             for cohort in report.cohorts
-            if cohort.event_exact_release_bytes > 0
-            and cohort.snapshot_inferred_release_bytes == 0
+            if cohort.event_exact_free_completed_bytes > 0
+            and cohort.snapshot_inferred_free_completed_bytes == 0
             and cohort.points[0].active_bytes > 0
             and cohort.points[-1].active_bytes == 0
+        ]
+        assert matching, report.to_text()
+    finally:
+        _disable_history()
+
+
+def test_real_cross_stream_free_waits_for_completion() -> None:
+    _disable_history()
+    torch.cuda.empty_cache()
+    torch.cuda.memory._record_memory_history(
+        enabled="all",
+        context="all",
+        stacks="python",
+        max_entries=10_000,
+        clear_history=True,
+    )
+    try:
+        work_stream = torch.cuda.current_stream()
+        side_stream = torch.cuda.Stream()
+        tensor = _allocate_with_named_stack(1_000_049)
+        work_stream.synchronize()
+
+        recorder = MemoryRecorder(synchronize=work_stream)
+        recorder.record_point("owned")
+
+        torch.cuda._sleep(500_000_000)
+        side_stream.wait_stream(work_stream)
+        tensor.record_stream(side_stream)
+        del tensor
+        gc.collect()
+        recorder.record_point("awaiting", synchronize=False)
+
+        side_stream.synchronize()
+        # Stream completion is observed when the allocator next polls pending frees.
+        allocator_poll = torch.empty(1, dtype=torch.uint8, device="cuda")
+        del allocator_poll
+        gc.collect()
+        recorder.record_point("completed", synchronize=False)
+        report = recorder.finish().lifetimes(
+            "owned",
+            options=MemoryLifetimeOptions(
+                events=True,
+                on_missing="error",
+                stack_depth=4,
+            ),
+        )
+
+        matching = [
+            cohort
+            for cohort in report.cohorts
+            if "_allocate_with_named_stack" in cohort.stack_key
+            and cohort.points[0].owner_active_bytes > 0
+            and cohort.points[1].awaiting_free_bytes > 0
+            and cohort.points[2].active_bytes == 0
+            and cohort.event_exact_free_requested_bytes > 0
+            and cohort.event_exact_free_completed_bytes > 0
         ]
         assert matching, report.to_text()
     finally:
@@ -189,8 +245,8 @@ def test_real_full_history_keeps_event_only_born_and_freed_generation() -> None:
             for cohort in report.cohorts
             if "_allocate_with_named_stack" in cohort.stack_key
             and cohort.event_exact_birth_bytes > 0
-            and cohort.event_exact_release_bytes > 0
-            and cohort.peak_live_bytes > 0
+            and cohort.event_exact_free_completed_bytes > 0
+            and cohort.event_unreusable_peak_bytes > 0
             and all(point.active_bytes == 0 for point in cohort.points)
         ]
         assert matching, report.to_text()

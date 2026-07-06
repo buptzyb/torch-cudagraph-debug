@@ -235,6 +235,14 @@ A block's `frames` are the allocation call stack for memory still active in a
 snapshot. Entries under `device_traces` are historical allocator events, and
 their `frames` are event call stacks. These are separate data sources.
 
+The normalized raw action vocabulary is `alloc`, `free_requested`,
+`free_completed`, `segment_alloc`, `segment_free`, `segment_map`,
+`segment_unmap`, `snapshot`, and `oom`. Unknown future actions remain visible
+in event reports and produce a lifetime warning instead of aborting analysis.
+PyTorch `memory_viz` may display a synthetic action named `free` when it
+collapses adjacent `free_requested` and `free_completed` entries; `free` is not
+a raw `_snapshot()` trace action.
+
 ## Analysis Modes
 
 The basic operations remain timeline and two-point comparison:
@@ -275,21 +283,37 @@ print(lifetimes.to_text())
 lifetimes.write("reports/lifetimes")
 ```
 
-The anchor keeps only allocation instances active at that point. Cohorts are
-grouped by device, pool, and allocation call stack, with streams and allocation
-size histograms retained as detail. Each release is classified as:
+The anchor keeps only allocation generations that are not reusable at that
+point. Cohorts use device, pool, and the complete allocation call stack as their
+identity; streams, allocation sizes, requested sizes, and terminal outcomes
+remain available as detail. `stack_depth` shortens rendered stacks only and
+`limit` restricts text/HTML presentation only. JSON, CSV, and the in-memory
+`cohorts` tuple always retain the complete result.
 
-- `event_exact`: a matching `free_requested` event was found between point
-  markers;
-- `snapshot_inferred`: the block disappeared between snapshots without an
-  exact event;
-- still active at the final point.
+A generation can occupy three relevant states:
 
-Full allocator history is required for exact release timing and free call
-stacks. Without it, snapshot-only lifetime analysis still works but cannot
-distinguish an unobserved free-and-reallocate cycle that reuses the same address
-and shape. The report describes allocator blocks, not Python tensor names or
-object ownership.
+- **owner active**: the application still owns the allocation;
+- **awaiting free**: `free_requested` occurred, but stream-ordered work still
+  prevents allocator reuse;
+- **free completed**: `free_completed` occurred and the block can be reused by
+  the allocator.
+
+Free request and completion are reported independently, each with
+`event_exact` or `snapshot_inferred` confidence and its own stack table. A
+snapshot disappearance can infer that both transitions occurred within an
+interval, but only full allocator history identifies their exact order and
+call stacks. `free_completed` means allocator-reusable; it does not mean the
+segment was returned to CUDA or that pool `reserved_bytes` decreased.
+
+Snapshot-only lifetime analysis still works, but it cannot distinguish an
+unobserved free-and-reallocate cycle that reuses the same address and shape.
+The report describes allocator blocks, not Python tensor names or object
+Synchronizing the recorded stream completes the CUDA work, but the caching
+allocator may not emit `free_completed` until a later allocator operation polls
+its pending events. A snapshot taken before that poll can still legitimately
+show `active_awaiting_free`.
+
+ownership.
 
 To answer a different question, "what was allocated in this interval?", use
 the half-open `(start, end]` birth selection:
@@ -302,13 +326,14 @@ born = run.lifetimes(
 )
 ```
 
-With full event history, this mode retains allocations that were both created
-and freed between the two points, even when they are active in neither endpoint
-snapshot. It reports allocation and release stacks plus an event-derived live
-byte peak. With events disabled or incomplete, it falls back to
-snapshot-inferred births and warns that transient allocations may be missing.
+With full event history, this mode retains generations that were both created
+and completed between the two points, even when they are active in neither
+endpoint snapshot. It reports birth, free-request, and free-completion stacks,
+plus event-derived owner-active and allocator-unreusable peaks. With events
+disabled or incomplete, it falls back to snapshot-inferred transitions and
+warns that transient allocations may be missing.
 
-Set `lifetimes=True` in `MemoryAttributionOptions` to embed the same top-cohort
+Set `lifetimes=True` in `MemoryAttributionOptions` to embed the same cohort
 summary in a same-run comparison, a timeline, or both same-run change legs of a
 four-point phase comparison.
 
@@ -407,18 +432,21 @@ provide:
 - `to_html(include_unchanged=True)`
 - `write(output_dir, include_unchanged=True)`
 
-Lifetime analyses and run-group summaries have no unchanged-row filter and
-provide `to_text()`, `to_dict()`, `to_html()`, and `write(output_dir)`.
+Lifetime analyses have no unchanged-row filter and provide `to_text(limit=None,
+stack_depth=None)`, `to_dict()`, `to_html(limit=None, stack_depth=None)`, and
+`write(output_dir, limit=None, stack_depth=None)`. Run-group summaries provide
+the corresponding parameter-free render methods.
 
 `write()` always creates `report.txt`, `report.json`, and `report.html`.
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
 `observations.csv`. Attribution can add `allocation_stack_comparisons.csv` or
 `events.csv`; phase reports add `pool_decomposition.csv` and
 `allocator_scope_decomposition.csv`. Lifetime reports add `cohorts.csv`,
-`cohort_points.csv`, `size_histograms.csv`, and, when present,
-`birth_stacks.csv` and `release_stacks.csv`. Group reports add either
-`rank_point_entries.csv` and `point_aggregates.csv`, or `rank_decomposition.csv`
-and `phase_aggregates.csv`.
+`cohort_points.csv`, `size_histograms.csv`, `size_outcomes.csv`, and, when
+present, `birth_stacks.csv`, `free_request_stacks.csv`, and
+`free_completion_stacks.csv`. Group reports add either `rank_point_entries.csv`
+and `point_aggregates.csv`, or `rank_decomposition.csv` and
+`phase_aggregates.csv`.
 Timeline HTML includes allocated, reserved, active, requested, and optional
 cohort charts.
 `include_unchanged=False` filters zero-change rows from text, HTML, and CSV;
@@ -442,7 +470,7 @@ The `tcgd-memory` entry point mirrors the Python analysis modes:
 tcgd-memory summary rank0.tcgd-memory
 
 tcgd-memory allocation-lifetimes rank0.tcgd-memory \
-  --at before_capture --through after_replay \
+  --active-at before_capture --through after_replay \
   --output reports/lifetimes
 
 tcgd-memory allocation-lifetimes rank0.tcgd-memory \

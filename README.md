@@ -227,7 +227,8 @@ PyTorch/CUDA environment and prior allocator state.
 Beyond two-point comparison, Memory Debug can:
 
 - record a `timeline()` across named points;
-- track allocation births, releases, and survivors with `lifetimes()`;
+- track allocation births, free requests, free completions, and survivors with
+  `lifetimes()`;
 - attribute growth to allocation stacks or allocator events;
 - compare points and phases across runs, and summarize multi-rank run groups;
 - save `.tcgd-memory` bundles for offline reports and the `tcgd-memory` CLI.

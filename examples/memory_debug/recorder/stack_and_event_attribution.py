@@ -112,7 +112,14 @@ def main() -> None:
         assert timeline.allocation_lifetimes.history_complete is True
         assert (
             sum(
-                item.event_exact_release_bytes
+                item.event_exact_free_completed_bytes
+                for item in timeline.allocation_lifetimes.cohorts
+            )
+            >= 48 * MIB
+        )
+        assert (
+            sum(
+                item.event_exact_free_requested_bytes
                 for item in timeline.allocation_lifetimes.cohorts
             )
             >= 48 * MIB

@@ -39,7 +39,7 @@ if [[ "${MODE}" == "single" ]]; then
         --reference-point phase_start --candidate-point phase_end --only-changed \
         --output "${REPORTS}/compare"
     "${TCGD_MEMORY_BIN}" allocation-lifetimes "${LIFETIMES}/lifetimes.tcgd-memory" \
-        --at anchor --through after_cleanup \
+        --active-at anchor --through after_cleanup \
         --output "${REPORTS}/lifetimes-active"
     "${TCGD_MEMORY_BIN}" allocation-lifetimes "${LIFETIMES}/lifetimes.tcgd-memory" \
         --born-between before_transient after_transient --through after_cleanup \

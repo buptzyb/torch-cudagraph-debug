@@ -81,6 +81,8 @@ def test_advanced_helpers_live_in_explicit_module() -> None:
         "MemoryStats",
         "AllocatorSnapshotData",
         "AllocatorTraceEntry",
+        "ALLOCATION_LIFETIME_ACTIONS",
+        "KNOWN_TRACE_ACTIONS",
         "allocation_stack_coverage",
         "compare_allocation_stacks",
         "extract_event_window",

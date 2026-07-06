@@ -20,9 +20,24 @@ from .comparison_models import MemoryLifecycleDelta
 from .stats import MemoryStats
 
 AllocatorSnapshotData = Sequence[Mapping[str, Any]] | Mapping[str, Any]
-ACTIVE_STATES = frozenset(
-    {"active_allocated", "active_awaiting_free", "active_pending_free"}
+OWNER_ACTIVE_STATES = frozenset({"active_allocated"})
+AWAITING_FREE_STATES = frozenset({"active_awaiting_free", "active_pending_free"})
+ACTIVE_STATES = OWNER_ACTIVE_STATES | AWAITING_FREE_STATES
+
+KNOWN_TRACE_ACTIONS = frozenset(
+    {
+        "alloc",
+        "free_requested",
+        "free_completed",
+        "segment_alloc",
+        "segment_free",
+        "segment_map",
+        "segment_unmap",
+        "snapshot",
+        "oom",
+    }
 )
+ALLOCATION_LIFETIME_ACTIONS = frozenset({"alloc", "free_requested", "free_completed"})
 
 
 @dataclass(frozen=True)
