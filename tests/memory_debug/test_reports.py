@@ -313,3 +313,107 @@ def test_write_returns_absolute_paths_and_removes_stale_optional_artifacts(
 
     assert all(path.is_absolute() for path in paths.values())
     assert not stale.exists()
+
+
+def test_attribution_display_options_do_not_change_structured_results(
+    tmp_path: Path,
+) -> None:
+    shared = {"filename": "shared.py", "line": 1, "name": "allocate"}
+    left = {"filename": "left.py", "line": 2, "name": "forward"}
+    right = {"filename": "right.py", "line": 3, "name": "forward"}
+
+    def state(left_size: int, right_size: int):
+        left_segment = segment(active=left_size, address=1000)
+        right_segment = segment(active=right_size, address=2000)
+        left_segment["blocks"][0]["frames"] = [shared, left]
+        right_segment["blocks"][0]["frames"] = [shared, right]
+        return snapshot(left_segment, right_segment)
+
+    run = make_run(
+        [state(10, 20), state(15, 30)],
+        labels=("before", "after"),
+    )
+    result = run.compare(
+        "before",
+        "after",
+        attribution=MemoryAttributionOptions(
+            stacks=True,
+            stack_depth=1,
+            limit=1,
+        ),
+    )
+
+    assert len(result.allocation_stack_comparisons) == 2
+    assert len(result.to_dict()["allocation_stack_comparisons"]) == 2
+    compact = result.to_text()
+    assert "showing 1 of 2" in compact
+    assert "shared.py:1:allocate" in compact
+    assert "left.py" not in compact
+    assert "right.py" not in compact
+
+    expanded = result.to_text(limit=2, stack_depth=2)
+    assert "left.py:2:forward" in expanded
+    assert "right.py:3:forward" in expanded
+    assert len(result.to_dict()["allocation_stack_comparisons"]) == 2
+
+    paths = result.write(tmp_path / "full-structured")
+    with paths["allocation_stack_comparisons"].open(
+        newline="", encoding="utf-8"
+    ) as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    assert len([row for row in rows if row["scope"] == "pool"]) == 2
+    payload = json.loads(paths["json"].read_text(encoding="utf-8"))
+    assert len(payload["allocation_stack_comparisons"]) == 2
+    html = paths["html"].read_text(encoding="utf-8")
+    assert "shared.py:1:allocate" in html
+    assert "left.py:2:forward" not in html
+    assert "right.py:3:forward" not in html
+
+
+def test_timeline_and_phase_propagate_attribution_display_options(
+    tmp_path: Path,
+) -> None:
+    shared = {"filename": "shared.py", "line": 1, "name": "allocate"}
+    left = {"filename": "left.py", "line": 2, "name": "forward"}
+    right = {"filename": "right.py", "line": 3, "name": "forward"}
+
+    def state(left_size: int, right_size: int):
+        left_segment = segment(active=left_size, address=1000)
+        right_segment = segment(active=right_size, address=2000)
+        left_segment["blocks"][0]["frames"] = [shared, left]
+        right_segment["blocks"][0]["frames"] = [shared, right]
+        return snapshot(left_segment, right_segment)
+
+    options = MemoryAttributionOptions(stacks=True, stack_depth=1, limit=1)
+    baseline = make_run(
+        [state(10, 20), state(15, 30)],
+        name="baseline",
+        labels=("start", "end"),
+    )
+    candidate = make_run(
+        [state(20, 40), state(30, 60)],
+        name="candidate",
+        labels=("start", "end"),
+    )
+
+    timeline = baseline.timeline(attribution=options)
+    assert len(timeline.point_comparisons[0].allocation_stack_comparisons) == 2
+    assert "showing 1 of 2" in timeline.to_text()
+    assert "left.py" not in timeline.to_text()
+    assert "left.py:2:forward" in timeline.to_text(limit=2, stack_depth=2)
+
+    phase = compare_phases(
+        baseline.between("start", "end"),
+        candidate.between("start", "end"),
+        attribution=options,
+    )
+    assert len(phase.baseline_change.allocation_stack_comparisons) == 2
+    assert "showing 1 of 2" in phase.to_text()
+    assert "left.py" not in phase.to_text()
+    assert "left.py:2:forward" in phase.to_text(limit=2, stack_depth=2)
+
+    paths = phase.write(tmp_path / "phase", limit=2, stack_depth=2)
+    assert "left.py:2:forward" in paths["text"].read_text(encoding="utf-8")
+    assert "left.py:2:forward" in paths["html"].read_text(encoding="utf-8")
+    payload = json.loads(paths["json"].read_text(encoding="utf-8"))
+    assert len(payload["baseline_change"]["allocation_stack_comparisons"]) == 2

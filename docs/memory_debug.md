@@ -427,15 +427,19 @@ snapshot access is worth the additional host memory.
 State comparisons, timelines, phase comparisons, and group phase comparisons
 provide:
 
-- `to_text(include_unchanged=True)`
+- `to_text(include_unchanged=True, limit=None, stack_depth=None)`
 - `to_dict()`
-- `to_html(include_unchanged=True)`
-- `write(output_dir, include_unchanged=True)`
+- `to_html(include_unchanged=True, limit=None, stack_depth=None)`
+- `write(output_dir, include_unchanged=True, limit=None, stack_depth=None)`
 
 Lifetime analyses have no unchanged-row filter and provide `to_text(limit=None,
 stack_depth=None)`, `to_dict()`, `to_html(limit=None, stack_depth=None)`, and
 `write(output_dir, limit=None, stack_depth=None)`. Run-group summaries provide
 the corresponding parameter-free render methods.
+
+Allocation-stack and allocator-event identity always uses complete
+normalized stacks. `limit` and `stack_depth` affect text and HTML only; in-memory
+results, `to_dict()`, JSON, and CSV retain every attribution row.
 
 `write()` always creates `report.txt`, `report.json`, and `report.html`.
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
@@ -446,7 +450,8 @@ Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
 present, `birth_stacks.csv`, `free_request_stacks.csv`, and
 `free_completion_stacks.csv`. Group reports add either `rank_point_entries.csv`
 and `point_aggregates.csv`, or `rank_decomposition.csv` and
-`phase_aggregates.csv`.
+`phase_aggregates.csv`. Attributed group-phase reports additionally export full
+rank/component `allocation_stack_comparisons.csv` and `events.csv`.
 Timeline HTML includes allocated, reserved, active, requested, and optional
 cohort charts.
 `include_unchanged=False` filters zero-change rows from text, HTML, and CSV;

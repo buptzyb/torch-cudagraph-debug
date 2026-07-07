@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from torch_cudagraph_debug.memory_debug import (
+    MemoryAttributionOptions,
     MemoryBundleError,
     MemoryRunGroup,
     compare_run_group_phases,
@@ -214,3 +215,74 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
     }
     assert paths["rank_decomposition"].is_file()
     assert report.to_dict()["kind"] == "run-group-phase-comparison"
+
+
+def test_group_phase_attribution_is_display_limited_but_csv_is_complete(
+    tmp_path: Path,
+) -> None:
+    shared = {"filename": "shared.py", "line": 1, "name": "allocate"}
+    left = {"filename": "left.py", "line": 2, "name": "forward"}
+    right = {"filename": "right.py", "line": 3, "name": "forward"}
+
+    def state(left_size: int, right_size: int):
+        left_segment = segment(active=left_size, address=1000)
+        right_segment = segment(active=right_size, address=2000)
+        left_segment["blocks"][0]["frames"] = [shared, left]
+        right_segment["blocks"][0]["frames"] = [shared, right]
+        return snapshot(left_segment, right_segment)
+
+    baseline_run = make_run(
+        [state(10, 20), state(15, 30)],
+        name="baseline",
+        rank=0,
+        group_id="baseline-job",
+        world_size=1,
+        labels=("start", "end"),
+    )
+    candidate_run = make_run(
+        [state(20, 40), state(30, 60)],
+        name="candidate",
+        rank=0,
+        group_id="candidate-job",
+        world_size=1,
+        labels=("start", "end"),
+    )
+    report = compare_run_group_phases(
+        MemoryRunGroup.from_runs((baseline_run,)),
+        MemoryRunGroup.from_runs((candidate_run,)),
+        baseline_start="start",
+        baseline_end="end",
+        candidate_start="start",
+        candidate_end="end",
+        attribution=MemoryAttributionOptions(
+            stacks=True,
+            stack_depth=1,
+            limit=1,
+        ),
+    )
+
+    assert all(
+        len(comparison.allocation_stack_comparisons) == 2
+        for _name, comparison in (
+            ("baseline", report.rank_comparisons[0].baseline_change),
+            ("candidate", report.rank_comparisons[0].candidate_change),
+            ("start", report.rank_comparisons[0].start_gap),
+            ("end", report.rank_comparisons[0].end_gap),
+        )
+    )
+    text_report = report.to_text()
+    assert "showing 1 of 2" in text_report
+    assert report.display_stack_depth == 1
+    assert report.display_limit == 1
+    assert "left.py" not in text_report
+    assert "right.py" not in text_report
+
+    paths = report.write(tmp_path / "group-phase-attribution")
+    assert "allocation_stack_comparisons" in paths
+    csv_text = paths["allocation_stack_comparisons"].read_text(encoding="utf-8")
+    assert "left.py:2:forward" in csv_text
+    assert "right.py:3:forward" in csv_text
+    html = paths["html"].read_text(encoding="utf-8")
+    assert "shared.py:1:allocate" in html
+    assert "left.py:2:forward" not in html
+    assert "right.py:3:forward" not in html

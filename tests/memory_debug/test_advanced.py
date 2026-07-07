@@ -8,6 +8,7 @@ from torch_cudagraph_debug.memory_debug.advanced import (
     pool_id_label,
     stack_key_from_frames,
     summarize_allocation_stacks,
+    summarize_allocator_events,
     summarize_snapshot,
 )
 
@@ -91,15 +92,10 @@ def test_pool_range_prefers_exact_device_over_device_fallback() -> None:
     assert index.find(1, 1050) == (9, 9)
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    ({"stack_depth": True}, {"top": 0}, {"top": 1.5}),
-)
-def test_advanced_stack_options_reject_lossy_types(
-    kwargs: dict[str, object],
-) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        summarize_allocation_stacks(snapshot(), **kwargs)  # type: ignore[arg-type]
+@pytest.mark.parametrize("name", ("stack_depth", "top"))
+def test_advanced_stack_helpers_reject_removed_lossy_options(name: str) -> None:
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        summarize_allocation_stacks(snapshot(), **{name: 1})  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -131,11 +127,56 @@ def test_stack_normalization_rejects_invalid_frame_fields() -> None:
         summarize_allocation_stacks(snapshot(malformed))
 
 
-def test_stack_key_rejects_boolean_depth() -> None:
-    frames = [{"filename": "model.py", "line": 1, "name": "forward"}]
+def test_stack_key_and_advanced_helpers_always_use_complete_stacks() -> None:
+    shared = {"filename": "shared.py", "line": 1, "name": "allocate"}
+    left = {"filename": "left.py", "line": 2, "name": "forward"}
+    right = {"filename": "right.py", "line": 3, "name": "forward"}
+    first = segment(active=10, address=1000)
+    second = segment(active=20, address=2000)
+    first["blocks"][0]["frames"] = [shared, left]
+    second["blocks"][0]["frames"] = [shared, right]
 
-    with pytest.raises(TypeError, match="stack depth"):
-        stack_key_from_frames(frames, depth=True)
+    rows = summarize_allocation_stacks(snapshot(first, second))
+
+    assert len(rows) == 2
+    assert {row.stack_key for row in rows} == {
+        stack_key_from_frames([shared, left]),
+        stack_key_from_frames([shared, right]),
+    }
+
+    raw = snapshot(
+        traces=[
+            [
+                {
+                    "action": "alloc",
+                    "addr": 1000,
+                    "size": 10,
+                    "stream": 0,
+                    "frames": [shared, left],
+                    "pool_id": [0, 0],
+                },
+                {
+                    "action": "alloc",
+                    "addr": 2000,
+                    "size": 20,
+                    "stream": 0,
+                    "frames": [shared, right],
+                    "pool_id": [0, 0],
+                },
+            ]
+        ]
+    )
+    event_rows = summarize_allocator_events(
+        normalize_trace_entries(raw),
+        reference_segments=(),
+        candidate_segments=(),
+    )
+
+    assert len(event_rows) == 2
+    assert {row.stack_key for row in event_rows} == {
+        stack_key_from_frames([shared, left]),
+        stack_key_from_frames([shared, right]),
+    }
 
 
 def test_trace_normalization_rejects_invalid_device_trace_container() -> None:
@@ -144,3 +185,33 @@ def test_trace_normalization_rejects_invalid_device_trace_container() -> None:
 
     with pytest.raises(TypeError, match=r"device_traces\[0\]"):
         normalize_trace_entries(malformed)
+
+
+def test_full_stack_identity_includes_fx_frame_metadata() -> None:
+    first = segment(active=10, address=1000)
+    second = segment(active=10, address=2000)
+    first["blocks"][0]["frames"] = [
+        {
+            "filename": "model.py",
+            "line": 10,
+            "name": "forward",
+            "fx_node_name": "left",
+        }
+    ]
+    second["blocks"][0]["frames"] = [
+        {
+            "filename": "model.py",
+            "line": 10,
+            "name": "forward",
+            "fx_node_name": "right",
+        }
+    ]
+
+    rows = summarize_allocation_stacks(snapshot(first, second))
+
+    assert len(rows) == 2
+    assert len({row.stack_fingerprint for row in rows}) == 2
+    assert {row.stack_key for row in rows} == {"model.py:10:forward"}
+    assert [row.stack_fingerprint for row in rows] == sorted(
+        row.stack_fingerprint for row in rows
+    )

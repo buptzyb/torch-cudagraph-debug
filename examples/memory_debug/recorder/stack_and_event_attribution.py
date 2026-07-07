@@ -69,6 +69,8 @@ def main() -> None:
         recorder.finish()
 
         run = MemoryRun.load(bundle_dir, cache_snapshots=False)
+        # These are text/HTML defaults. Python objects, JSON, and CSV retain
+        # complete stacks and every attribution row.
         options = MemoryAttributionOptions(
             stacks=True,
             events=True,

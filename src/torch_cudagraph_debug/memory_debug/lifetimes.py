@@ -10,6 +10,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TYPE_CHECKING, TypeVar
 
 from ._pool_ranges import PoolRangeIndex, build_pool_range_index
+from ._stack_trace import (
+    normalize_stack_frames,
+    stack_fingerprint as _stack_fingerprint,
+    stack_key,
+)
 from .errors import MemoryHistoryError
 from .events import (
     extract_event_window,
@@ -39,52 +44,6 @@ LifetimeConfidence = Literal["event_exact", "snapshot_inferred"]
 LifetimeTerminalState = Literal[
     "owner_active", "awaiting_free", "free_completed", "unknown"
 ]
-_STACK_FIELDS = (
-    "filename",
-    "line",
-    "name",
-    "fx_node_op",
-    "fx_node_name",
-    "fx_original_trace",
-)
-
-
-def _normalize_frames(
-    frames: Sequence[Mapping[str, Any]],
-) -> tuple[Mapping[str, Any], ...]:
-    return tuple(
-        {
-            key: int(frame[key]) if key == "line" else str(frame[key])
-            for key in _STACK_FIELDS
-            if frame.get(key) is not None
-        }
-        for frame in frames
-    )
-
-
-def _stack_key(
-    frames: Sequence[Mapping[str, Any]],
-    *,
-    depth: int | None = None,
-    fallback: str = "<unattributed>",
-) -> str:
-    if not frames:
-        return fallback
-    selected = frames if depth is None else frames[:depth]
-    return " <- ".join(
-        f"{frame.get('filename', '<unknown>')}:{frame.get('line', 0)}:"
-        f"{frame.get('name', '<unknown>')}"
-        for frame in selected
-    )
-
-
-def _stack_fingerprint(frames: Sequence[Mapping[str, Any]]) -> str:
-    if not frames:
-        return "unattributed"
-    encoded = json.dumps(
-        list(frames), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _cohort_id(
@@ -202,10 +161,10 @@ class _CohortTransition:
 
     @property
     def stack_key(self) -> str:
-        return _stack_key(self.stack_frames, fallback=self.stack_fallback)
+        return stack_key(self.stack_frames, fallback=self.stack_fallback)
 
     def display_stack(self, depth: int) -> str:
-        return _stack_key(self.stack_frames, depth=depth, fallback=self.stack_fallback)
+        return stack_key(self.stack_frames, depth=depth, fallback=self.stack_fallback)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -288,10 +247,10 @@ class AllocationCohort:
 
     @property
     def stack_key(self) -> str:
-        return _stack_key(self.stack_frames)
+        return stack_key(self.stack_frames)
 
     def display_stack(self, depth: int) -> str:
-        return _stack_key(self.stack_frames, depth=depth)
+        return stack_key(self.stack_frames, depth=depth)
 
     @property
     def free_requested_bytes(self) -> int:
@@ -725,7 +684,7 @@ def _active_blocks_from_segments(
                     size_bytes=int(block.get("size", 0) or 0),
                     requested_bytes=int(block.get("requested_size", 0) or 0),
                     state=str(block.get("state")),
-                    stack_frames=_normalize_frames(block.get("frames") or ()),
+                    stack_frames=normalize_stack_frames(block.get("frames") or ()),
                 )
             )
             ordinal += 1
@@ -851,7 +810,7 @@ def _track_instances(
                 current.pop(key, None)
             size = abs(entry.size_bytes)
             pool_id = _event_pool_id(entry, history.pool_ranges)
-            frames = _normalize_frames(entry.frames)
+            frames = normalize_stack_frames(entry.frames)
             birth = CohortBirth(
                 start_index=history.start.index,
                 end_index=history.end.index,
@@ -1053,7 +1012,7 @@ def _transition_from_event(
     instance: _AllocationInstance,
     entry: AllocatorTraceEntry,
 ) -> TransitionT:
-    frames = _normalize_frames(entry.frames)
+    frames = normalize_stack_frames(entry.frames)
     return kind(
         start_index=history.start.index,
         end_index=history.end.index,

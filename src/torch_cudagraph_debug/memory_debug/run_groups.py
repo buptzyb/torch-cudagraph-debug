@@ -302,6 +302,8 @@ def compare_run_group_phases(
         rank_decomposition=frozen_rank_decomposition,
         phase_aggregates=_aggregate_phase_rows(frozen_rank_decomposition),
         warnings=tuple(dict.fromkeys(warnings)),
+        display_stack_depth=options.stack_depth,
+        display_limit=options.limit,
     )
 
 

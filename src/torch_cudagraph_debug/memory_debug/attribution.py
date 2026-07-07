@@ -10,7 +10,12 @@ MissingPolicy = Literal["warn", "error"]
 
 @dataclass(frozen=True)
 class MemoryAttributionOptions:
-    """Optional allocator-history attribution for memory analysis."""
+    """Optional allocator-history attribution and report presentation.
+
+    `stack_depth` and `limit` affect text and HTML presentation only.
+    Stack identity and structured in-memory, JSON, and CSV results always use
+    complete stacks and retain every row.
+    """
 
     stacks: bool = False
     events: bool = False

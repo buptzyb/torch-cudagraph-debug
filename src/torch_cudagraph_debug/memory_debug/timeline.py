@@ -197,6 +197,8 @@ def _build_timeline(
         observation_entries=tuple(observation_entries),
         point_comparisons=point_comparisons,
         allocation_lifetimes=allocation_lifetimes,
+        display_stack_depth=options.stack_depth,
+        display_limit=options.limit,
     )
 
 

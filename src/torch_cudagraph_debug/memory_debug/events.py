@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._pool_ranges import PoolRangeIndex, build_pool_range_index
+from ._stack_trace import normalize_stack_frames, stack_fingerprint
 from .allocator_snapshot import (
     AllocatorSnapshotData,
     AllocatorTraceEntry,
@@ -46,6 +47,7 @@ class AllocatorEventSummary:
     stream: Any
     action: str
     stack_key: str
+    stack_fingerprint: str
     size_bytes: int
     count: int
     attribution_confidence: str
@@ -60,6 +62,7 @@ class AllocatorEventSummary:
             "stream_id": stream_label(self.stream),
             "action": self.action,
             "stack_key": self.stack_key,
+            "stack_fingerprint": self.stack_fingerprint,
             "size_bytes": self.size_bytes,
             "count": self.count,
             "attribution_confidence": self.attribution_confidence,
@@ -180,23 +183,14 @@ def summarize_allocator_events(
     *,
     reference_segments: Sequence[Mapping[str, Any]],
     candidate_segments: Sequence[Mapping[str, Any]],
-    stack_depth: int = 2,
-    top: int | None = 20,
 ) -> tuple[AllocatorEventSummary, ...]:
     """Aggregate historical events separately from active allocation stacks."""
 
-    if type(stack_depth) is not int:
-        raise TypeError("stack_depth must be an integer")
-    if stack_depth < 1:
-        raise ValueError("stack_depth must be >= 1")
-    if top is not None and type(top) is not int:
-        raise TypeError("top must be an integer or None")
-    if top is not None and top < 1:
-        raise ValueError("top must be >= 1")
     ranges = build_pool_range_index(candidate_segments, reference_segments)
     totals: dict[tuple[tuple[Any, ...], Any, str, str, str], Counter[str]] = (
         defaultdict(Counter)
     )
+    stack_keys: dict[str, str] = {}
     for entry in entries:
         if entry.action == "snapshot":
             continue
@@ -206,8 +200,11 @@ def summarize_allocator_events(
             pool_id, confidence = _attribute_pool(
                 entry.device_index, entry.addr, ranges
             )
-        stack_key = stack_key_from_frames(entry.frames, depth=stack_depth)
-        key = (pool_id, entry.stream, entry.action, stack_key, confidence)
+        frames = normalize_stack_frames(entry.frames)
+        stack_key = stack_key_from_frames(frames)
+        fingerprint = stack_fingerprint(frames)
+        stack_keys[fingerprint] = stack_key
+        key = (pool_id, entry.stream, entry.action, fingerprint, confidence)
         totals[key]["count"] += 1
         totals[key]["size"] += abs(entry.size_bytes)
 
@@ -218,7 +215,8 @@ def summarize_allocator_events(
                     pool_id=pool_id,
                     stream=stream,
                     action=action,
-                    stack_key=stack_key,
+                    stack_key=stack_keys[fingerprint],
+                    stack_fingerprint=fingerprint,
                     size_bytes=int(values["size"]),
                     count=int(values["count"]),
                     attribution_confidence=confidence,
@@ -227,7 +225,7 @@ def summarize_allocator_events(
                     pool_id,
                     stream,
                     action,
-                    stack_key,
+                    fingerprint,
                     confidence,
                 ), values in totals.items()
             ),
@@ -238,10 +236,11 @@ def summarize_allocator_events(
                 stream_label(item.stream),
                 item.action,
                 item.stack_key,
+                item.stack_fingerprint,
             ),
         )
     )
-    return rows if top is None else rows[:top]
+    return rows
 
 
 def _last_marker_index(

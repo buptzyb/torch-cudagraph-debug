@@ -77,6 +77,11 @@
 
 ### Changed
 
+- Allocation-stack and allocator-event attribution now always use complete
+  normalized stack identity and retain every structured row. `stack_depth` and
+  `limit` affect text and HTML presentation only across comparisons, timelines,
+  phase reports, and run-group phase reports. Advanced structured helpers no
+  longer accept lossy depth or row-limit parameters.
 - `TensorProbe.close()` and `TensorRecorder.close()` now accept the same
   bool/stream/device synchronization target as tensor result queries. Closing
   an enabled probe is rejected during CUDA Graph capture.

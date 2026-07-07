@@ -850,7 +850,10 @@ on devices with no endpoint segment. Markers from one device cannot satisfy
 another device's boundary.
 
 Missing requested history adds a warning or raises `MemoryHistoryError`
-according to `on_missing`.
+according to `on_missing`. All stack and event analysis uses complete normalized
+stacks and retains every row. `stack_depth` and `limit` are presentation
+defaults for text and HTML only; in-memory models, `to_dict()`, JSON, and CSV
+remain complete.
 
 ### MemoryLifetimeOptions
 
@@ -1087,15 +1090,27 @@ State comparisons, timelines, phase comparisons, and group phase comparisons
 use:
 
 ```python
-result.to_text(include_unchanged=True) -> str
+result.to_text(
+    include_unchanged=True, limit=None, stack_depth=None
+) -> str
 result.to_dict() -> dict
-result.to_html(include_unchanged=True) -> str
-result.write(output_dir, include_unchanged=True) -> dict[str, Path]
+result.to_html(
+    include_unchanged=True, limit=None, stack_depth=None
+) -> str
+result.write(
+    output_dir,
+    include_unchanged=True,
+    limit=None,
+    stack_depth=None,
+) -> dict[str, Path]
 ```
 
-`include_unchanged=False` filters zero-change rows from text, HTML, and CSV.
-`to_dict()` and `report.json` always retain complete data. Timeline and phase
-objects aggregate warnings from their component comparisons at the top level.
+`include_unchanged=False` filters zero-change allocator-state rows from
+text, HTML, and CSV. Attribution rows are always complete in memory, `to_dict()`,
+JSON, and CSV. `limit` and `stack_depth` restrict only their text/HTML
+presentation. Timeline, phase, and group-phase reports apply the limit
+independently to each interval or component and aggregate component warnings at
+the top level.
 
 Lifetime analyses accept presentation overrides without changing structured
 results:
@@ -1244,9 +1259,7 @@ advanced.summarize_allocation_stacks(
     *,
     pool_id=None,
     stream=None,
-    stack_depth=2,
     by_stream=False,
-    top=None,
 )
 advanced.compare_allocation_stacks(
     reference,
@@ -1254,9 +1267,7 @@ advanced.compare_allocation_stacks(
     *,
     pool_id=None,
     stream=None,
-    stack_depth=2,
     by_stream=False,
-    top=None,
     include_unchanged=False,
 )
 ```
@@ -1264,7 +1275,9 @@ advanced.compare_allocation_stacks(
 `AllocationStackDelta` stores `reference_pool_id` and `candidate_pool_id`
 separately because explicitly mapped private pools can have different IDs.
 Its size, requested-byte, and count fields each retain reference, candidate,
-and delta values.
+and delta values. Advanced stack and event helpers always group by complete
+normalized stacks and return every row; callers perform any custom slicing
+afterward.
 
 Allocator-event types and helpers:
 
@@ -1283,8 +1296,6 @@ advanced.summarize_allocator_events(
     *,
     reference_segments,
     candidate_segments,
-    stack_depth=2,
-    top=20,
 )
 ```
 
@@ -1293,7 +1304,7 @@ Identity, stack-key, and formatting helpers:
 ```python
 advanced.pool_id_label(pool_id)
 advanced.stream_label(stream)
-advanced.stack_key_from_frames(frames, *, depth=2)
+advanced.stack_key_from_frames(frames)
 advanced.format_bytes(value)
 advanced.format_delta_bytes(value)
 advanced.format_comparison(reference, candidate, delta)

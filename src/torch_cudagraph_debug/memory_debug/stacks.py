@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from ._pool_identity import PoolId
+from ._stack_trace import normalize_stack_frames, stack_fingerprint
 from .allocator_snapshot import (
     ACTIVE_STATES,
     AllocatorSnapshotData,
@@ -52,6 +52,7 @@ class AllocationStackSummary:
     pool_id: tuple[Any, ...]
     stream: Any | None
     stack_key: str
+    stack_fingerprint: str
     size_bytes: int
     requested_bytes: int
     count: int
@@ -60,6 +61,7 @@ class AllocationStackSummary:
         row: dict[str, object] = {
             "pool_id": pool_id_label(self.pool_id),
             "stack_key": self.stack_key,
+            "stack_fingerprint": self.stack_fingerprint,
             "size_bytes": self.size_bytes,
             "requested_bytes": self.requested_bytes,
             "count": self.count,
@@ -79,6 +81,7 @@ class AllocationStackDelta:
     candidate_pool_id: tuple[Any, ...]
     stream: Any | None
     stack_key: str
+    stack_fingerprint: str
     reference_size_bytes: int
     candidate_size_bytes: int
     delta_size_bytes: int
@@ -100,6 +103,7 @@ class AllocationStackDelta:
             "reference_pool_id": pool_id_label(self.reference_pool_id),
             "candidate_pool_id": pool_id_label(self.candidate_pool_id),
             "stack_key": self.stack_key,
+            "stack_fingerprint": self.stack_fingerprint,
             "reference_size_bytes": self.reference_size_bytes,
             "candidate_size_bytes": self.candidate_size_bytes,
             "delta_size_bytes": self.delta_size_bytes,
@@ -125,14 +129,24 @@ class _AllocationStackIndex:
     by_pool_stream: Mapping[tuple[PoolId, Any, str], AllocationStackSummary]
 
 
+@dataclass
+class _AllocationStackTotals:
+    stack_key: str
+    size_bytes: int = 0
+    requested_bytes: int = 0
+    count: int = 0
+
+    def add(self, *, size_bytes: int, requested_bytes: int) -> None:
+        self.size_bytes += size_bytes
+        self.requested_bytes += requested_bytes
+        self.count += 1
+
+
 def _build_allocation_stack_index(
     segments: Sequence[Mapping[str, Any]],
-    *,
-    stack_depth: int,
 ) -> _AllocationStackIndex:
-    _validate_stack_depth(stack_depth)
-    aggregate: dict[tuple[PoolId, str], list[int]] = defaultdict(lambda: [0, 0, 0])
-    detailed: dict[tuple[PoolId, Any, str], list[int]] = defaultdict(lambda: [0, 0, 0])
+    aggregate: dict[tuple[PoolId, str], _AllocationStackTotals] = {}
+    detailed: dict[tuple[PoolId, Any, str], _AllocationStackTotals] = {}
     active = attributed = 0
     for segment in segments:
         pool_id = normalize_pool_id(segment.get("segment_pool_id"))
@@ -142,18 +156,18 @@ def _build_allocation_stack_index(
                 continue
             size = int(block.get("size", 0) or 0)
             requested = int(block.get("requested_size", 0) or 0)
-            frames = block.get("frames") or ()
+            frames = normalize_stack_frames(block.get("frames") or ())
             active += size
             if frames:
                 attributed += size
-            stack_key = stack_key_from_frames(frames, depth=stack_depth)
-            for bucket in (
-                aggregate[(pool_id, stack_key)],
-                detailed[(pool_id, stream, stack_key)],
+            stack_key = stack_key_from_frames(frames)
+            fingerprint = stack_fingerprint(frames)
+            for index, key in (
+                (aggregate, (pool_id, fingerprint)),
+                (detailed, (pool_id, stream, fingerprint)),
             ):
-                bucket[0] += size
-                bucket[1] += requested
-                bucket[2] += 1
+                bucket = index.setdefault(key, _AllocationStackTotals(stack_key))
+                bucket.add(size_bytes=size, requested_bytes=requested)
     return _AllocationStackIndex(
         coverage=AllocationStackCoverage(
             active_bytes=active,
@@ -164,10 +178,11 @@ def _build_allocation_stack_index(
             key: AllocationStackSummary(
                 pool_id=key[0],
                 stream=None,
-                stack_key=key[1],
-                size_bytes=value[0],
-                requested_bytes=value[1],
-                count=value[2],
+                stack_key=value.stack_key,
+                stack_fingerprint=key[1],
+                size_bytes=value.size_bytes,
+                requested_bytes=value.requested_bytes,
+                count=value.count,
             )
             for key, value in aggregate.items()
         },
@@ -175,10 +190,11 @@ def _build_allocation_stack_index(
             key: AllocationStackSummary(
                 pool_id=key[0],
                 stream=key[1],
-                stack_key=key[2],
-                size_bytes=value[0],
-                requested_bytes=value[1],
-                count=value[2],
+                stack_key=value.stack_key,
+                stack_fingerprint=key[2],
+                size_bytes=value.size_bytes,
+                requested_bytes=value.requested_bytes,
+                count=value.count,
             )
             for key, value in detailed.items()
         },
@@ -190,7 +206,6 @@ def _compare_stack_indexes(
     candidate: _AllocationStackIndex,
     *,
     by_stream: bool,
-    top: int | None,
     include_unchanged: bool = False,
 ) -> tuple[AllocationStackDelta, ...]:
     reference_rows = (
@@ -202,7 +217,6 @@ def _compare_stack_indexes(
     return _compare_stack_rows(
         reference_rows,
         candidate_rows,
-        top=top,
         include_unchanged=include_unchanged,
     )
 
@@ -211,36 +225,36 @@ def _compare_mapped_stack_indexes(
     reference: _AllocationStackIndex,
     candidate: _AllocationStackIndex,
     mapping: Mapping[PoolId, tuple[PoolId, str]],
-    *,
-    top: int | None,
 ) -> tuple[AllocationStackDelta, ...]:
     deltas: list[AllocationStackDelta] = []
     for reference_pool, (candidate_pool, _match) in mapping.items():
         reference_rows = {
-            stack_key: row
-            for (pool_id, stack_key), row in reference.by_pool.items()
+            fingerprint: row
+            for (pool_id, fingerprint), row in reference.by_pool.items()
             if pool_id == reference_pool
         }
         candidate_rows = {
-            stack_key: row
-            for (pool_id, stack_key), row in candidate.by_pool.items()
+            fingerprint: row
+            for (pool_id, fingerprint), row in candidate.by_pool.items()
             if pool_id == candidate_pool
         }
-        for stack_key in set(reference_rows) | set(candidate_rows):
-            reference_row = reference_rows.get(stack_key)
-            candidate_row = candidate_rows.get(stack_key)
+        for fingerprint in set(reference_rows) | set(candidate_rows):
+            reference_row = reference_rows.get(fingerprint)
+            candidate_row = candidate_rows.get(fingerprint)
+            stack_key = (reference_row or candidate_row).stack_key
             delta = _stack_delta(
                 reference_pool_id=reference_pool,
                 candidate_pool_id=candidate_pool,
                 stream=None,
                 stack_key=stack_key,
+                stack_fingerprint=fingerprint,
                 reference=reference_row,
                 candidate=candidate_row,
             )
             if delta.has_changes:
                 deltas.append(delta)
     rows = tuple(sorted(deltas, key=_stack_delta_sort_key))
-    return rows if top is None else rows[:top]
+    return rows
 
 
 def allocation_stack_coverage(
@@ -275,19 +289,13 @@ def summarize_allocation_stacks(
     *,
     pool_id: Sequence[Any] | Any | None = None,
     stream: Any | None = None,
-    stack_depth: int = 2,
     by_stream: bool = False,
-    top: int | None = None,
 ) -> tuple[AllocationStackSummary, ...]:
     """Group active blocks by allocation stack, aggregating streams by default."""
 
-    _validate_stack_depth(stack_depth)
-    _validate_top(top)
     pool_filter = normalize_pool_id(pool_id) if pool_id is not None else None
     stream_filter = normalize_stream(stream) if stream is not None else None
-    totals: dict[tuple[tuple[Any, ...], Any | None, str], list[int]] = defaultdict(
-        lambda: [0, 0, 0]
-    )
+    totals: dict[tuple[tuple[Any, ...], Any | None, str], _AllocationStackTotals] = {}
     for segment in normalize_snapshot(snapshot):
         segment_pool = normalize_pool_id(segment.get("segment_pool_id"))
         segment_stream = normalize_stream(segment.get("stream"))
@@ -299,23 +307,28 @@ def summarize_allocation_stacks(
         for block in segment.get("blocks", ()):
             if str(block.get("state")) not in ACTIVE_STATES:
                 continue
-            stack_key = stack_key_from_frames(
-                block.get("frames") or (), depth=stack_depth
+            frames = normalize_stack_frames(block.get("frames") or ())
+            stack_key = stack_key_from_frames(frames)
+            fingerprint = stack_fingerprint(frames)
+            bucket = totals.setdefault(
+                (segment_pool, output_stream, fingerprint),
+                _AllocationStackTotals(stack_key),
             )
-            bucket = totals[(segment_pool, output_stream, stack_key)]
-            bucket[0] += int(block.get("size", 0) or 0)
-            bucket[1] += int(block.get("requested_size", 0) or 0)
-            bucket[2] += 1
+            bucket.add(
+                size_bytes=int(block.get("size", 0) or 0),
+                requested_bytes=int(block.get("requested_size", 0) or 0),
+            )
     rows = tuple(
         sorted(
             (
                 AllocationStackSummary(
                     pool_id=key[0],
                     stream=key[1],
-                    stack_key=key[2],
-                    size_bytes=value[0],
-                    requested_bytes=value[1],
-                    count=value[2],
+                    stack_key=value.stack_key,
+                    stack_fingerprint=key[2],
+                    size_bytes=value.size_bytes,
+                    requested_bytes=value.requested_bytes,
+                    count=value.count,
                 )
                 for key, value in totals.items()
             ),
@@ -326,10 +339,11 @@ def summarize_allocation_stacks(
                 pool_id_label(item.pool_id),
                 "" if item.stream is None else stream_label(item.stream),
                 item.stack_key,
+                item.stack_fingerprint,
             ),
         )
     )
-    return rows if top is None else rows[:top]
+    return rows
 
 
 def compare_allocation_stacks(
@@ -338,35 +352,28 @@ def compare_allocation_stacks(
     *,
     pool_id: Sequence[Any] | Any | None = None,
     stream: Any | None = None,
-    stack_depth: int = 2,
     by_stream: bool = False,
-    top: int | None = None,
     include_unchanged: bool = False,
 ) -> tuple[AllocationStackDelta, ...]:
     """Compare active allocation-stack buckets between two snapshots."""
 
-    _validate_stack_depth(stack_depth)
-    _validate_top(top)
     if type(by_stream) is not bool or type(include_unchanged) is not bool:
         raise TypeError("by_stream and include_unchanged must be booleans")
     reference_rows = summarize_allocation_stacks(
         reference,
         pool_id=pool_id,
         stream=stream,
-        stack_depth=stack_depth,
         by_stream=by_stream,
     )
     candidate_rows = summarize_allocation_stacks(
         candidate,
         pool_id=pool_id,
         stream=stream,
-        stack_depth=stack_depth,
         by_stream=by_stream,
     )
     return _compare_stack_rows(
         reference_rows,
         candidate_rows,
-        top=top,
         include_unchanged=include_unchanged,
     )
 
@@ -375,29 +382,31 @@ def _compare_stack_rows(
     reference_rows: Iterable[AllocationStackSummary],
     candidate_rows: Iterable[AllocationStackSummary],
     *,
-    top: int | None,
     include_unchanged: bool,
 ) -> tuple[AllocationStackDelta, ...]:
     reference_map = {
-        (row.pool_id, row.stream, row.stack_key): row for row in reference_rows
+        (row.pool_id, row.stream, row.stack_fingerprint): row for row in reference_rows
     }
     candidate_map = {
-        (row.pool_id, row.stream, row.stack_key): row for row in candidate_rows
+        (row.pool_id, row.stream, row.stack_fingerprint): row for row in candidate_rows
     }
     deltas = []
     for key in set(reference_map) | set(candidate_map):
+        reference = reference_map.get(key)
+        candidate = candidate_map.get(key)
         delta = _stack_delta(
             reference_pool_id=key[0],
             candidate_pool_id=key[0],
             stream=key[1],
-            stack_key=key[2],
-            reference=reference_map.get(key),
-            candidate=candidate_map.get(key),
+            stack_key=(reference or candidate).stack_key,
+            stack_fingerprint=key[2],
+            reference=reference,
+            candidate=candidate,
         )
         if include_unchanged or delta.has_changes:
             deltas.append(delta)
     rows = tuple(sorted(deltas, key=_stack_delta_sort_key))
-    return rows if top is None else rows[:top]
+    return rows
 
 
 def _stack_delta(
@@ -406,6 +415,7 @@ def _stack_delta(
     candidate_pool_id: PoolId,
     stream: Any | None,
     stack_key: str,
+    stack_fingerprint: str,
     reference: AllocationStackSummary | None,
     candidate: AllocationStackSummary | None,
 ) -> AllocationStackDelta:
@@ -420,6 +430,7 @@ def _stack_delta(
         candidate_pool_id=candidate_pool_id,
         stream=stream,
         stack_key=stack_key,
+        stack_fingerprint=stack_fingerprint,
         reference_size_bytes=reference_size,
         candidate_size_bytes=candidate_size,
         delta_size_bytes=candidate_size - reference_size,
@@ -434,7 +445,7 @@ def _stack_delta(
 
 def _stack_delta_sort_key(
     item: AllocationStackDelta,
-) -> tuple[int, int, int, str, str, str]:
+) -> tuple[int, int, int, str, str, str, str]:
     return (
         -abs(item.delta_size_bytes),
         -abs(item.delta_requested_bytes),
@@ -442,20 +453,5 @@ def _stack_delta_sort_key(
         pool_id_label(item.candidate_pool_id),
         "" if item.stream is None else stream_label(item.stream),
         item.stack_key,
+        item.stack_fingerprint,
     )
-
-
-def _validate_stack_depth(value: int) -> None:
-    if type(value) is not int:
-        raise TypeError("stack_depth must be an integer")
-    if value < 1:
-        raise ValueError("stack_depth must be >= 1")
-
-
-def _validate_top(value: int | None) -> None:
-    if value is None:
-        return
-    if type(value) is not int:
-        raise TypeError("top must be an integer or None")
-    if value < 1:
-        raise ValueError("top must be >= 1")

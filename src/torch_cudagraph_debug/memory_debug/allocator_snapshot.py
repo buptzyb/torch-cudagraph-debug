@@ -16,6 +16,7 @@ from ._pool_identity import (
     pool_id_label as pool_id_label,
     stream_label as stream_label,
 )
+from ._stack_trace import normalize_stack_frames, stack_key
 from .comparison_models import MemoryLifecycleDelta
 from .stats import MemoryStats
 
@@ -305,23 +306,10 @@ def compare_observation_lifecycle(
     }
 
 
-def frame_location(frame: Mapping[str, Any]) -> str:
-    filename = _string_field(frame, "filename", "frame", "<unknown>")
-    line = _int(frame.get("line"))
-    name = _string_field(frame, "name", "frame", "<module>")
-    return f"{filename}:{line}:{name}"
+def stack_key_from_frames(frames: Sequence[Mapping[str, Any]]) -> str:
+    """Return the complete normalized allocator stack key."""
 
-
-def stack_key_from_frames(
-    frames: Sequence[Mapping[str, Any]], *, depth: int = 2
-) -> str:
-    if type(depth) is not int:
-        raise TypeError("stack depth must be an integer")
-    if depth < 1:
-        raise ValueError("stack depth must be >= 1")
-    if not frames:
-        return "<unattributed>"
-    return " <- ".join(frame_location(frame) for frame in frames[:depth])
+    return stack_key(normalize_stack_frames(frames))
 
 
 def format_bytes(value: int) -> str:

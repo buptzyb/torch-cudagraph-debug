@@ -79,14 +79,7 @@ def _load_state(
         state=state,
         raw=snapshot,
         segments=segments,
-        stacks=(
-            _build_allocation_stack_index(
-                segments,
-                stack_depth=options.stack_depth,
-            )
-            if options.stacks
-            else None
-        ),
+        stacks=(_build_allocation_stack_index(segments) if options.stacks else None),
     )
 
 
@@ -240,12 +233,10 @@ def _compare_independent_states(
     stack_deltas: tuple[AllocationStackDelta, ...] = ()
     if options.stacks:
         reference_index = reference_stack_index or _build_allocation_stack_index(
-            normalize_snapshot(reference.raw_snapshot()),
-            stack_depth=options.stack_depth,
+            normalize_snapshot(reference.raw_snapshot())
         )
         candidate_index = candidate_stack_index or _build_allocation_stack_index(
-            normalize_snapshot(candidate.raw_snapshot()),
-            stack_depth=options.stack_depth,
+            normalize_snapshot(candidate.raw_snapshot())
         )
         reference_coverage = reference_index.coverage
         candidate_coverage = candidate_index.coverage
@@ -259,7 +250,6 @@ def _compare_independent_states(
             reference_index,
             candidate_index,
             mapping,
-            top=options.limit,
         )
         if unmatched_private:
             relation = "cross-run" if independent_kind == "runs" else "cross-probe"
@@ -282,6 +272,8 @@ def _compare_independent_states(
         reference_stack_coverage=reference_coverage,
         candidate_stack_coverage=candidate_coverage,
         lifecycle_available=False,
+        display_stack_depth=options.stack_depth,
+        display_limit=options.limit,
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
@@ -383,6 +375,8 @@ def compare_phases(
         end_gap=end_gap,
         allocator_scope_decomposition=allocator_scope_decomposition,
         pool_decomposition=pool_decomposition,
+        display_stack_depth=options.stack_depth,
+        display_limit=options.limit,
     )
 
 
@@ -522,13 +516,11 @@ def _compare_same_identity_views(
             reference_index,
             candidate_index,
             by_stream=False,
-            top=options.limit,
         )
         stack_detail_deltas = _compare_stack_indexes(
             reference_index,
             candidate_index,
             by_stream=True,
-            top=options.limit,
         )
 
     allocator_events = ()
@@ -582,8 +574,6 @@ def _compare_same_identity_views(
             entries,
             reference_segments=reference_segments,
             candidate_segments=candidate_segments,
-            stack_depth=options.stack_depth,
-            top=options.limit,
         )
 
     allocation_lifetimes = None
@@ -630,6 +620,8 @@ def _compare_same_identity_views(
         events_available=events_available,
         events_complete=events_complete,
         lifecycle_available=True,
+        display_stack_depth=options.stack_depth,
+        display_limit=options.limit,
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
