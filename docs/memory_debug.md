@@ -438,8 +438,15 @@ stack_depth=None)`, `to_dict()`, `to_html(limit=None, stack_depth=None)`, and
 the corresponding parameter-free render methods.
 
 Allocation-stack and allocator-event identity always uses complete
-normalized stacks. `limit` and `stack_depth` affect text and HTML only; in-memory
-results, `to_dict()`, JSON, and CSV retain every attribution row.
+normalized stacks. Public attribution models expose those stacks as
+`stack_frames`. `stack_key` is a location-only convenience string; text and
+HTML append optional FX node metadata to the corresponding frame. `to_dict()`
+and report JSON store frames as arrays, while flat CSV rows store the same data
+as canonical JSON in `stack_frames_json`. `limit` and `stack_depth` affect text
+and HTML only; in-memory results, JSON, and CSV retain every attribution row.
+Limited HTML tables state exactly how many rows or cohorts are shown. Invalid
+`limit` or `stack_depth` values raise before `write()` creates an output
+directory.
 
 `write()` always creates `report.txt`, `report.json`, and `report.html`.
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and

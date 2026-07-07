@@ -20,10 +20,17 @@
   documented.
 - Confirm memory ownership, history policy, cross-run matching, JSON bundle
   format, and one-bundle-per-rank rule are documented.
+- Confirm stack/event JSON contains structured `stack_frames`, CSV contains
+  parseable `stack_frames_json`, FX metadata is readable in text/HTML, and
+  limited HTML tables state shown and total row counts.
 
 ## Local Gate
 
+Install the pinned development tools from `requirements-dev.txt` before
+running the gate. In particular, use the repository's Ruff version.
+
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m py_compile $(find src tests examples -name '*.py')
 bash -n examples/tensor_debug/cli/workflows.sh
 bash -n examples/memory_debug/cli/workflows.sh
@@ -155,6 +162,11 @@ zero skips, then cover rank-local run groups and the remaining CLI commands:
 
 ```bash
 TCGD_TEST_INSTALLED=1 TCGD_FAIL_ON_SKIP=1 python -m pytest -q "${TCGD_REPO_ROOT}/tests"
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  TCGD_TEST_INSTALLED=1 TCGD_FAIL_ON_SKIP=1 \
+  python -m pytest -q \
+  "${TCGD_REPO_ROOT}/tests/memory_debug/test_gpu_smoke.py::test_graph_pool_capture_and_json_bundle_round_trip"
 
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
   "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/distributed_run_groups.py" \

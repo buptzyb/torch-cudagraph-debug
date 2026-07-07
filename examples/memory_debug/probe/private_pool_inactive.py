@@ -52,9 +52,7 @@ def main() -> None:
         if pool_id != DEFAULT_POOL
     )
     if len(private_pool_ids) != 1:
-        raise RuntimeError(
-            f"expected one new private pool, found {private_pool_ids}"
-        )
+        raise RuntimeError(f"expected one new private pool, found {private_pool_ids}")
 
     pool_id = private_pool_ids[0]
     captured = after_capture.pool_stats[pool_id]

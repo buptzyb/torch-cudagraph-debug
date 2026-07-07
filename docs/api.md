@@ -1279,6 +1279,15 @@ and delta values. Advanced stack and event helpers always group by complete
 normalized stacks and return every row; callers perform any custom slicing
 afterward.
 
+`AllocationStackSummary`, `AllocationStackDelta`, and
+`AllocatorEventSummary` expose the complete normalized stack as
+`stack_frames`. `stack_key` remains a location-only convenience string, while
+`stack_fingerprint` includes every normalized frame field, including optional
+`fx_node_op`, `fx_node_name`, and `fx_original_trace` metadata. `to_dict()`
+emits `stack_frames` as a JSON array; flat `to_row()` output uses the canonical
+JSON column `stack_frames_json` so CSV remains lossless. Text and HTML render
+FX metadata alongside its frame location.
+
 Allocator-event types and helpers:
 
 ```python
@@ -1298,6 +1307,9 @@ advanced.summarize_allocator_events(
     candidate_segments,
 )
 ```
+
+Allocator-event rows use the same structured-frame, location-key, fingerprint,
+JSON, and CSV contracts as allocation-stack rows.
 
 Identity, stack-key, and formatting helpers:
 

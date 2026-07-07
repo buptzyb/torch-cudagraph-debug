@@ -8,14 +8,20 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._pool_ranges import PoolRangeIndex, build_pool_range_index
-from ._stack_trace import normalize_stack_frames, stack_fingerprint
+from ._stack_trace import (
+    display_stack,
+    normalize_stack_frames,
+    stack_fingerprint,
+    stack_frames_json,
+    stack_frames_payload,
+    stack_key,
+)
 from .allocator_snapshot import (
     AllocatorSnapshotData,
     AllocatorTraceEntry,
     normalize_device_trace_entries,
     pool_id_label,
     raw_device_trace,
-    stack_key_from_frames,
     stream_label,
 )
 
@@ -46,11 +52,29 @@ class AllocatorEventSummary:
     pool_id: tuple[Any, ...]
     stream: Any
     action: str
-    stack_key: str
+    stack_frames: tuple[Mapping[str, Any], ...]
     stack_fingerprint: str
     size_bytes: int
     count: int
     attribution_confidence: str
+
+    @property
+    def stack_key(self) -> str:
+        return stack_key(self.stack_frames)
+
+    def display_stack(self, depth: int) -> str:
+        return display_stack(self.stack_frames, depth=depth)
+
+    def to_dict(
+        self, *, reference_label: str, candidate_label: str
+    ) -> dict[str, object]:
+        row = self.to_row(
+            reference_label=reference_label,
+            candidate_label=candidate_label,
+        )
+        row.pop("stack_frames_json")
+        row["stack_frames"] = stack_frames_payload(self.stack_frames)
+        return row
 
     def to_row(
         self, *, reference_label: str, candidate_label: str
@@ -63,6 +87,7 @@ class AllocatorEventSummary:
             "action": self.action,
             "stack_key": self.stack_key,
             "stack_fingerprint": self.stack_fingerprint,
+            "stack_frames_json": stack_frames_json(self.stack_frames),
             "size_bytes": self.size_bytes,
             "count": self.count,
             "attribution_confidence": self.attribution_confidence,
@@ -190,7 +215,7 @@ def summarize_allocator_events(
     totals: dict[tuple[tuple[Any, ...], Any, str, str, str], Counter[str]] = (
         defaultdict(Counter)
     )
-    stack_keys: dict[str, str] = {}
+    stack_frames: dict[str, tuple[Mapping[str, Any], ...]] = {}
     for entry in entries:
         if entry.action == "snapshot":
             continue
@@ -201,9 +226,8 @@ def summarize_allocator_events(
                 entry.device_index, entry.addr, ranges
             )
         frames = normalize_stack_frames(entry.frames)
-        stack_key = stack_key_from_frames(frames)
         fingerprint = stack_fingerprint(frames)
-        stack_keys[fingerprint] = stack_key
+        stack_frames[fingerprint] = frames
         key = (pool_id, entry.stream, entry.action, fingerprint, confidence)
         totals[key]["count"] += 1
         totals[key]["size"] += abs(entry.size_bytes)
@@ -215,7 +239,7 @@ def summarize_allocator_events(
                     pool_id=pool_id,
                     stream=stream,
                     action=action,
-                    stack_key=stack_keys[fingerprint],
+                    stack_frames=stack_frames[fingerprint],
                     stack_fingerprint=fingerprint,
                     size_bytes=int(values["size"]),
                     count=int(values["count"]),

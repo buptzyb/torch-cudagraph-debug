@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -282,7 +283,14 @@ def test_group_phase_attribution_is_display_limited_but_csv_is_complete(
     csv_text = paths["allocation_stack_comparisons"].read_text(encoding="utf-8")
     assert "left.py:2:forward" in csv_text
     assert "right.py:3:forward" in csv_text
+    with paths["allocation_stack_comparisons"].open(
+        newline="", encoding="utf-8"
+    ) as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    assert rows
+    assert all(json.loads(row["stack_frames_json"]) for row in rows)
     html = paths["html"].read_text(encoding="utf-8")
+    assert "Showing 6 of 12 rows." in html
     assert "shared.py:1:allocate" in html
     assert "left.py:2:forward" not in html
     assert "right.py:3:forward" not in html

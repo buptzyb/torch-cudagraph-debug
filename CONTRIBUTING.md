@@ -10,7 +10,7 @@ extension for the whole package. Then install from the source checkout:
 
 ```bash
 python -m pip install --upgrade pip "setuptools>=77.0.3" wheel
-python -m pip install pytest build twine ruff
+python -m pip install -r requirements-dev.txt
 python -m pip install --no-build-isolation -e .
 ```
 
@@ -29,6 +29,9 @@ python -m pytest -q tests
 python -m build --sdist --no-isolation
 python -m twine check dist/*
 ```
+
+`requirements-dev.txt` pins the formatter version used by CI so local and
+automated formatting decisions stay identical.
 
 GPU tests are marked with `pytest.mark.gpu` but are included in the default test
 suite; they skip automatically when CUDA or the native extension is unavailable.
@@ -56,4 +59,3 @@ work, enqueue it before the host callback so it becomes part of graph capture.
 This project publishes source distributions first. Do not add prebuilt CUDA
 wheels unless the release process also covers PyTorch, CUDA, Python, and platform
 compatibility for those wheels.
-

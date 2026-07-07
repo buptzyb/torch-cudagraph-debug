@@ -4,6 +4,8 @@ import csv
 import json
 from pathlib import Path
 
+import pytest
+
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
     compare_phases,
@@ -344,7 +346,10 @@ def test_attribution_display_options_do_not_change_structured_results(
     )
 
     assert len(result.allocation_stack_comparisons) == 2
-    assert len(result.to_dict()["allocation_stack_comparisons"]) == 2
+    structured_rows = result.to_dict()["allocation_stack_comparisons"]
+    assert len(structured_rows) == 2
+    assert all(row["stack_frames"] for row in structured_rows)
+    assert all("stack_frames_json" not in row for row in structured_rows)
     compact = result.to_text()
     assert "showing 1 of 2" in compact
     assert "shared.py:1:allocate" in compact
@@ -362,9 +367,11 @@ def test_attribution_display_options_do_not_change_structured_results(
     ) as csv_file:
         rows = list(csv.DictReader(csv_file))
     assert len([row for row in rows if row["scope"] == "pool"]) == 2
+    assert all(json.loads(row["stack_frames_json"]) for row in rows)
     payload = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert len(payload["allocation_stack_comparisons"]) == 2
     html = paths["html"].read_text(encoding="utf-8")
+    assert "Showing 2 of 4 rows." in html
     assert "shared.py:1:allocate" in html
     assert "left.py:2:forward" not in html
     assert "right.py:3:forward" not in html
@@ -401,6 +408,7 @@ def test_timeline_and_phase_propagate_attribution_display_options(
     assert "showing 1 of 2" in timeline.to_text()
     assert "left.py" not in timeline.to_text()
     assert "left.py:2:forward" in timeline.to_text(limit=2, stack_depth=2)
+    assert "Showing 2 of 4 rows." in timeline.to_html()
 
     phase = compare_phases(
         baseline.between("start", "end"),
@@ -411,9 +419,90 @@ def test_timeline_and_phase_propagate_attribution_display_options(
     assert "showing 1 of 2" in phase.to_text()
     assert "left.py" not in phase.to_text()
     assert "left.py:2:forward" in phase.to_text(limit=2, stack_depth=2)
+    assert "Showing 2 of 4 rows." in phase.to_html()
 
     paths = phase.write(tmp_path / "phase", limit=2, stack_depth=2)
     assert "left.py:2:forward" in paths["text"].read_text(encoding="utf-8")
     assert "left.py:2:forward" in paths["html"].read_text(encoding="utf-8")
     payload = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert len(payload["baseline_change"]["allocation_stack_comparisons"]) == 2
+
+
+def test_reports_preserve_fx_frames_and_render_them_readably(
+    tmp_path: Path,
+) -> None:
+    def fx_segment(address: int, active: int, node: str):
+        value = segment(active=active, address=address)
+        value["blocks"][0]["frames"] = [
+            {
+                "filename": "model.py",
+                "line": 10,
+                "name": "forward",
+                "fx_node_op": "call_module",
+                "fx_node_name": node,
+                "fx_original_trace": f"model.{node}",
+            }
+        ]
+        return value
+
+    run = make_run(
+        [
+            snapshot(fx_segment(1000, 10, "left"), fx_segment(2000, 20, "right")),
+            snapshot(fx_segment(1000, 15, "left"), fx_segment(2000, 30, "right")),
+        ],
+        labels=("before", "after"),
+    )
+    result = run.compare(
+        "before",
+        "after",
+        attribution=MemoryAttributionOptions(stacks=True, limit=2),
+    )
+
+    text = result.to_text(stack_depth=1)
+    assert 'fx_node_name="left"' in text
+    assert 'fx_node_name="right"' in text
+    payload = result.to_dict()
+    assert {
+        row["stack_frames"][0]["fx_node_name"]
+        for row in payload["allocation_stack_comparisons"]
+    } == {"left", "right"}
+
+    paths = result.write(tmp_path / "fx-frames", stack_depth=1)
+    html = paths["html"].read_text(encoding="utf-8")
+    assert "fx_node_name=&quot;left&quot;" in html
+    assert "fx_node_name=&quot;right&quot;" in html
+    with paths["allocation_stack_comparisons"].open(
+        newline="", encoding="utf-8"
+    ) as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    assert {
+        json.loads(row["stack_frames_json"])[0]["fx_node_name"] for row in rows
+    } == {"left", "right"}
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value", "message"),
+    (
+        ("limit", 0, "limit must be an integer >= 1"),
+        ("stack_depth", 0, "stack_depth must be an integer >= 1"),
+    ),
+)
+def test_display_options_are_validated_before_render_or_write_side_effects(
+    tmp_path: Path,
+    keyword: str,
+    value: int,
+    message: str,
+) -> None:
+    run = make_run([snapshot(), snapshot()], labels=("before", "after"))
+    result = run.compare("before", "after")
+    options = {keyword: value}
+
+    with pytest.raises(ValueError, match=message):
+        result.to_text(**options)
+    with pytest.raises(ValueError, match=message):
+        result.to_html(**options)
+
+    output = tmp_path / keyword
+    with pytest.raises(ValueError, match=message):
+        result.write(output, **options)
+    assert not output.exists()

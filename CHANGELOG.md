@@ -82,6 +82,10 @@
   `limit` affect text and HTML presentation only across comparisons, timelines,
   phase reports, and run-group phase reports. Advanced structured helpers no
   longer accept lossy depth or row-limit parameters.
+- Allocation-stack, allocator-event, and lifetime models now expose complete
+  structured frames. JSON stores frame arrays, CSV stores canonical
+  `stack_frames_json`, and text/HTML render optional FX metadata without
+  changing the location-only `stack_key` convenience value.
 - `TensorProbe.close()` and `TensorRecorder.close()` now accept the same
   bool/stream/device synchronization target as tensor result queries. Closing
   an enabled probe is rejected during CUDA Graph capture.
@@ -102,6 +106,9 @@
 - Render all four core allocator metrics consistently for pool/stream rows and
   timeline charts, preserve stream-only stack attribution when pool aggregates
   cancel, clean stale optional report artifacts, and return absolute report paths.
+- Report HTML now states shown and total counts for every limited attribution
+  table instead of truncating silently. Invalid display limits and stack depths
+  are rejected before rendering or creating report output directories.
 - Preserve allocation identity by device, address, and generation so distinct
   same-sized blocks are not merged during lifetime analysis.
 - Reclaim eager callback payloads, non-contiguous eager source temporaries, and

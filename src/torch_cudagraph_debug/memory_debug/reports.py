@@ -180,6 +180,12 @@ class MemoryAllocationLifetimeAnalysis:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         if self.active_at is not None:
             selection = f"active_at={_state_label(self.active_at)!r}"
         elif self.born_between is not None:
@@ -293,6 +299,12 @@ class MemoryAllocationLifetimeAnalysis:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         visible = self._visible_cohorts(limit)
         depth = self._display_stack_depth(stack_depth)
         cohort_rows = self._display_cohort_rows(limit, stack_depth)
@@ -360,6 +372,12 @@ class MemoryAllocationLifetimeAnalysis:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> dict[str, Path]:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         root = _prepare_output(output_dir)
         paths = _write_report_documents(
             root,
@@ -412,10 +430,13 @@ class MemoryAllocationLifetimeAnalysis:
         self, limit: int | None = None, stack_depth: int | None = None
     ) -> list[dict[str, object]]:
         depth = self._display_stack_depth(stack_depth)
-        return [
-            {**cohort.to_row(), "stack_key": cohort.display_stack(depth)}
-            for cohort in self._visible_cohorts(limit)
-        ]
+        rows = []
+        for cohort in self._visible_cohorts(limit):
+            row = cohort.to_row()
+            row.pop("stack_frames_json")
+            row["stack_key"] = cohort.display_stack(depth)
+            rows.append(row)
+        return rows
 
     @staticmethod
     def _display_transition_rows(
@@ -423,14 +444,14 @@ class MemoryAllocationLifetimeAnalysis:
         attribute: Literal["births", "free_requests", "free_completions"],
         stack_depth: int,
     ) -> list[dict[str, object]]:
-        return [
-            {
-                **transition.to_row(cohort.cohort_id),
-                "stack_key": transition.display_stack(stack_depth),
-            }
-            for cohort in cohorts
-            for transition in getattr(cohort, attribute)
-        ]
+        rows = []
+        for cohort in cohorts:
+            for transition in getattr(cohort, attribute):
+                row = transition.to_row(cohort.cohort_id)
+                row.pop("stack_frames_json")
+                row["stack_key"] = transition.display_stack(stack_depth)
+                rows.append(row)
+        return rows
 
 
 @dataclass(frozen=True)
@@ -497,6 +518,15 @@ class _MemoryStateComparison:
     def event_rows(self) -> list[dict[str, object]]:
         return [
             item.to_row(
+                reference_label=_state_label(self.reference),
+                candidate_label=_state_label(self.candidate),
+            )
+            for item in self.allocator_events
+        ]
+
+    def event_dicts(self) -> list[dict[str, object]]:
+        return [
+            item.to_dict(
                 reference_label=_state_label(self.reference),
                 candidate_label=_state_label(self.candidate),
             )
@@ -590,7 +620,7 @@ class _MemoryStateComparison:
                 f"{stream_label(item.stream)} {item.action}: "
                 f"{format_bytes(item.size_bytes)} in {item.count} events "
                 f"[{item.attribution_confidence}] at "
-                f"{_display_stack_key(item.stack_key, depth)}"
+                f"{item.display_stack(depth)}"
                 for item in visible
             )
         return lines
@@ -602,6 +632,12 @@ class _MemoryStateComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         reference_label = _state_label(self.reference)
         candidate_label = _state_label(self.candidate)
         lines = [
@@ -696,12 +732,12 @@ class _MemoryStateComparison:
                 item.to_dict() for item in self.observation_comparisons
             ],
             "allocation_stack_comparisons": [
-                item.to_row() for item in self.allocation_stack_comparisons
+                item.to_dict() for item in self.allocation_stack_comparisons
             ],
             "allocation_stack_observation_comparisons": [
-                item.to_row() for item in self.allocation_stack_observation_comparisons
+                item.to_dict() for item in self.allocation_stack_observation_comparisons
             ],
-            "events": self.event_rows(),
+            "events": self.event_dicts(),
             "allocation_lifetimes": (
                 self.allocation_lifetimes.to_dict()
                 if self.allocation_lifetimes is not None
@@ -716,6 +752,31 @@ class _MemoryStateComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
+        stack_rows = self._display_allocation_stack_comparison_rows(
+            limit=limit,
+            stack_depth=stack_depth,
+        )
+        stack_total = len(self.allocation_stack_comparisons) + len(
+            self.allocation_stack_observation_comparisons
+        )
+        event_rows = self._display_event_rows(
+            limit=limit,
+            stack_depth=stack_depth,
+        )
+        cohort_rows = (
+            self.allocation_lifetimes._display_cohort_rows(
+                limit=limit,
+                stack_depth=stack_depth,
+            )
+            if self.allocation_lifetimes is not None
+            else []
+        )
         sections = [
             "<h2>Allocator Totals</h2>",
             _render_table(
@@ -735,32 +796,27 @@ class _MemoryStateComparison:
                 "No changed pool/stream observations",
             ),
         ]
-        if (
-            self.allocation_stack_comparisons
-            or self.allocation_stack_observation_comparisons
-        ):
+        if stack_rows:
             sections.extend(
                 [
                     "<h2>Allocation Stacks</h2>",
                     _render_table(
-                        self._display_allocation_stack_comparison_rows(
-                            limit=limit,
-                            stack_depth=stack_depth,
-                        ),
+                        stack_rows,
                         "No stack deltas",
+                        caption=_showing_caption(len(stack_rows), stack_total),
                     ),
                 ]
             )
-        if self.allocator_events:
+        if event_rows:
             sections.extend(
                 [
                     "<h2>Allocator Events</h2>",
                     _render_table(
-                        self._display_event_rows(
-                            limit=limit,
-                            stack_depth=stack_depth,
-                        ),
+                        event_rows,
                         "No allocator events",
+                        caption=_showing_caption(
+                            len(event_rows), len(self.allocator_events)
+                        ),
                     ),
                 ]
             )
@@ -769,11 +825,13 @@ class _MemoryStateComparison:
                 [
                     "<h2>Allocation Cohorts</h2>",
                     _render_table(
-                        self.allocation_lifetimes._display_cohort_rows(
-                            limit=limit,
-                            stack_depth=stack_depth,
-                        ),
+                        cohort_rows,
                         "No allocation cohorts",
+                        caption=_showing_caption(
+                            len(cohort_rows),
+                            len(self.allocation_lifetimes.cohorts),
+                            noun="cohorts",
+                        ),
                     ),
                 ]
             )
@@ -793,6 +851,12 @@ class _MemoryStateComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> dict[str, Path]:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         root = _prepare_output(output_dir)
         paths = _write_common(
             root,
@@ -915,6 +979,12 @@ class MemoryTimeline:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         lines = [f"CUDA allocator memory timeline {self.run.name!r}"]
         lines.extend(f"  warning: {warning}" for warning in self.warnings)
         allocator_scopes_by_point: dict[
@@ -1025,6 +1095,12 @@ class MemoryTimeline:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         pool_entries = self.pool_rows(include_unchanged=include_unchanged)
         allocation_stack_rows = [
             {
@@ -1046,6 +1122,20 @@ class MemoryTimeline:
                 stack_depth=stack_depth,
             )
         ]
+        allocation_stack_total = sum(
+            len(item.allocation_stack_comparisons)
+            + len(item.allocation_stack_observation_comparisons)
+            for item in self.point_comparisons
+        )
+        event_total = sum(len(item.allocator_events) for item in self.point_comparisons)
+        cohort_rows = (
+            self.allocation_lifetimes._display_cohort_rows(
+                limit=limit,
+                stack_depth=stack_depth,
+            )
+            if self.allocation_lifetimes is not None
+            else []
+        )
         sections = [
             "<h2>Allocator Totals</h2>",
             _render_table(
@@ -1072,14 +1162,24 @@ class MemoryTimeline:
             sections.extend(
                 [
                     "<h2>Allocation Stack Deltas</h2>",
-                    _render_table(allocation_stack_rows, "No stack deltas"),
+                    _render_table(
+                        allocation_stack_rows,
+                        "No stack deltas",
+                        caption=_showing_caption(
+                            len(allocation_stack_rows), allocation_stack_total
+                        ),
+                    ),
                 ]
             )
         if event_rows:
             sections.extend(
                 [
                     "<h2>Allocator Events</h2>",
-                    _render_table(event_rows, "No allocator events"),
+                    _render_table(
+                        event_rows,
+                        "No allocator events",
+                        caption=_showing_caption(len(event_rows), event_total),
+                    ),
                 ]
             )
         if self.allocation_lifetimes is not None:
@@ -1088,11 +1188,13 @@ class MemoryTimeline:
                     "<h2>Allocation Cohorts</h2>",
                     _cohort_timeline_svg(self.allocation_lifetimes.point_rows()),
                     _render_table(
-                        self.allocation_lifetimes._display_cohort_rows(
-                            limit=limit,
-                            stack_depth=stack_depth,
-                        ),
+                        cohort_rows,
                         "No allocation cohorts",
+                        caption=_showing_caption(
+                            len(cohort_rows),
+                            len(self.allocation_lifetimes.cohorts),
+                            noun="cohorts",
+                        ),
                     ),
                 ]
             )
@@ -1108,6 +1210,12 @@ class MemoryTimeline:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> dict[str, Path]:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         root = _prepare_output(output_dir)
         paths = _write_common(
             root,
@@ -1205,6 +1313,12 @@ class MemoryPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         lines = [
             f"Phase comparison {self.baseline_name!r} vs {self.candidate_name!r}",
             "  end_gap = start_gap + candidate_change - baseline_change",
@@ -1287,6 +1401,12 @@ class MemoryPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         sections = [
             "<h2>Allocator-Scope Decomposition</h2>",
             _render_table(
@@ -1340,7 +1460,17 @@ class MemoryPhaseComparison:
                 sections.extend(
                     [
                         f"<h2>{comparison_name}: Allocation Stacks</h2>",
-                        _render_table(stack_rows, "No stack deltas"),
+                        _render_table(
+                            stack_rows,
+                            "No stack deltas",
+                            caption=_showing_caption(
+                                len(stack_rows),
+                                len(comparison.allocation_stack_comparisons)
+                                + len(
+                                    comparison.allocation_stack_observation_comparisons
+                                ),
+                            ),
+                        ),
                     ]
                 )
             event_rows = comparison._display_event_rows(
@@ -1351,7 +1481,13 @@ class MemoryPhaseComparison:
                 sections.extend(
                     [
                         f"<h2>{comparison_name}: Allocator Events</h2>",
-                        _render_table(event_rows, "No allocator events"),
+                        _render_table(
+                            event_rows,
+                            "No allocator events",
+                            caption=_showing_caption(
+                                len(event_rows), len(comparison.allocator_events)
+                            ),
+                        ),
                     ]
                 )
         for name, comparison in (
@@ -1369,6 +1505,14 @@ class MemoryPhaseComparison:
                             stack_depth=stack_depth,
                         ),
                         "No allocation cohorts",
+                        caption=_showing_caption(
+                            min(
+                                limit,
+                                len(comparison.allocation_lifetimes.cohorts),
+                            ),
+                            len(comparison.allocation_lifetimes.cohorts),
+                            noun="cohorts",
+                        ),
                     ),
                 ]
             )
@@ -1386,6 +1530,12 @@ class MemoryPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> dict[str, Path]:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         root = _prepare_output(output_dir)
         phase_comparisons = (
             ("baseline_change", self.baseline_change),
@@ -1661,6 +1811,12 @@ class MemoryRunGroupPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         lines = [
             f"Group phase comparison {self.baseline_group.name!r} vs "
             f"{self.candidate_group.name!r} ranks={list(self.rank_comparisons)}",
@@ -1733,10 +1889,21 @@ class MemoryRunGroupPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         stack_rows = []
         event_rows = []
+        stack_total = 0
+        event_total = 0
         for rank, phase in self.rank_comparisons.items():
             for name, comparison in _phase_components(phase):
+                stack_total += len(comparison.allocation_stack_comparisons)
+                stack_total += len(comparison.allocation_stack_observation_comparisons)
+                event_total += len(comparison.allocator_events)
                 stack_rows.extend(
                     {
                         "rank": rank,
@@ -1776,14 +1943,22 @@ class MemoryRunGroupPhaseComparison:
             sections.extend(
                 [
                     "<h2>Per-Rank Allocation Stacks</h2>",
-                    _render_table(stack_rows, "No stack deltas"),
+                    _render_table(
+                        stack_rows,
+                        "No stack deltas",
+                        caption=_showing_caption(len(stack_rows), stack_total),
+                    ),
                 ]
             )
         if event_rows:
             sections.extend(
                 [
                     "<h2>Per-Rank Allocator Events</h2>",
-                    _render_table(event_rows, "No allocator events"),
+                    _render_table(
+                        event_rows,
+                        "No allocator events",
+                        caption=_showing_caption(len(event_rows), event_total),
+                    ),
                 ]
             )
         return _html_document(
@@ -1801,6 +1976,12 @@ class MemoryRunGroupPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> dict[str, Path]:
+        limit, stack_depth = _resolve_display_options(
+            default_limit=self.display_limit,
+            default_stack_depth=self.display_stack_depth,
+            limit=limit,
+            stack_depth=stack_depth,
+        )
         root = _prepare_output(output_dir)
         paths = _write_report_documents(
             root,
@@ -1891,19 +2072,26 @@ def _resolve_display_stack_depth(default: int, override: int | None) -> int:
     return value
 
 
-def _display_stack_key(value: str, depth: int) -> str:
-    if value.startswith("<") and value.endswith(">"):
-        return value
-    return " <- ".join(value.split(" <- ")[:depth])
+def _resolve_display_options(
+    *,
+    default_limit: int,
+    default_stack_depth: int,
+    limit: int | None,
+    stack_depth: int | None,
+) -> tuple[int, int]:
+    return (
+        _resolve_display_limit(default_limit, limit),
+        _resolve_display_stack_depth(default_stack_depth, stack_depth),
+    )
 
 
 def _display_stack_delta_row(
     item: AllocationStackDelta, stack_depth: int
 ) -> dict[str, object]:
-    return {
-        **item.to_row(),
-        "stack_key": _display_stack_key(item.stack_key, stack_depth),
-    }
+    row = item.to_row()
+    row.pop("stack_frames_json")
+    row["stack_key"] = item.display_stack(stack_depth)
+    return row
 
 
 def _display_event_row(
@@ -1913,13 +2101,13 @@ def _display_event_row(
     candidate_label: str,
     stack_depth: int,
 ) -> dict[str, object]:
-    return {
-        **item.to_row(
-            reference_label=reference_label,
-            candidate_label=candidate_label,
-        ),
-        "stack_key": _display_stack_key(item.stack_key, stack_depth),
-    }
+    row = item.to_row(
+        reference_label=reference_label,
+        candidate_label=candidate_label,
+    )
+    row.pop("stack_frames_json")
+    row["stack_key"] = item.display_stack(stack_depth)
+    return row
 
 
 def _pool_text(item: MemoryPoolComparison) -> list[str]:
@@ -2035,7 +2223,7 @@ def _stack_delta_text(
         f"requested={format_comparison(item.reference_requested_bytes, item.candidate_requested_bytes, item.delta_requested_bytes)}, "
         f"count={item.reference_count} -> {item.candidate_count} "
         f"(delta {item.delta_count:+d}) at "
-        f"{_display_stack_key(item.stack_key, stack_depth)}"
+        f"{item.display_stack(stack_depth)}"
     )
 
 
@@ -2179,6 +2367,7 @@ def _html_document(
     h2 {{ margin-top: 28px; font-size: 18px; }}
     .chart {{ max-width: 1120px; overflow-x: auto; border: 1px solid #d1d5db; padding: 12px; }}
     table {{ border-collapse: collapse; margin-top: 12px; font-size: 13px; min-width: 900px; }}
+    caption {{ color: #4b5563; margin-bottom: 8px; text-align: left; }}
     th, td {{ border-bottom: 1px solid #e5e7eb; padding: 7px 9px; text-align: right; white-space: nowrap; }}
     th {{ background: #f3f4f6; color: #374151; }}
     td:first-child, th:first-child {{ text-align: left; }}
@@ -2194,7 +2383,16 @@ def _html_document(
 """
 
 
-def _render_table(rows: Sequence[Mapping[str, object]], empty: str) -> str:
+def _showing_caption(shown: int, total: int, *, noun: str = "rows") -> str:
+    return f"Showing {shown} of {total} {noun}."
+
+
+def _render_table(
+    rows: Sequence[Mapping[str, object]],
+    empty: str,
+    *,
+    caption: str | None = None,
+) -> str:
     if not rows:
         return f'<p class="empty">{escape(empty)}</p>'
     fields: list[str] = []
@@ -2211,7 +2409,11 @@ def _render_table(rows: Sequence[Mapping[str, object]], empty: str) -> str:
         + "</tr>"
         for row in rows
     )
-    return f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
+    caption_html = f"<caption>{escape(caption)}</caption>" if caption else ""
+    return (
+        f"<table>{caption_html}<thead><tr>{header}</tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+    )
 
 
 def _timeline_svg(rows: Sequence[Mapping[str, object]], metric: str) -> str:

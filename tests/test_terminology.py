@@ -13,6 +13,11 @@ from torch_cudagraph_debug.memory_debug import (
     MemorySnapshotComparison,
 )
 from torch_cudagraph_debug.memory_debug._collector import _MemoryCollector
+from torch_cudagraph_debug.memory_debug.advanced import (
+    AllocationStackDelta,
+    AllocationStackSummary,
+    AllocatorEventSummary,
+)
 from torch_cudagraph_debug.memory_debug.reports import (
     MemoryPhaseComparison,
     MemoryRunGroupPhaseComparison,
@@ -148,3 +153,10 @@ def test_memory_result_fields_encode_their_semantics() -> None:
         "display_stack_depth",
         "display_limit",
     )
+
+
+def test_memory_attribution_models_own_structured_frames() -> None:
+    for model in (AllocationStackSummary, AllocationStackDelta, AllocatorEventSummary):
+        names = _field_names(model)
+        assert "stack_frames" in names
+        assert "stack_key" not in names

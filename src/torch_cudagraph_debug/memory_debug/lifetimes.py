@@ -11,8 +11,10 @@ from typing import Any, Literal, TYPE_CHECKING, TypeVar
 
 from ._pool_ranges import PoolRangeIndex, build_pool_range_index
 from ._stack_trace import (
+    display_stack,
     normalize_stack_frames,
     stack_fingerprint as _stack_fingerprint,
+    stack_frames_json,
     stack_key,
 )
 from .errors import MemoryHistoryError
@@ -164,7 +166,11 @@ class _CohortTransition:
         return stack_key(self.stack_frames, fallback=self.stack_fallback)
 
     def display_stack(self, depth: int) -> str:
-        return stack_key(self.stack_frames, depth=depth, fallback=self.stack_fallback)
+        return display_stack(
+            self.stack_frames,
+            depth=depth,
+            fallback=self.stack_fallback,
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -180,7 +186,10 @@ class _CohortTransition:
         }
 
     def to_row(self, cohort_id: str) -> dict[str, object]:
-        return {"cohort_id": cohort_id, **self.to_dict()}
+        row = self.to_dict()
+        row.pop("stack_frames")
+        row["stack_frames_json"] = stack_frames_json(self.stack_frames)
+        return {"cohort_id": cohort_id, **row}
 
 
 @dataclass(frozen=True)
@@ -250,7 +259,7 @@ class AllocationCohort:
         return stack_key(self.stack_frames)
 
     def display_stack(self, depth: int) -> str:
-        return stack_key(self.stack_frames, depth=depth)
+        return display_stack(self.stack_frames, depth=depth)
 
     @property
     def free_requested_bytes(self) -> int:
@@ -324,6 +333,7 @@ class AllocationCohort:
             "streams": ";".join(f"stream[{item}]" for item in self.streams),
             "stack_key": self.stack_key,
             "stack_fingerprint": self.stack_fingerprint,
+            "stack_frames_json": stack_frames_json(self.stack_frames),
             "peak_active_bytes": self.peak_active_bytes,
             "peak_owner_active_bytes": self.peak_owner_active_bytes,
             "peak_awaiting_free_bytes": self.peak_awaiting_free_bytes,

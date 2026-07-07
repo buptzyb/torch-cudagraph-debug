@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._pool_identity import PoolId
-from ._stack_trace import normalize_stack_frames, stack_fingerprint
+from ._stack_trace import (
+    display_stack,
+    normalize_stack_frames,
+    stack_fingerprint,
+    stack_frames_json,
+    stack_frames_payload,
+    stack_key,
+)
 from .allocator_snapshot import (
     ACTIVE_STATES,
     AllocatorSnapshotData,
@@ -17,7 +24,6 @@ from .allocator_snapshot import (
     normalize_snapshot,
     normalize_stream,
     pool_id_label,
-    stack_key_from_frames,
     stream_label,
 )
 
@@ -51,17 +57,31 @@ class AllocationStackSummary:
 
     pool_id: tuple[Any, ...]
     stream: Any | None
-    stack_key: str
+    stack_frames: tuple[Mapping[str, Any], ...]
     stack_fingerprint: str
     size_bytes: int
     requested_bytes: int
     count: int
+
+    @property
+    def stack_key(self) -> str:
+        return stack_key(self.stack_frames)
+
+    def display_stack(self, depth: int) -> str:
+        return display_stack(self.stack_frames, depth=depth)
+
+    def to_dict(self) -> dict[str, object]:
+        row = self.to_row()
+        row.pop("stack_frames_json")
+        row["stack_frames"] = stack_frames_payload(self.stack_frames)
+        return row
 
     def to_row(self) -> dict[str, object]:
         row: dict[str, object] = {
             "pool_id": pool_id_label(self.pool_id),
             "stack_key": self.stack_key,
             "stack_fingerprint": self.stack_fingerprint,
+            "stack_frames_json": stack_frames_json(self.stack_frames),
             "size_bytes": self.size_bytes,
             "requested_bytes": self.requested_bytes,
             "count": self.count,
@@ -80,7 +100,7 @@ class AllocationStackDelta:
     reference_pool_id: tuple[Any, ...]
     candidate_pool_id: tuple[Any, ...]
     stream: Any | None
-    stack_key: str
+    stack_frames: tuple[Mapping[str, Any], ...]
     stack_fingerprint: str
     reference_size_bytes: int
     candidate_size_bytes: int
@@ -93,10 +113,23 @@ class AllocationStackDelta:
     delta_count: int
 
     @property
+    def stack_key(self) -> str:
+        return stack_key(self.stack_frames)
+
+    def display_stack(self, depth: int) -> str:
+        return display_stack(self.stack_frames, depth=depth)
+
+    @property
     def has_changes(self) -> bool:
         return bool(
             self.delta_size_bytes or self.delta_requested_bytes or self.delta_count
         )
+
+    def to_dict(self) -> dict[str, object]:
+        row = self.to_row()
+        row.pop("stack_frames_json")
+        row["stack_frames"] = stack_frames_payload(self.stack_frames)
+        return row
 
     def to_row(self) -> dict[str, object]:
         row: dict[str, object] = {
@@ -104,6 +137,7 @@ class AllocationStackDelta:
             "candidate_pool_id": pool_id_label(self.candidate_pool_id),
             "stack_key": self.stack_key,
             "stack_fingerprint": self.stack_fingerprint,
+            "stack_frames_json": stack_frames_json(self.stack_frames),
             "reference_size_bytes": self.reference_size_bytes,
             "candidate_size_bytes": self.candidate_size_bytes,
             "delta_size_bytes": self.delta_size_bytes,
@@ -131,7 +165,7 @@ class _AllocationStackIndex:
 
 @dataclass
 class _AllocationStackTotals:
-    stack_key: str
+    stack_frames: tuple[Mapping[str, Any], ...]
     size_bytes: int = 0
     requested_bytes: int = 0
     count: int = 0
@@ -160,13 +194,12 @@ def _build_allocation_stack_index(
             active += size
             if frames:
                 attributed += size
-            stack_key = stack_key_from_frames(frames)
             fingerprint = stack_fingerprint(frames)
             for index, key in (
                 (aggregate, (pool_id, fingerprint)),
                 (detailed, (pool_id, stream, fingerprint)),
             ):
-                bucket = index.setdefault(key, _AllocationStackTotals(stack_key))
+                bucket = index.setdefault(key, _AllocationStackTotals(frames))
                 bucket.add(size_bytes=size, requested_bytes=requested)
     return _AllocationStackIndex(
         coverage=AllocationStackCoverage(
@@ -178,7 +211,7 @@ def _build_allocation_stack_index(
             key: AllocationStackSummary(
                 pool_id=key[0],
                 stream=None,
-                stack_key=value.stack_key,
+                stack_frames=value.stack_frames,
                 stack_fingerprint=key[1],
                 size_bytes=value.size_bytes,
                 requested_bytes=value.requested_bytes,
@@ -190,7 +223,7 @@ def _build_allocation_stack_index(
             key: AllocationStackSummary(
                 pool_id=key[0],
                 stream=key[1],
-                stack_key=value.stack_key,
+                stack_frames=value.stack_frames,
                 stack_fingerprint=key[2],
                 size_bytes=value.size_bytes,
                 requested_bytes=value.requested_bytes,
@@ -241,12 +274,12 @@ def _compare_mapped_stack_indexes(
         for fingerprint in set(reference_rows) | set(candidate_rows):
             reference_row = reference_rows.get(fingerprint)
             candidate_row = candidate_rows.get(fingerprint)
-            stack_key = (reference_row or candidate_row).stack_key
+            stack_frames = (reference_row or candidate_row).stack_frames
             delta = _stack_delta(
                 reference_pool_id=reference_pool,
                 candidate_pool_id=candidate_pool,
                 stream=None,
-                stack_key=stack_key,
+                stack_frames=stack_frames,
                 stack_fingerprint=fingerprint,
                 reference=reference_row,
                 candidate=candidate_row,
@@ -308,11 +341,10 @@ def summarize_allocation_stacks(
             if str(block.get("state")) not in ACTIVE_STATES:
                 continue
             frames = normalize_stack_frames(block.get("frames") or ())
-            stack_key = stack_key_from_frames(frames)
             fingerprint = stack_fingerprint(frames)
             bucket = totals.setdefault(
                 (segment_pool, output_stream, fingerprint),
-                _AllocationStackTotals(stack_key),
+                _AllocationStackTotals(frames),
             )
             bucket.add(
                 size_bytes=int(block.get("size", 0) or 0),
@@ -324,7 +356,7 @@ def summarize_allocation_stacks(
                 AllocationStackSummary(
                     pool_id=key[0],
                     stream=key[1],
-                    stack_key=value.stack_key,
+                    stack_frames=value.stack_frames,
                     stack_fingerprint=key[2],
                     size_bytes=value.size_bytes,
                     requested_bytes=value.requested_bytes,
@@ -398,7 +430,7 @@ def _compare_stack_rows(
             reference_pool_id=key[0],
             candidate_pool_id=key[0],
             stream=key[1],
-            stack_key=(reference or candidate).stack_key,
+            stack_frames=(reference or candidate).stack_frames,
             stack_fingerprint=key[2],
             reference=reference,
             candidate=candidate,
@@ -414,7 +446,7 @@ def _stack_delta(
     reference_pool_id: PoolId,
     candidate_pool_id: PoolId,
     stream: Any | None,
-    stack_key: str,
+    stack_frames: tuple[Mapping[str, Any], ...],
     stack_fingerprint: str,
     reference: AllocationStackSummary | None,
     candidate: AllocationStackSummary | None,
@@ -429,7 +461,7 @@ def _stack_delta(
         reference_pool_id=reference_pool_id,
         candidate_pool_id=candidate_pool_id,
         stream=stream,
-        stack_key=stack_key,
+        stack_frames=stack_frames,
         stack_fingerprint=stack_fingerprint,
         reference_size_bytes=reference_size,
         candidate_size_bytes=candidate_size,

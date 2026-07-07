@@ -88,6 +88,12 @@ def main() -> None:
         assert comparison.candidate_stack_coverage is not None
         assert comparison.candidate_stack_coverage.attributed_bytes >= 32 * MIB
         assert comparison.allocation_stack_comparisons
+        largest_stack_delta = max(
+            comparison.allocation_stack_comparisons,
+            key=lambda item: item.delta_size_bytes,
+        )
+        # stack_frames is the lossless programmatic form used by JSON and CSV.
+        assert largest_stack_delta.stack_frames
         assert comparison.events_available is True
         assert comparison.events_complete is True
         assert comparison.allocator_events
@@ -135,6 +141,9 @@ def main() -> None:
 
         print("=== Stack and event attribution ===")
         print(comparison.to_text(include_unchanged=False))
+        print("largest allocation-stack delta frames:")
+        for frame in largest_stack_delta.stack_frames:
+            print(f"  {frame['filename']}:{frame['line']}:{frame['name']}")
         print()
         print("=== Timeline with embedded lifetimes ===")
         print(timeline.to_text(include_unchanged=False))

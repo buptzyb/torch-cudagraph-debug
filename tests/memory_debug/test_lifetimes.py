@@ -57,6 +57,9 @@ def test_snapshot_lifetimes_group_sizes_and_infer_free_completion() -> None:
     assert report.history_requested is False
     assert len(report.cohorts) == 1
     cohort = report.cohorts[0]
+    assert json.loads(cohort.to_row()["stack_frames_json"])[0]["filename"] == (
+        "grads.py"
+    )
     assert [item.active_bytes for item in cohort.points] == [192, 192, 0]
     assert [item.size_bytes for item in cohort.size_histogram] == [128, 64]
     assert cohort.event_exact_free_requested_bytes == 0
@@ -685,6 +688,7 @@ def test_full_stack_identity_and_display_limit_do_not_drop_cohorts() -> None:
     )
     assert first_id in comparison.to_html()
     assert second_id not in comparison.to_html()
+    assert "Showing 1 of 2 cohorts." in comparison.to_html()
     assert len(comparison.to_dict()["allocation_lifetimes"]["cohorts"]) == 2
 
     reversed_run = make_run(

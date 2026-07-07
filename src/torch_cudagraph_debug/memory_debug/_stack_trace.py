@@ -15,12 +15,13 @@ _STACK_FIELDS = (
     "fx_node_name",
     "fx_original_trace",
 )
+_FX_FIELDS = ("fx_node_op", "fx_node_name", "fx_original_trace")
 
 
 def normalize_stack_frames(
     frames: Sequence[Mapping[str, Any]],
 ) -> tuple[Mapping[str, Any], ...]:
-    """Return immutable-by-convention frame mappings with stable field types."""
+    """Return frame mappings with stable fields and value types."""
 
     normalized = []
     for frame in frames:
@@ -41,24 +42,53 @@ def normalize_stack_frames(
     return tuple(normalized)
 
 
+def stack_frames_payload(
+    frames: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return JSON-ready copies of normalized frames."""
+
+    return [dict(frame) for frame in frames]
+
+
+def stack_frames_json(frames: Sequence[Mapping[str, Any]]) -> str:
+    """Serialize normalized frames for one stable flat-report field."""
+
+    return json.dumps(
+        stack_frames_payload(frames),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+
+
 def stack_key(
     frames: Sequence[Mapping[str, Any]],
     *,
     depth: int | None = None,
     fallback: str = "<unattributed>",
 ) -> str:
-    """Format a normalized stack, optionally limiting rendered frames."""
+    """Format stable frame locations without optional FX annotations."""
 
     if depth is not None:
         validate_stack_depth(depth)
     if not frames:
         return fallback
     selected = frames if depth is None else frames[:depth]
-    return " <- ".join(
-        f"{frame.get('filename', '<unknown>')}:{frame.get('line', 0)}:"
-        f"{frame.get('name', '<unknown>')}"
-        for frame in selected
-    )
+    return " <- ".join(_frame_location(frame) for frame in selected)
+
+
+def display_stack(
+    frames: Sequence[Mapping[str, Any]],
+    *,
+    depth: int,
+    fallback: str = "<unattributed>",
+) -> str:
+    """Render frame locations plus any FX metadata for human reports."""
+
+    validate_stack_depth(depth)
+    if not frames:
+        return fallback
+    return " <- ".join(_display_frame(frame) for frame in frames[:depth])
 
 
 def stack_fingerprint(frames: Sequence[Mapping[str, Any]]) -> str:
@@ -66,10 +96,7 @@ def stack_fingerprint(frames: Sequence[Mapping[str, Any]]) -> str:
 
     if not frames:
         return "unattributed"
-    encoded = json.dumps(
-        list(frames), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(stack_frames_json(frames).encode("utf-8")).hexdigest()
 
 
 def validate_stack_depth(value: int) -> None:
@@ -77,3 +104,20 @@ def validate_stack_depth(value: int) -> None:
         raise TypeError("stack_depth must be an integer")
     if value < 1:
         raise ValueError("stack_depth must be >= 1")
+
+
+def _frame_location(frame: Mapping[str, Any]) -> str:
+    return (
+        f"{frame.get('filename', '<unknown>')}:{frame.get('line', 0)}:"
+        f"{frame.get('name', '<unknown>')}"
+    )
+
+
+def _display_frame(frame: Mapping[str, Any]) -> str:
+    metadata = [
+        f"{key}={json.dumps(frame[key], ensure_ascii=True)}"
+        for key in _FX_FIELDS
+        if key in frame
+    ]
+    suffix = f" [{', '.join(metadata)}]" if metadata else ""
+    return _frame_location(frame) + suffix

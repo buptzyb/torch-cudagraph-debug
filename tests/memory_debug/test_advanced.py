@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from torch_cudagraph_debug.memory_debug._pool_ranges import build_pool_range_index
 from torch_cudagraph_debug.memory_debug.advanced import (
@@ -195,7 +197,9 @@ def test_full_stack_identity_includes_fx_frame_metadata() -> None:
             "filename": "model.py",
             "line": 10,
             "name": "forward",
+            "fx_node_op": "call_module",
             "fx_node_name": "left",
+            "fx_original_trace": "model.left",
         }
     ]
     second["blocks"][0]["frames"] = [
@@ -203,7 +207,9 @@ def test_full_stack_identity_includes_fx_frame_metadata() -> None:
             "filename": "model.py",
             "line": 10,
             "name": "forward",
+            "fx_node_op": "call_module",
             "fx_node_name": "right",
+            "fx_original_trace": "model.right",
         }
     ]
 
@@ -212,6 +218,64 @@ def test_full_stack_identity_includes_fx_frame_metadata() -> None:
     assert len(rows) == 2
     assert len({row.stack_fingerprint for row in rows}) == 2
     assert {row.stack_key for row in rows} == {"model.py:10:forward"}
+    assert {row.stack_frames[0]["fx_node_name"] for row in rows} == {
+        "left",
+        "right",
+    }
+    assert {row.to_dict()["stack_frames"][0]["fx_original_trace"] for row in rows} == {
+        "model.left",
+        "model.right",
+    }
+    assert {
+        json.loads(row.to_row()["stack_frames_json"])[0]["fx_node_name"] for row in rows
+    } == {"left", "right"}
+    assert {row.display_stack(1) for row in rows} == {
+        'model.py:10:forward [fx_node_op="call_module", '
+        'fx_node_name="left", fx_original_trace="model.left"]',
+        'model.py:10:forward [fx_node_op="call_module", '
+        'fx_node_name="right", fx_original_trace="model.right"]',
+    }
     assert [row.stack_fingerprint for row in rows] == sorted(
         row.stack_fingerprint for row in rows
     )
+
+    raw = snapshot(
+        traces=[
+            [
+                {
+                    "action": "alloc",
+                    "addr": 1000,
+                    "size": 10,
+                    "stream": 0,
+                    "frames": list(first["blocks"][0]["frames"]),
+                    "pool_id": [0, 0],
+                },
+                {
+                    "action": "alloc",
+                    "addr": 2000,
+                    "size": 10,
+                    "stream": 0,
+                    "frames": list(second["blocks"][0]["frames"]),
+                    "pool_id": [0, 0],
+                },
+            ]
+        ]
+    )
+    event_rows = summarize_allocator_events(
+        normalize_trace_entries(raw),
+        reference_segments=(),
+        candidate_segments=(),
+    )
+
+    assert {row.stack_frames[0]["fx_node_name"] for row in event_rows} == {
+        "left",
+        "right",
+    }
+    assert {
+        json.loads(
+            row.to_row(reference_label="before", candidate_label="after")[
+                "stack_frames_json"
+            ]
+        )[0]["fx_node_name"]
+        for row in event_rows
+    } == {"left", "right"}
