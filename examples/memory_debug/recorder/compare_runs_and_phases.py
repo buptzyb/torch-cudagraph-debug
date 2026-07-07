@@ -13,6 +13,7 @@ from pathlib import Path
 import torch
 
 from torch_cudagraph_debug.memory_debug import (
+    MemoryPoolKey,
     MemoryRecorder,
     MemoryRun,
     compare_phases,
@@ -20,7 +21,7 @@ from torch_cudagraph_debug.memory_debug import (
 )
 
 MIB = 1024 * 1024
-DEFAULT_POOL = (0, 0)
+DEFAULT_POOL_ID = (0, 0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,8 +31,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _format_pool_id(pool_id: tuple[object, ...]) -> str:
-    return ",".join(str(item) for item in pool_id)
+def _format_pool_key(pool_key: MemoryPoolKey) -> str:
+    pool_id = ",".join(str(item) for item in pool_key.pool_id)
+    return f"{pool_key.device_index}:{pool_id}"
 
 
 def _record_scenario(
@@ -39,7 +41,7 @@ def _record_scenario(
     bundle_dir: Path,
     *,
     private_bytes: int,
-) -> tuple[object, ...]:
+) -> MemoryPoolKey:
     recorder = MemoryRecorder(
         name=name,
         rank=0,
@@ -70,7 +72,9 @@ def _record_scenario(
     created_pools = set(run["phase_start"].pool_stats) - set(
         run["before_pool"].pool_stats
     )
-    private_pools = [pool_id for pool_id in created_pools if pool_id != DEFAULT_POOL]
+    private_pools = [
+        pool_key for pool_key in created_pools if pool_key.pool_id != DEFAULT_POOL_ID
+    ]
     if len(private_pools) != 1:
         raise RuntimeError(f"expected one seeded private pool, found {private_pools}")
     assert static_state.numel() == 4 * MIB
@@ -110,7 +114,7 @@ def main() -> None:
 
     pool_mapping = {baseline_pool: candidate_pool}
     pool_map_text = (
-        f"{_format_pool_id(baseline_pool)}={_format_pool_id(candidate_pool)}"
+        f"{_format_pool_key(baseline_pool)}={_format_pool_key(candidate_pool)}"
     )
     (output_dir / "pool-map.txt").write_text(pool_map_text + "\n", encoding="utf-8")
 
@@ -136,7 +140,9 @@ def main() -> None:
     phase_paths = phase.write(output_dir / "phase-comparison")
 
     assert any(item.match == "mapped" for item in endpoint.pool_comparisons)
-    assert all(row["identity_holds"] for row in phase.allocator_scope_decomposition)
+    assert all(
+        row.components.identity_holds for row in phase.allocator_scope_decomposition
+    )
     assert endpoint_paths["json"].is_file()
     assert phase_paths["allocator_scope_decomposition"].is_file()
 

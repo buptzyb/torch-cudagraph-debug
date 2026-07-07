@@ -44,7 +44,7 @@ def main() -> None:
     assert private_total.candidate.active_bytes >= 16 * MIB
     assert static_state.numel() == 4 * MIB
     assert graph_state.numel() == 16 * MIB
-    assert during_capture.index == 1
+    assert during_capture.snapshot_index == 1
 
     print(capture_growth.to_text(include_unchanged=False))
     print()

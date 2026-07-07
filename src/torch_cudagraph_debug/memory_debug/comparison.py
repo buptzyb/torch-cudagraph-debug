@@ -6,28 +6,32 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from ._pool_identity import PoolId
+from ._pool_identity import DEFAULT_POOL_ID, MemoryPoolKey
 from .aggregation import (
     ALLOCATOR_SCOPES,
     compare_allocator_scopes,
     summarize_allocator_scopes,
 )
 from .allocator_snapshot import (
-    DEFAULT_POOL_ID,
     AllocatorSnapshotData,
     compare_observation_lifecycle,
-    normalize_pool_id,
     normalize_snapshot,
     normalize_trace_entries,
-    pool_id_label,
-    stream_label,
     trace_device_indices,
 )
-from .attribution import MemoryAttributionOptions
+from .attribution import (
+    MemoryAttributionOptions,
+    MemoryAttributionStatus,
+    MemoryEvidenceStatus,
+)
 from .comparison_models import (
+    PHASE_METRICS,
+    MemoryAllocatorScopePhaseDecomposition,
     MemoryLifecycleDelta,
     MemoryObservationComparison,
+    MemoryPhaseComponents,
     MemoryPoolComparison,
+    MemoryPoolPhaseDecomposition,
 )
 from .errors import MemoryDebugError, MemoryHistoryError, MemoryOwnershipError
 from .events import (
@@ -87,14 +91,14 @@ def compare_snapshots(
     reference: MemoryProbeSnapshot,
     candidate: MemoryProbeSnapshot,
     *,
-    pool_mapping: Mapping[Any, Any] | None = None,
+    pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemorySnapshotComparison:
     """Compare Probe snapshots using same- or cross-Probe semantics."""
 
     options = attribution or MemoryAttributionOptions()
     same_probe = reference.probe_id == candidate.probe_id
-    if same_probe and candidate.index <= reference.index:
+    if same_probe and candidate.snapshot_index <= reference.snapshot_index:
         raise ValueError("candidate snapshot must follow reference snapshot")
     if same_probe and pool_mapping is not None:
         raise ValueError("pool_mapping is only valid for cross-Probe comparison")
@@ -125,7 +129,7 @@ def compare_points(
     reference: MemoryPoint,
     candidate: MemoryPoint,
     *,
-    pool_mapping: Mapping[Any, Any] | None = None,
+    pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryPointComparison:
     """Compare points from independent runs without address/event identity."""
@@ -149,8 +153,10 @@ def _compare_independent_states(
     reference: _MemoryState,
     candidate: _MemoryState,
     *,
-    pool_mapping: Mapping[Any, Any] | None,
+    pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None,
     options: MemoryAttributionOptions,
+    reference_pool_universe: Mapping[MemoryPoolKey, MemoryStats] | None = None,
+    candidate_pool_universe: Mapping[MemoryPoolKey, MemoryStats] | None = None,
     reference_stack_index: _AllocationStackIndex | None = None,
     candidate_stack_index: _AllocationStackIndex | None = None,
     independent_kind: Literal["runs", "probes"] = "runs",
@@ -167,20 +173,22 @@ def _compare_independent_states(
     reference_pool_stats = reference.pool_stats
     candidate_pool_stats = candidate.pool_stats
     mapping = _validate_pool_mapping(
-        reference_pool_stats, candidate_pool_stats, pool_mapping
+        reference_pool_universe or reference_pool_stats,
+        candidate_pool_universe or candidate_pool_stats,
+        pool_mapping,
     )
     pool_comparisons: list[MemoryPoolComparison] = []
-    matched_reference: set[PoolId] = set()
-    matched_candidate: set[PoolId] = set()
-    for reference_pool, (candidate_pool, match) in mapping.items():
-        matched_reference.add(reference_pool)
-        matched_candidate.add(candidate_pool)
-        reference_stats = reference_pool_stats[reference_pool]
-        candidate_stats = candidate_pool_stats[candidate_pool]
+    matched_reference: set[MemoryPoolKey] = set()
+    matched_candidate: set[MemoryPoolKey] = set()
+    for reference_key, (candidate_key, match) in mapping.items():
+        matched_reference.add(reference_key)
+        matched_candidate.add(candidate_key)
+        reference_stats = reference_pool_stats.get(reference_key, MemoryStats())
+        candidate_stats = candidate_pool_stats.get(candidate_key, MemoryStats())
         pool_comparisons.append(
             MemoryPoolComparison(
-                reference_pool_id=reference_pool,
-                candidate_pool_id=candidate_pool,
+                reference_key=reference_key,
+                candidate_key=candidate_key,
                 match=match,
                 reference=reference_stats,
                 candidate=candidate_stats,
@@ -188,13 +196,13 @@ def _compare_independent_states(
                 lifecycle=None,
             )
         )
-    for pool_id in set(reference_pool_stats) - matched_reference:
-        reference_stats = reference_pool_stats[pool_id]
+    for pool_key in set(reference_pool_stats) - matched_reference:
+        reference_stats = reference_pool_stats[pool_key]
         candidate_stats = MemoryStats()
         pool_comparisons.append(
             MemoryPoolComparison(
-                reference_pool_id=pool_id,
-                candidate_pool_id=None,
+                reference_key=pool_key,
+                candidate_key=None,
                 match="reference_only",
                 reference=reference_stats,
                 candidate=candidate_stats,
@@ -202,13 +210,13 @@ def _compare_independent_states(
                 lifecycle=None,
             )
         )
-    for pool_id in set(candidate_pool_stats) - matched_candidate:
+    for pool_key in set(candidate_pool_stats) - matched_candidate:
         reference_stats = MemoryStats()
-        candidate_stats = candidate_pool_stats[pool_id]
+        candidate_stats = candidate_pool_stats[pool_key]
         pool_comparisons.append(
             MemoryPoolComparison(
-                reference_pool_id=None,
-                candidate_pool_id=pool_id,
+                reference_key=None,
+                candidate_key=pool_key,
                 match="candidate_only",
                 reference=reference_stats,
                 candidate=candidate_stats,
@@ -219,9 +227,12 @@ def _compare_independent_states(
 
     observation_comparisons = _unmatched_independent_observations(reference, candidate)
     warnings = [*reference.warnings, *candidate.warnings]
-    unmatched_private = (
-        set(reference_pool_stats) - matched_reference - {DEFAULT_POOL_ID}
-    ) or (set(candidate_pool_stats) - matched_candidate - {DEFAULT_POOL_ID})
+    unmatched_reference = set(reference_pool_stats) - matched_reference
+    unmatched_candidate = set(candidate_pool_stats) - matched_candidate
+    unmatched_private = any(
+        key.pool_id != DEFAULT_POOL_ID
+        for key in unmatched_reference | unmatched_candidate
+    )
     if unmatched_private:
         warnings.append(
             f"private pools are unmatched across independent {independent_kind} "
@@ -271,9 +282,17 @@ def _compare_independent_states(
         allocation_stack_comparisons=stack_deltas,
         reference_stack_coverage=reference_coverage,
         candidate_stack_coverage=candidate_coverage,
+        attribution_status=_attribution_status(
+            options,
+            reference_coverage=reference_coverage,
+            candidate_coverage=candidate_coverage,
+            events_available=False,
+            events_complete=False,
+            allocation_lifetimes=None,
+        ),
         lifecycle_available=False,
-        display_stack_depth=options.stack_depth,
-        display_limit=options.limit,
+        display_stack_depth=options.display.stack_depth,
+        display_limit=options.display.limit,
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
@@ -282,7 +301,7 @@ def compare_phases(
     baseline: MemoryRange,
     candidate: MemoryRange,
     *,
-    pool_mapping: Mapping[Any, Any] | None = None,
+    pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryPhaseComparison:
     """Decompose candidate-vs-baseline phase memory using four points."""
@@ -335,14 +354,23 @@ def compare_phases(
         events=False,
         lifetimes=False,
         on_missing=options.on_missing,
-        stack_depth=options.stack_depth,
-        limit=options.limit,
+        display=options.display,
     )
+    baseline_pool_universe = {
+        **baseline.start.pool_stats,
+        **baseline.end.pool_stats,
+    }
+    candidate_pool_universe = {
+        **candidate.start.pool_stats,
+        **candidate.end.pool_stats,
+    }
     start_gap = _compare_independent_states(
         baseline.start,
         candidate.start,
         pool_mapping=pool_mapping,
         options=cross_options,
+        reference_pool_universe=baseline_pool_universe,
+        candidate_pool_universe=candidate_pool_universe,
         reference_stack_index=baseline_start_stacks,
         candidate_stack_index=candidate_start_stacks,
     )
@@ -351,6 +379,8 @@ def compare_phases(
         candidate.end,
         pool_mapping=pool_mapping,
         options=cross_options,
+        reference_pool_universe=baseline_pool_universe,
+        candidate_pool_universe=candidate_pool_universe,
         reference_stack_index=baseline_end_stacks,
         candidate_stack_index=candidate_end_stacks,
     )
@@ -375,8 +405,8 @@ def compare_phases(
         end_gap=end_gap,
         allocator_scope_decomposition=allocator_scope_decomposition,
         pool_decomposition=pool_decomposition,
-        display_stack_depth=options.stack_depth,
-        display_limit=options.limit,
+        display_stack_depth=options.display.stack_depth,
+        display_limit=options.display.limit,
     )
 
 
@@ -449,37 +479,36 @@ def _compare_same_identity_views(
     observation_lifecycle = compare_observation_lifecycle(
         reference_segments, candidate_segments
     )
-    lifecycle_by_pool: dict[PoolId, list[MemoryLifecycleDelta]] = {}
+    lifecycle_by_pool: dict[MemoryPoolKey, list[MemoryLifecycleDelta]] = {}
     for key, lifecycle in observation_lifecycle.items():
-        lifecycle_by_pool.setdefault(key.pool_id, []).append(lifecycle)
+        lifecycle_by_pool.setdefault(key.pool_key, []).append(lifecycle)
     pool_lifecycle = {
-        pool_id: MemoryLifecycleDelta.combine(values)
-        for pool_id, values in lifecycle_by_pool.items()
+        pool_key: MemoryLifecycleDelta.combine(values)
+        for pool_key, values in lifecycle_by_pool.items()
     }
 
     pool_comparisons = tuple(
         MemoryPoolComparison(
-            reference_pool_id=pool_id,
-            candidate_pool_id=pool_id,
+            reference_key=pool_key,
+            candidate_key=pool_key,
             match=match,
-            reference=reference_pool_stats.get(pool_id, MemoryStats()),
-            candidate=candidate_pool_stats.get(pool_id, MemoryStats()),
+            reference=reference_pool_stats.get(pool_key, MemoryStats()),
+            candidate=candidate_pool_stats.get(pool_key, MemoryStats()),
             delta=MemoryStatsDelta.between(
-                reference_pool_stats.get(pool_id, MemoryStats()),
-                candidate_pool_stats.get(pool_id, MemoryStats()),
+                reference_pool_stats.get(pool_key, MemoryStats()),
+                candidate_pool_stats.get(pool_key, MemoryStats()),
             ),
-            lifecycle=pool_lifecycle.get(pool_id, MemoryLifecycleDelta()),
+            lifecycle=pool_lifecycle.get(pool_key, MemoryLifecycleDelta()),
         )
-        for pool_id in sorted(
-            set(reference_pool_stats) | set(candidate_pool_stats), key=pool_id_label
+        for pool_key in sorted(
+            set(reference_pool_stats) | set(candidate_pool_stats),
+            key=lambda item: item.label,
         )
     )
     observation_comparisons = tuple(
         MemoryObservationComparison(
-            reference_pool_id=key.pool_id,
-            reference_stream=key.stream,
-            candidate_pool_id=key.pool_id,
-            candidate_stream=key.stream,
+            reference_key=key,
+            candidate_key=key,
             match=match,
             reference=reference.observation_stats.get(key, MemoryStats()),
             candidate=candidate.observation_stats.get(key, MemoryStats()),
@@ -491,7 +520,7 @@ def _compare_same_identity_views(
         )
         for key in sorted(
             set(reference.observation_stats) | set(candidate.observation_stats),
-            key=lambda item: (pool_id_label(item.pool_id), stream_label(item.stream)),
+            key=lambda item: item.label,
         )
     )
 
@@ -617,11 +646,17 @@ def _compare_same_identity_views(
         candidate_stack_coverage=candidate_coverage,
         allocator_events=allocator_events,
         allocation_lifetimes=allocation_lifetimes,
-        events_available=events_available,
-        events_complete=events_complete,
+        attribution_status=_attribution_status(
+            options,
+            reference_coverage=reference_coverage,
+            candidate_coverage=candidate_coverage,
+            events_available=events_available,
+            events_complete=events_complete,
+            allocation_lifetimes=allocation_lifetimes,
+        ),
         lifecycle_available=True,
-        display_stack_depth=options.stack_depth,
-        display_limit=options.limit,
+        display_stack_depth=options.display.stack_depth,
+        display_limit=options.display.limit,
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
@@ -635,7 +670,7 @@ def _load_interval_views(
 
 def _state_label(state: _MemoryState) -> str:
     if isinstance(state, MemoryProbeSnapshot):
-        return f"{state.probe_name}@snapshot-{state.index}"
+        return f"{state.probe_name}@snapshot-{state.snapshot_index}"
     return state.label
 
 
@@ -663,42 +698,45 @@ def _segment_device_indices(
 
 
 def _validate_pool_mapping(
-    reference_pool_stats: Mapping[PoolId, MemoryStats],
-    candidate_pool_stats: Mapping[PoolId, MemoryStats],
-    pool_mapping: Mapping[Any, Any] | None,
-) -> dict[PoolId, tuple[PoolId, Literal["default", "mapped"]]]:
-    result: dict[PoolId, tuple[PoolId, Literal["default", "mapped"]]] = {}
-    if (
-        DEFAULT_POOL_ID in reference_pool_stats
-        and DEFAULT_POOL_ID in candidate_pool_stats
-    ):
-        result[DEFAULT_POOL_ID] = (DEFAULT_POOL_ID, "default")
+    reference_pool_stats: Mapping[MemoryPoolKey, MemoryStats],
+    candidate_pool_stats: Mapping[MemoryPoolKey, MemoryStats],
+    pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None,
+) -> dict[MemoryPoolKey, tuple[MemoryPoolKey, Literal["default", "mapped"]]]:
+    result: dict[MemoryPoolKey, tuple[MemoryPoolKey, Literal["default", "mapped"]]] = {}
+    for pool_key in set(reference_pool_stats) & set(candidate_pool_stats):
+        if pool_key.pool_id == DEFAULT_POOL_ID:
+            result[pool_key] = (pool_key, "default")
 
-    candidate_pools: set[PoolId] = {
-        candidate_pool for candidate_pool, _match in result.values()
-    }
-    for raw_reference, raw_candidate in (pool_mapping or {}).items():
-        reference_pool = normalize_pool_id(raw_reference)
-        candidate_pool = normalize_pool_id(raw_candidate)
-        if reference_pool == DEFAULT_POOL_ID or candidate_pool == DEFAULT_POOL_ID:
-            if reference_pool != DEFAULT_POOL_ID or candidate_pool != DEFAULT_POOL_ID:
-                raise ValueError("the default pool may only map to the default pool")
-            continue
+    candidate_pools = {candidate_pool for candidate_pool, _match in result.values()}
+    for reference_pool, candidate_pool in (pool_mapping or {}).items():
+        if not isinstance(reference_pool, MemoryPoolKey) or not isinstance(
+            candidate_pool, MemoryPoolKey
+        ):
+            raise TypeError("pool_mapping keys and values must be MemoryPoolKey")
+        if (
+            reference_pool.pool_id == DEFAULT_POOL_ID
+            or candidate_pool.pool_id == DEFAULT_POOL_ID
+        ):
+            if (
+                reference_pool.pool_id != DEFAULT_POOL_ID
+                or candidate_pool.pool_id != DEFAULT_POOL_ID
+            ):
+                raise ValueError("the default pool may only map to a default pool")
         if reference_pool not in reference_pool_stats:
             raise ValueError(
-                f"mapped reference pool {pool_id_label(reference_pool)} does not exist"
+                f"mapped reference pool {reference_pool.label} does not exist"
             )
         if candidate_pool not in candidate_pool_stats:
             raise ValueError(
-                f"mapped candidate pool {pool_id_label(candidate_pool)} does not exist"
+                f"mapped candidate pool {candidate_pool.label} does not exist"
             )
         if reference_pool in result:
             raise ValueError(
-                f"reference pool {pool_id_label(reference_pool)} is mapped more than once"
+                f"reference pool {reference_pool.label} is mapped more than once"
             )
         if candidate_pool in candidate_pools:
             raise ValueError(
-                f"candidate pool {pool_id_label(candidate_pool)} is mapped more than once"
+                f"candidate pool {candidate_pool.label} is mapped more than once"
             )
         result[reference_pool] = (candidate_pool, "mapped")
         candidate_pools.add(candidate_pool)
@@ -714,10 +752,8 @@ def _unmatched_independent_observations(
         candidate_stats = MemoryStats()
         rows.append(
             MemoryObservationComparison(
-                reference_pool_id=key.pool_id,
-                reference_stream=key.stream,
-                candidate_pool_id=None,
-                candidate_stream=None,
+                reference_key=key,
+                candidate_key=None,
                 match="reference_only",
                 reference=reference_stats,
                 candidate=candidate_stats,
@@ -729,10 +765,8 @@ def _unmatched_independent_observations(
         reference_stats = MemoryStats()
         rows.append(
             MemoryObservationComparison(
-                reference_pool_id=None,
-                reference_stream=None,
-                candidate_pool_id=key.pool_id,
-                candidate_stream=key.stream,
+                reference_key=None,
+                candidate_key=key,
                 match="candidate_only",
                 reference=reference_stats,
                 candidate=candidate_stats,
@@ -744,15 +778,67 @@ def _unmatched_independent_observations(
         sorted(
             rows,
             key=lambda item: (
-                _optional_pool_label(item.candidate_pool_id or item.reference_pool_id),
-                stream_label(
-                    item.candidate_stream
-                    if item.candidate_pool_id is not None
-                    else item.reference_stream
-                ),
+                (item.candidate_key or item.reference_key).label,
                 item.match,
             ),
         )
+    )
+
+
+def _attribution_status(
+    options: MemoryAttributionOptions,
+    *,
+    reference_coverage: AllocationStackCoverage | None,
+    candidate_coverage: AllocationStackCoverage | None,
+    events_available: bool,
+    events_complete: bool,
+    allocation_lifetimes: object | None,
+) -> MemoryAttributionStatus:
+    if options.stacks:
+        coverages = tuple(
+            item
+            for item in (reference_coverage, candidate_coverage)
+            if item is not None
+        )
+        stacks_available = len(coverages) == 2 and all(
+            item.active_bytes == 0 or item.attributed_bytes > 0 for item in coverages
+        )
+        stacks_complete = stacks_available and all(
+            item.unattributed_bytes == 0 for item in coverages
+        )
+        stack_status = MemoryEvidenceStatus(
+            requested=True,
+            available=stacks_available,
+            complete=stacks_complete,
+        )
+    else:
+        stack_status = MemoryEvidenceStatus.not_requested()
+
+    event_status = (
+        MemoryEvidenceStatus(
+            requested=True,
+            available=events_available,
+            complete=events_available and events_complete,
+        )
+        if options.events
+        else MemoryEvidenceStatus.not_requested()
+    )
+    if options.lifetimes:
+        assert allocation_lifetimes is not None
+        lifetime_status = MemoryEvidenceStatus(
+            requested=True,
+            available=True,
+            complete=bool(
+                getattr(allocation_lifetimes, "history_available")
+                and getattr(allocation_lifetimes, "history_complete")
+            ),
+        )
+    else:
+        lifetime_status = MemoryEvidenceStatus.not_requested()
+    return MemoryAttributionStatus(
+        stacks=stack_status,
+        events=event_status,
+        lifetimes=lifetime_status,
     )
 
 
@@ -788,68 +874,51 @@ def _phase_decomposition(
     candidate_change: MemoryPointComparison,
     start_gap: MemoryPointComparison,
     end_gap: MemoryPointComparison,
-) -> tuple[dict[str, object], ...]:
+) -> tuple[MemoryPoolPhaseDecomposition, ...]:
     baseline_change_by_pool = {
-        item.reference_pool_id: item
+        item.reference_key: item
         for item in baseline_change.pool_comparisons
-        if item.reference_pool_id is not None
+        if item.reference_key is not None
     }
     candidate_change_by_pool = {
-        item.reference_pool_id: item
+        item.reference_key: item
         for item in candidate_change.pool_comparisons
-        if item.reference_pool_id is not None
+        if item.reference_key is not None
     }
     end_gap_by_pair = {
-        (item.reference_pool_id, item.candidate_pool_id): item
+        (item.reference_key, item.candidate_key): item
         for item in end_gap.pool_comparisons
     }
-    rows: list[dict[str, object]] = []
+    rows: list[MemoryPoolPhaseDecomposition] = []
     for start_gap_comparison in start_gap.pool_comparisons:
         if start_gap_comparison.match not in {"default", "mapped"}:
             continue
-        baseline_pool = start_gap_comparison.reference_pool_id
-        candidate_pool = start_gap_comparison.candidate_pool_id
-        if baseline_pool is None or candidate_pool is None:
+        baseline_key = start_gap_comparison.reference_key
+        candidate_key = start_gap_comparison.candidate_key
+        if baseline_key is None or candidate_key is None:
             continue
-        baseline_change_comparison = baseline_change_by_pool.get(baseline_pool)
-        candidate_change_comparison = candidate_change_by_pool.get(candidate_pool)
-        end_gap_comparison = end_gap_by_pair.get((baseline_pool, candidate_pool))
-        if (
-            baseline_change_comparison is None
-            or candidate_change_comparison is None
-            or end_gap_comparison is None
-        ):
+        baseline_item = baseline_change_by_pool.get(baseline_key)
+        candidate_item = candidate_change_by_pool.get(candidate_key)
+        end_item = end_gap_by_pair.get((baseline_key, candidate_key))
+        if baseline_item is None or candidate_item is None or end_item is None:
             continue
-        for metric in (
-            "reserved_bytes",
-            "allocated_bytes",
-            "active_bytes",
-            "inactive_bytes",
-            "requested_bytes",
-            "fragmentation_bytes",
-        ):
-            baseline_value = int(getattr(baseline_change_comparison.delta, metric))
-            candidate_value = int(getattr(candidate_change_comparison.delta, metric))
-            start_value = int(getattr(start_gap_comparison.delta, metric))
-            end_value = int(getattr(end_gap_comparison.delta, metric))
+        for metric in PHASE_METRICS:
             rows.append(
-                {
-                    "baseline_pool_id": pool_id_label(baseline_pool),
-                    "candidate_pool_id": pool_id_label(candidate_pool),
-                    "pool": (
-                        f"{pool_id_label(baseline_pool)} -> "
-                        f"{pool_id_label(candidate_pool)}"
+                MemoryPoolPhaseDecomposition(
+                    baseline_key=baseline_key,
+                    candidate_key=candidate_key,
+                    components=MemoryPhaseComponents(
+                        metric=metric,
+                        start_gap_bytes=int(
+                            getattr(start_gap_comparison.delta, metric)
+                        ),
+                        baseline_change_bytes=int(getattr(baseline_item.delta, metric)),
+                        candidate_change_bytes=int(
+                            getattr(candidate_item.delta, metric)
+                        ),
+                        end_gap_bytes=int(getattr(end_item.delta, metric)),
                     ),
-                    "metric": metric,
-                    "start_gap_bytes": start_value,
-                    "baseline_change_bytes": baseline_value,
-                    "candidate_change_bytes": candidate_value,
-                    "change_gap_bytes": candidate_value - baseline_value,
-                    "end_gap_bytes": end_value,
-                    "identity_holds": (
-                        end_value == start_value + candidate_value - baseline_value
-                    ),
-                }
+                )
             )
     return tuple(rows)
 
@@ -859,50 +928,37 @@ def _scope_phase_decomposition(
     candidate_change: MemoryPointComparison,
     start_gap: MemoryPointComparison,
     end_gap: MemoryPointComparison,
-) -> tuple[dict[str, object], ...]:
-    baseline_change_by_scope = {
+) -> tuple[MemoryAllocatorScopePhaseDecomposition, ...]:
+    baseline_by_scope = {
         item.scope: item for item in baseline_change.allocator_scope_comparisons
     }
-    candidate_change_by_scope = {
+    candidate_by_scope = {
         item.scope: item for item in candidate_change.allocator_scope_comparisons
     }
-    start_gap_by_scope = {
+    start_by_scope = {
         item.scope: item for item in start_gap.allocator_scope_comparisons
     }
-    end_gap_by_scope = {
-        item.scope: item for item in end_gap.allocator_scope_comparisons
-    }
-    rows = []
+    end_by_scope = {item.scope: item for item in end_gap.allocator_scope_comparisons}
+    rows: list[MemoryAllocatorScopePhaseDecomposition] = []
     for scope in ALLOCATOR_SCOPES:
-        baseline_change_comparison = baseline_change_by_scope[scope]
-        candidate_change_comparison = candidate_change_by_scope[scope]
-        start_gap_comparison = start_gap_by_scope[scope]
-        end_gap_comparison = end_gap_by_scope[scope]
-        for metric in (
-            "reserved_bytes",
-            "allocated_bytes",
-            "active_bytes",
-            "inactive_bytes",
-            "requested_bytes",
-            "fragmentation_bytes",
-        ):
-            baseline_value = int(getattr(baseline_change_comparison.delta, metric))
-            candidate_value = int(getattr(candidate_change_comparison.delta, metric))
-            start_value = int(getattr(start_gap_comparison.delta, metric))
-            end_value = int(getattr(end_gap_comparison.delta, metric))
+        for metric in PHASE_METRICS:
             rows.append(
-                {
-                    "scope": scope,
-                    "metric": metric,
-                    "start_gap_bytes": start_value,
-                    "baseline_change_bytes": baseline_value,
-                    "candidate_change_bytes": candidate_value,
-                    "change_gap_bytes": candidate_value - baseline_value,
-                    "end_gap_bytes": end_value,
-                    "identity_holds": (
-                        end_value == start_value + candidate_value - baseline_value
+                MemoryAllocatorScopePhaseDecomposition(
+                    scope=scope,
+                    components=MemoryPhaseComponents(
+                        metric=metric,
+                        start_gap_bytes=int(
+                            getattr(start_by_scope[scope].delta, metric)
+                        ),
+                        baseline_change_bytes=int(
+                            getattr(baseline_by_scope[scope].delta, metric)
+                        ),
+                        candidate_change_bytes=int(
+                            getattr(candidate_by_scope[scope].delta, metric)
+                        ),
+                        end_gap_bytes=int(getattr(end_by_scope[scope].delta, metric)),
                     ),
-                }
+                )
             )
     return tuple(rows)
 
@@ -920,10 +976,6 @@ def _pool_comparison_sort_key(
     }
     return (
         match_order[item.match],
-        _optional_pool_label(item.reference_pool_id),
-        _optional_pool_label(item.candidate_pool_id),
+        item.reference_key.label if item.reference_key is not None else "",
+        item.candidate_key.label if item.candidate_key is not None else "",
     )
-
-
-def _optional_pool_label(pool_id: PoolId | None) -> str:
-    return "" if pool_id is None else pool_id_label(pool_id)

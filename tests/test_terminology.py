@@ -118,6 +118,7 @@ def test_memory_result_fields_encode_their_semantics() -> None:
         "pool_comparisons",
         "observation_comparisons",
     )
+    assert "attribution_status" in _field_names(MemoryPointComparison)
     assert tuple(field.name for field in fields(MemoryTimeline))[:5] == (
         "run",
         "allocator_scope_entries",
@@ -139,7 +140,7 @@ def test_memory_result_fields_encode_their_semantics() -> None:
     )
     assert tuple(field.name for field in fields(MemoryRunGroupSummary)) == (
         "run_group",
-        "rank_point_entries",
+        "rank_points",
         "point_aggregates",
         "warnings",
     )
@@ -148,6 +149,7 @@ def test_memory_result_fields_encode_their_semantics() -> None:
         "candidate_group",
         "rank_comparisons",
         "rank_decomposition",
+        "rank_pool_decomposition",
         "phase_aggregates",
         "warnings",
         "display_stack_depth",

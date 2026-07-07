@@ -10,6 +10,7 @@ from torch_cudagraph_debug.memory_debug import (
     MemoryBundleError,
     MemoryDebugError,
     MemoryOwnershipError,
+    MemoryPoolKey,
     MemoryRecorder,
     MemoryRun,
 )
@@ -24,7 +25,10 @@ def test_recorder_finish_is_idempotent_and_freezes_collection() -> None:
         name="sample",
     )
     point = recorder.record_point("start", metadata={"step": 1})
-    view = recorder.snapshot_run()
+    view = recorder.preview()
+    descriptor = point.descriptor()
+    assert descriptor["boundary_marker"] == point.boundary_marker
+    assert descriptor["observation_count"] == len(point.observations)
 
     assert view.complete is False
     assert view.point("start").run_id == point.run_id
@@ -86,6 +90,7 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
     assert manifest["name"] == "json-run"
     assert set(manifest["points"][0]["observations"][0]) == {
         "order",
+        "device_index",
         "pool_id",
         "stream",
         "reserved_bytes",
@@ -94,7 +99,10 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
         "requested_bytes",
         "segment_count",
         "block_count",
+        "inactive_block_count",
         "largest_inactive_block_bytes",
+        "expandable_segment_count",
+        "expandable_reserved_bytes",
     }
     snapshot_path = bundle / manifest["points"][1]["snapshot_file"]
     assert snapshot_path.name.endswith(".json.gz")
@@ -104,7 +112,7 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
 
     loaded = MemoryRun.load(bundle)
     assert loaded.complete is True
-    observation = loaded["after"].observation((0, 3), 7)
+    observation = loaded["after"].observation(0, (0, 3), 7)
     assert observation.order == 1
     assert observation.stats.active_bytes == 20
     assert loaded["after"].observation_stats[observation.key] == observation.stats
@@ -113,7 +121,10 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
     assert loaded["after"]._snapshot_cache
     comparison = loaded.compare("before", "after")
     assert comparison.lifecycle_available is True
-    assert any(item.candidate_pool_id == (0, 3) for item in comparison.pool_comparisons)
+    assert any(
+        item.candidate_key == MemoryPoolKey(0, (0, 3))
+        for item in comparison.pool_comparisons
+    )
     assert (
         run.compare("before", "after").pool_comparison_rows()
         == comparison.pool_comparison_rows()
@@ -307,7 +318,7 @@ def test_context_exception_persists_incomplete_terminal_run(tmp_path: Path) -> N
 
     assert recorder.result.complete is False
     assert recorder.result.finished_at is not None
-    assert recorder.snapshot_run() is recorder.result
+    assert recorder.preview() is recorder.result
     assert recorder.finish() is recorder.result
     loaded = MemoryRun.load(bundle)
     assert loaded.complete is False
@@ -343,7 +354,7 @@ def test_manifest_failures_do_not_commit_memory_recorder_state(
     monkeypatch.setattr(recorder, "_write_manifest", flaky)
     with pytest.raises(MemoryBundleError, match="injected"):
         recorder.record_point("point")
-    assert recorder.snapshot_run().points == ()
+    assert recorder.preview().points == ()
 
     recorder.record_point("point")
     with pytest.raises(MemoryBundleError, match="injected"):
@@ -397,3 +408,21 @@ def test_memory_recorder_context_rejects_reentry_and_explicit_finish() -> None:
             recorder.__enter__()
         with pytest.raises(MemoryDebugError, match="inside its context"):
             recorder.finish()
+
+
+def test_memory_run_point_and_snapshot_data_are_deeply_immutable() -> None:
+    source = {"nested": {"values": [1, 2]}}
+    recorder = MemoryRecorder._from_snapshot_provider(
+        lambda marker: snapshot(segment(active=10)),
+        run_metadata=source,
+    )
+    point = recorder.record_point("point", metadata=source)
+    run = recorder.finish()
+
+    source["nested"]["values"].append(3)
+    assert run.run_metadata["nested"]["values"] == (1, 2)
+    assert point.metadata["nested"]["values"] == (1, 2)
+    raw = point.raw_snapshot()
+    assert isinstance(raw["segments"], tuple)
+    with pytest.raises(TypeError):
+        raw["segments"][0]["total_size"] = 0

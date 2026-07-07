@@ -24,10 +24,10 @@ def observed_forward(
     inputs: torch.Tensor,
     recorder: TensorRecorder,
 ) -> torch.Tensor:
-    inputs = recorder.observe("input", inputs)
-    hidden = recorder.observe("hidden.add", inputs + 1)
-    hidden = recorder.observe("hidden.square", hidden.square())
-    return recorder.observe("output", hidden.sum(dim=0))
+    inputs = recorder.observe(inputs, name="input")
+    hidden = recorder.observe(inputs + 1, name="hidden.add")
+    hidden = recorder.observe(hidden.square(), name="hidden.square")
+    return recorder.observe(hidden.sum(dim=0), name="output")
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,6 +56,9 @@ def main() -> None:
         name="eager",
         bundle_dir=eager_bundle,
         run_metadata={"scenario": "eager-reference"},
+        rank=0,
+        group_id="eager-example",
+        world_size=1,
     ) as eager_recorder:
         with eager_recorder.record_point("forward", synchronize=replay_stream):
             eager_output = observed_forward(static_x, eager_recorder)
@@ -66,6 +69,9 @@ def main() -> None:
         name="cuda-graph",
         bundle_dir=graph_bundle,
         run_metadata={"scenario": "cuda-graph-candidate"},
+        rank=0,
+        group_id="cuda-graph-example",
+        world_size=1,
     )
     try:
         graph = torch.cuda.CUDAGraph()

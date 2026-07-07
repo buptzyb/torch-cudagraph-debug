@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, fields
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 from torch_cudagraph_debug._provenance import (
     initialized_device_provenance,
@@ -33,18 +33,32 @@ from torch_cudagraph_debug._validation import (
     strict_json_loads,
     validate_group_identity,
 )
+from torch_cudagraph_debug.types import (
+    FrozenJSONValue,
+    JSONValue,
+    _freeze_json,
+    _thaw_json,
+)
 
-from ._pool_identity import PoolId
-from ._collector import SnapshotProvider, SynchronizeTarget, _MemoryCollector
-from .aggregation import summarize_allocator_scopes, summarize_pools
-from .allocator_snapshot import (
-    AllocatorSnapshotData,
+from ._collector import (
+    DeviceSelector,
+    SnapshotProvider,
+    SynchronizeTarget,
+    _MemoryCollector,
+)
+from ._pool_identity import (
     MemoryObservationKey,
+    MemoryPoolKey,
+    PoolId,
+    StreamId,
+    normalize_device_index,
     normalize_pool_id,
     normalize_stream,
 )
+from .aggregation import summarize_allocator_scopes, summarize_pools
+from .allocator_snapshot import AllocatorSnapshotData
 from .errors import MemoryBundleError, MemoryDebugError, MemoryOwnershipError
-from .stats import MemoryStats
+from .stats import AllocatorScope, MemoryStats
 
 if TYPE_CHECKING:
     from .attribution import MemoryAttributionOptions, MemoryLifetimeOptions
@@ -55,10 +69,12 @@ if TYPE_CHECKING:
     )
 
 BUNDLE_SCHEMA = "torch-cudagraph-debug/memory-run"
+BUNDLE_FORMAT_VERSION = 1
 _MEMORY_STATS_FIELDS = tuple(item.name for item in fields(MemoryStats))
 _MANIFEST_FIELDS = frozenset(
     {
         "schema",
+        "format_version",
         "run_id",
         "name",
         "rank",
@@ -84,31 +100,40 @@ _POINT_FIELDS = frozenset(
         "observations",
     }
 )
-_OBSERVATION_FIELDS = frozenset({"order", "pool_id", "stream", *_MEMORY_STATS_FIELDS})
+_OBSERVATION_FIELDS = frozenset(
+    {"order", "device_index", "pool_id", "stream", *_MEMORY_STATS_FIELDS}
+)
 
 
 @dataclass(frozen=True)
 class MemoryObservation:
-    """One pool/stream allocator state captured by a snapshot or point."""
+    """One device/pool/stream allocator state captured at a boundary."""
 
     order: int
+    device_index: int
     pool_id: PoolId
-    stream: Any
+    stream: StreamId
     stats: MemoryStats
 
     def __post_init__(self) -> None:
         if type(self.order) is not int or self.order < 0:
             raise ValueError("memory observation order must be non-negative")
+        object.__setattr__(
+            self, "device_index", normalize_device_index(self.device_index)
+        )
         object.__setattr__(self, "pool_id", normalize_pool_id(self.pool_id))
         object.__setattr__(self, "stream", normalize_stream(self.stream))
+        if not isinstance(self.stats, MemoryStats):
+            raise TypeError("memory observation stats must be MemoryStats")
 
     @property
     def key(self) -> MemoryObservationKey:
-        return MemoryObservationKey(self.pool_id, self.stream)
+        return MemoryObservationKey(self.device_index, self.pool_id, self.stream)
 
     def descriptor(self) -> dict[str, object]:
         return {
             "order": self.order,
+            "device_index": self.device_index,
             "pool_id": list(self.pool_id),
             "stream": self.stream,
             "stats": self.stats.to_dict(),
@@ -123,12 +148,12 @@ class MemoryPoint:
     index: int
     label: str
     timestamp: float
-    metadata: Mapping[str, Any]
+    metadata: Mapping[str, FrozenJSONValue]
     boundary_marker: str
     observations: tuple[MemoryObservation, ...]
     warnings: tuple[str, ...] = ()
     _snapshot_path: Path | None = field(default=None, repr=False, compare=False)
-    _snapshot_cache: dict[str, AllocatorSnapshotData] = field(
+    _snapshot_cache: dict[str, FrozenJSONValue] = field(
         default_factory=dict, repr=False, compare=False
     )
     _cache_snapshots: bool = field(default=True, repr=False, compare=False)
@@ -153,6 +178,15 @@ class MemoryPoint:
         keys = [item.key for item in self.observations]
         if len(keys) != len(set(keys)):
             raise ValueError("memory observations must have unique keys")
+        object.__setattr__(
+            self,
+            "metadata",
+            cast(Mapping[str, FrozenJSONValue], _freeze_json(self.metadata)),
+        )
+        for key, value in tuple(self._snapshot_cache.items()):
+            self._snapshot_cache[key] = _freeze_json(
+                cast(JSONValue | FrozenJSONValue, value)
+            )
 
     @cached_property
     def by_key(self) -> Mapping[MemoryObservationKey, MemoryObservation]:
@@ -165,25 +199,36 @@ class MemoryPoint:
         )
 
     @cached_property
-    def pool_stats(self) -> Mapping[PoolId, MemoryStats]:
+    def pool_stats(self) -> Mapping[MemoryPoolKey, MemoryStats]:
         return MappingProxyType(summarize_pools(self.observation_stats))
 
     @cached_property
-    def allocator_scope_stats(self) -> Mapping[str, MemoryStats]:
+    def allocator_scope_stats(self) -> Mapping[AllocatorScope, MemoryStats]:
         return MappingProxyType(summarize_allocator_scopes(self.pool_stats))
 
-    def observation(self, pool_id: Any, stream: Any) -> MemoryObservation:
-        key = MemoryObservationKey(normalize_pool_id(pool_id), normalize_stream(stream))
+    def observation(
+        self, device_index: int, pool_id: Any, stream: Any
+    ) -> MemoryObservation:
+        key = MemoryObservationKey(device_index, pool_id, stream)
         try:
             return self.by_key[key]
         except KeyError as exc:
             raise KeyError(
-                f"memory observation pool={key.pool_id!r} stream={key.stream!r} "
-                f"does not exist at point {self.label!r}"
+                f"memory observation {key.label} does not exist at point {self.label!r}"
             ) from exc
 
-    def raw_snapshot(self) -> AllocatorSnapshotData:
-        """Load the full private PyTorch snapshot, lazily for persisted runs."""
+    @property
+    def allocator_settings(self) -> Mapping[str, FrozenJSONValue]:
+        raw = self.raw_snapshot()
+        if not isinstance(raw, Mapping):
+            return MappingProxyType({})
+        settings = raw.get("allocator_settings", MappingProxyType({}))
+        if not isinstance(settings, Mapping):
+            return MappingProxyType({})
+        return cast(Mapping[str, FrozenJSONValue], settings)
+
+    def raw_snapshot(self) -> FrozenJSONValue:
+        """Load and return a recursively immutable allocator snapshot."""
 
         cached = self._snapshot_cache.get("snapshot") if self._cache_snapshots else None
         if cached is not None:
@@ -206,9 +251,10 @@ class MemoryPoint:
             raise MemoryBundleError(
                 f"snapshot for point {self.label!r} has an invalid root type"
             )
+        frozen = _freeze_json(cast(JSONValue, snapshot))
         if self._cache_snapshots:
-            self._snapshot_cache["snapshot"] = snapshot
-        return snapshot
+            self._snapshot_cache["snapshot"] = frozen
+        return frozen
 
     def descriptor(self) -> dict[str, object]:
         return {
@@ -216,9 +262,50 @@ class MemoryPoint:
             "index": self.index,
             "label": self.label,
             "timestamp": self.timestamp,
-            "metadata": dict(self.metadata),
+            "metadata": _thaw_json(cast(FrozenJSONValue, self.metadata)),
+            "boundary_marker": self.boundary_marker,
+            "observation_count": len(self.observations),
             "warnings": list(self.warnings),
         }
+
+
+MemoryPointReference: TypeAlias = str | int | MemoryPoint
+
+
+@dataclass(frozen=True)
+class MemoryLifetimeSelection:
+    """Select all, active-at, or born-between allocation generations."""
+
+    mode: Literal["all", "active_at", "born_between"]
+    start: MemoryPointReference | None = None
+    end: MemoryPointReference | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode == "all":
+            if self.start is not None or self.end is not None:
+                raise ValueError("all selection does not accept point references")
+        elif self.mode == "active_at":
+            if self.start is None or self.end is not None:
+                raise ValueError("active_at selection requires exactly one point")
+        elif self.mode == "born_between":
+            if self.start is None or self.end is None:
+                raise ValueError("born_between selection requires two points")
+        else:
+            raise ValueError(f"unsupported lifetime selection mode {self.mode!r}")
+
+    @classmethod
+    def all(cls) -> "MemoryLifetimeSelection":
+        return cls("all")
+
+    @classmethod
+    def active_at(cls, point: MemoryPointReference) -> "MemoryLifetimeSelection":
+        return cls("active_at", start=point)
+
+    @classmethod
+    def born_between(
+        cls, start: MemoryPointReference, end: MemoryPointReference
+    ) -> "MemoryLifetimeSelection":
+        return cls("born_between", start=start, end=end)
 
 
 @dataclass(frozen=True)
@@ -234,8 +321,10 @@ class MemoryRun:
     points: tuple[MemoryPoint, ...]
     group_id: str | None = None
     world_size: int | None = None
-    provenance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
-    run_metadata: Mapping[str, Any] = field(
+    provenance: Mapping[str, FrozenJSONValue] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    run_metadata: Mapping[str, FrozenJSONValue] = field(
         default_factory=lambda: MappingProxyType({})
     )
     bundle_dir: Path | None = field(default=None, compare=False)
@@ -258,6 +347,16 @@ class MemoryRun:
             or not math.isfinite(float(self.finished_at))
         ):
             raise ValueError("finished_at must be finite or None")
+        object.__setattr__(
+            self,
+            "provenance",
+            cast(Mapping[str, FrozenJSONValue], _freeze_json(self.provenance)),
+        )
+        object.__setattr__(
+            self,
+            "run_metadata",
+            cast(Mapping[str, FrozenJSONValue], _freeze_json(self.run_metadata)),
+        )
         labels: set[str] = set()
         for expected_index, point in enumerate(self.points):
             if point.run_id != self.run_id or point.index != expected_index:
@@ -276,8 +375,8 @@ class MemoryRun:
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "complete": self.complete,
-            "provenance": dict(self.provenance),
-            "run_metadata": dict(self.run_metadata),
+            "provenance": _thaw_json(cast(FrozenJSONValue, self.provenance)),
+            "run_metadata": _thaw_json(cast(FrozenJSONValue, self.run_metadata)),
         }
 
     def point(self, ref: str | int | MemoryPoint) -> MemoryPoint:
@@ -348,36 +447,33 @@ class MemoryRun:
 
     def lifetimes(
         self,
-        active_at: str | int | MemoryPoint | None = None,
+        selection: MemoryLifetimeSelection | None = None,
         *,
-        born_between: (
-            tuple[str | int | MemoryPoint, str | int | MemoryPoint] | None
-        ) = None,
-        through: str | int | MemoryPoint | None = None,
+        through: MemoryPointReference | None = None,
         options: MemoryLifetimeOptions | None = None,
     ) -> MemoryAllocationLifetimeAnalysis:
-        """Analyze allocation cohorts across points in this run."""
+        """Analyze allocation cohorts selected by an explicit lifetime query."""
 
         from .attribution import MemoryLifetimeOptions
         from .lifetimes import analyze_allocation_lifetimes
 
         if not self.points:
             raise MemoryDebugError("allocation lifetimes require at least one point")
-        if active_at is not None and born_between is not None:
-            raise ValueError("active_at and born_between are mutually exclusive")
-        active_point = self.point(active_at) if active_at is not None else None
-        birth_range = (
-            self.between(born_between[0], born_between[1])
-            if born_between is not None
-            else None
-        )
+        selected_query = selection or MemoryLifetimeSelection.all()
+        active_point = None
+        birth_range = None
+        if selected_query.mode == "active_at":
+            assert selected_query.start is not None
+            active_point = self.point(selected_query.start)
+        elif selected_query.mode == "born_between":
+            assert selected_query.start is not None and selected_query.end is not None
+            birth_range = self.between(selected_query.start, selected_query.end)
         start = active_point or (birth_range.start if birth_range else self.points[0])
         end = self.point(through) if through is not None else self.points[-1]
         if end.index < start.index:
             raise ValueError("through point must not come before the lifetime anchor")
         if birth_range is not None and end.index < birth_range.end.index:
             raise ValueError("through point must not come before born_between end")
-        selected = options or MemoryLifetimeOptions()
         return analyze_allocation_lifetimes(
             self,
             start=start,
@@ -386,7 +482,7 @@ class MemoryRun:
             born_between=(
                 (birth_range.start, birth_range.end) if birth_range else None
             ),
-            options=selected,
+            options=options or MemoryLifetimeOptions(),
         )
 
     @classmethod
@@ -414,6 +510,11 @@ class MemoryRun:
         if manifest.get("schema") != BUNDLE_SCHEMA:
             raise MemoryBundleError(
                 f"unsupported memory bundle schema {manifest.get('schema')!r}"
+            )
+        if manifest.get("format_version") != BUNDLE_FORMAT_VERSION:
+            raise MemoryBundleError(
+                "unsupported memory bundle format_version "
+                f"{manifest.get('format_version')!r}"
             )
         require_exact_fields(
             manifest,
@@ -605,6 +706,7 @@ class MemoryRecorder:
         name: str = "run",
         bundle_dir: str | Path | None = None,
         rank: int | None = None,
+        devices: DeviceSelector = None,
         synchronize: SynchronizeTarget = True,
         group_id: str | None = None,
         world_size: int | None = None,
@@ -630,7 +732,11 @@ class MemoryRecorder:
         self.run_metadata = MappingProxyType(serializable_metadata)
         self._provenance: dict[str, Any] = serializable_provenance
         self.synchronize = synchronize
-        self._collector = _MemoryCollector(synchronize=synchronize)
+        self._device_selector = devices
+        self._collector = _MemoryCollector(
+            devices=devices,
+            synchronize=synchronize,
+        )
         self._run_id = uuid.uuid4().hex
         self._created_at = time.time()
         self._finished_at: float | None = None
@@ -654,6 +760,7 @@ class MemoryRecorder:
     ) -> "MemoryRecorder":
         recorder = cls(**kwargs)
         recorder._collector = _MemoryCollector(
+            devices=recorder._device_selector,
             synchronize=recorder.synchronize,
             snapshot_provider=provider,
         )
@@ -693,6 +800,7 @@ class MemoryRecorder:
         observations = tuple(
             MemoryObservation(
                 order=order,
+                device_index=key.device_index,
                 pool_id=key.pool_id,
                 stream=key.stream,
                 stats=stats,
@@ -700,18 +808,20 @@ class MemoryRecorder:
             for order, (key, stats) in enumerate(capture.summaries)
         )
         snapshot_path: Path | None = None
-        cache: dict[str, AllocatorSnapshotData] = {}
+        cache: dict[str, FrozenJSONValue] = {}
         if self.bundle_dir is not None:
             snapshot_path = self._write_snapshot(index, serializable_snapshot)
         else:
-            cache["snapshot"] = serializable_snapshot
+            cache["snapshot"] = _freeze_json(serializable_snapshot)
 
         point = MemoryPoint(
             run_id=self._run_id,
             index=index,
             label=label,
             timestamp=capture.timestamp,
-            metadata=MappingProxyType(serializable_metadata),
+            metadata=cast(
+                Mapping[str, FrozenJSONValue], _freeze_json(serializable_metadata)
+            ),
             boundary_marker=capture.boundary_marker,
             observations=observations,
             warnings=capture.warnings,
@@ -722,8 +832,14 @@ class MemoryRecorder:
         self._points.append(point)
         return point
 
-    def snapshot_run(self) -> MemoryRun:
-        """Return an immutable view of points collected so far."""
+    @property
+    def devices(self) -> tuple[int, ...] | None:
+        """Selected device indices, resolved lazily by the first point."""
+
+        return self._collector.devices
+
+    def preview(self) -> MemoryRun:
+        """Return an immutable nonterminal view of collected points."""
 
         if self._result is not None:
             return self._result
@@ -846,6 +962,7 @@ class MemoryRecorder:
             return
         payload = {
             "schema": BUNDLE_SCHEMA,
+            "format_version": BUNDLE_FORMAT_VERSION,
             "run_id": self._run_id,
             "name": self.name,
             "rank": self.rank,
@@ -855,7 +972,7 @@ class MemoryRecorder:
             "finished_at": self._finished_at if finished_at is None else finished_at,
             "complete": complete,
             "provenance": self._provenance,
-            "run_metadata": dict(self.run_metadata),
+            "run_metadata": _thaw_json(cast(FrozenJSONValue, self.run_metadata)),
             "points": [
                 _point_manifest(point, self.bundle_dir)
                 for point in (self._points if points is None else points)
@@ -877,11 +994,15 @@ class MemoryRecorder:
             temporary.unlink(missing_ok=True)
 
     def _record_device_provenance(self) -> None:
-        if self._collector.uses_snapshot_provider or "device" in self._provenance:
+        if self._collector.uses_snapshot_provider or "devices" in self._provenance:
             return
-        device = initialized_device_provenance()
-        if device is not None:
-            self._provenance["device"] = device
+        devices = []
+        for device_index in self._collector.devices or ():
+            device = initialized_device_provenance(f"cuda:{device_index}")
+            if device is not None:
+                devices.append(device)
+        if devices:
+            self._provenance["devices"] = devices
 
 
 def _point_manifest(point: MemoryPoint, root: Path) -> dict[str, object]:
@@ -891,7 +1012,7 @@ def _point_manifest(point: MemoryPoint, root: Path) -> dict[str, object]:
         "index": point.index,
         "label": point.label,
         "timestamp": point.timestamp,
-        "metadata": dict(point.metadata),
+        "metadata": _thaw_json(cast(FrozenJSONValue, point.metadata)),
         "boundary_marker": point.boundary_marker,
         "snapshot_file": str(point._snapshot_path.relative_to(root)),
         "warnings": list(point.warnings),
@@ -906,6 +1027,7 @@ def _observation_manifest(
 ) -> dict[str, object]:
     return {
         "order": observation.order,
+        "device_index": observation.device_index,
         "pool_id": list(observation.pool_id),
         "stream": observation.stream,
         **{name: getattr(observation.stats, name) for name in _MEMORY_STATS_FIELDS},
@@ -936,6 +1058,11 @@ def _observation_from_manifest(
     try:
         return MemoryObservation(
             order=order,
+            device_index=require_nonnegative_int(
+                row["device_index"],
+                "memory observation device_index",
+                error_type=MemoryBundleError,
+            ),
             pool_id=normalize_pool_id(row["pool_id"]),
             stream=normalize_stream(row["stream"]),
             stats=MemoryStats.from_dict(row),

@@ -37,11 +37,15 @@ and HTML reports.
 
 `recorder/forward_backward.py` captures one training step and persists the
 activation, loss, activation gradient, and final weight gradient in one point.
-It also shows an incomplete `snapshot_run()` before `finish()`.
+It also shows an incomplete `preview()` before `finish()`.
 
 `recorder/replay_series.py` compares two graph replays with one eager reference.
 Summary-only inputs demonstrate limited payload storage; the full output keeps
 the intentional second-replay mismatch conclusive.
+
+`recorder/distributed_run_groups.py` records eager and CUDA Graph bundles on
+each rank, loads both `TensorRunGroup` objects, and writes rank-preserving
+summary and comparison reports.
 
 Recorder examples require an absent output directory because bundle writers do
 not overwrite nonempty bundles:
@@ -53,6 +57,9 @@ python examples/tensor_debug/recorder/forward_backward.py \
   --output-dir /tmp/tcgd-tensor-forward-backward
 python examples/tensor_debug/recorder/replay_series.py \
   --output-dir /tmp/tcgd-tensor-series
+torchrun --standalone --nproc-per-node=2 \
+  examples/tensor_debug/recorder/distributed_run_groups.py \
+  --output-dir /tmp/tcgd-tensor-groups
 ```
 
 ## CLI Workflow

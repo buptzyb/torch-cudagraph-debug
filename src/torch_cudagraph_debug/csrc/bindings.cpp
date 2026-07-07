@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -86,11 +87,29 @@ std::vector<ActionConfig> parse_actions(py::list action_specs) {
                 throw std::runtime_error("CheckAction expected list must be non-empty");
             }
             action.check.expected.reserve(py::len(expected_items));
+            std::optional<bool> keyed;
             for (py::handle expected_item : expected_items) {
-                torch::Tensor expected = py::cast<torch::Tensor>(expected_item);
-                action.check.expected.push_back(
-                    parse_expected_tensor(expected, "CheckAction"));
+                const bool item_keyed = py::isinstance<py::dict>(expected_item);
+                if (keyed.has_value() && *keyed != item_keyed) {
+                    throw std::runtime_error(
+                        "CheckAction expected entries must be all keyed or all positional");
+                }
+                keyed = item_keyed;
+                ExpectedTensorConfig config;
+                if (item_keyed) {
+                    py::dict entry = py::cast<py::dict>(expected_item);
+                    config = parse_expected_tensor(
+                        py::cast<torch::Tensor>(entry["tensor"]), "CheckAction");
+                    config.observation_name = py::cast<std::string>(entry["name"]);
+                    config.invocation_index =
+                        py::cast<uint64_t>(entry["invocation_index"]);
+                } else {
+                    config = parse_expected_tensor(
+                        py::cast<torch::Tensor>(expected_item), "CheckAction");
+                }
+                action.check.expected.push_back(std::move(config));
             }
+            action.check.keyed = keyed.value_or(false);
         } else {
             throw std::runtime_error("unknown tensor debug action kind: " + kind);
         }

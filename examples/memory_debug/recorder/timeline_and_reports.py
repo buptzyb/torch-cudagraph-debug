@@ -13,6 +13,7 @@ import torch
 
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
+    MemoryDisplayOptions,
     MemoryRecorder,
     MemoryRun,
 )
@@ -64,7 +65,7 @@ def main() -> None:
             recorder.record_point("after_capture")
             graph.replay()
             recorder.record_point("after_replay")
-            assert not recorder.snapshot_run().complete
+            assert not recorder.preview().complete
 
         loaded = MemoryRun.load(bundle_dir, cache_snapshots=False)
         assert loaded.complete
@@ -79,7 +80,7 @@ def main() -> None:
             attribution=MemoryAttributionOptions(
                 stacks=True,
                 on_missing="error",
-                stack_depth=4,
+                display=MemoryDisplayOptions(stack_depth=4),
             )
         )
         paths = timeline.write(

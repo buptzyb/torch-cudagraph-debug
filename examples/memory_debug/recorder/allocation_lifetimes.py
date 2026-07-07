@@ -13,7 +13,9 @@ from pathlib import Path
 import torch
 
 from torch_cudagraph_debug.memory_debug import (
+    MemoryDisplayOptions,
     MemoryLifetimeOptions,
+    MemoryLifetimeSelection,
     MemoryRecorder,
     MemoryRun,
 )
@@ -80,16 +82,15 @@ def main() -> None:
         options = MemoryLifetimeOptions(
             events=True,
             on_missing="error",
-            stack_depth=4,
-            limit=20,
+            display=MemoryDisplayOptions(stack_depth=4, limit=20),
         )
         active = run.lifetimes(
-            "anchor",
+            MemoryLifetimeSelection.active_at("anchor"),
             through="after_cleanup",
             options=options,
         )
         born = run.lifetimes(
-            born_between=("before_transient", "after_transient"),
+            MemoryLifetimeSelection.born_between("before_transient", "after_transient"),
             through="after_cleanup",
             options=options,
         )

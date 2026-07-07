@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import html
 import json
 import math
@@ -13,18 +12,24 @@ from typing import ClassVar, Literal
 
 import torch
 
+from .._reporting import (
+    atomic_write_csv,
+    atomic_write_json,
+    atomic_write_text,
+    prepare_output_dir,
+)
+from ._identity import TensorObservationKey
 from .errors import TensorComparisonError
 from .recording import (
     TensorObservation,
-    TensorObservationKey,
     TensorPoint,
     TensorRun,
 )
-
 from .snapshots import TensorProbeSnapshot
 
 ComparisonMode = Literal["allclose", "exact"]
 DTypePolicy = Literal["strict", "promote"]
+LayoutPolicy = Literal["strict", "ignore"]
 ComparisonStatus = Literal["match", "mismatch", "inconclusive"]
 ObservationComparisonKind = Literal[
     "match",
@@ -47,6 +52,7 @@ class TensorComparisonOptions:
     atol: float = 1e-8
     equal_nan: bool = False
     dtype_policy: DTypePolicy = "strict"
+    layout_policy: LayoutPolicy = "strict"
     limit: int = 20
 
     def __post_init__(self) -> None:
@@ -64,6 +70,8 @@ class TensorComparisonOptions:
             raise TypeError("equal_nan must be a boolean")
         if self.dtype_policy not in {"strict", "promote"}:
             raise ValueError('dtype_policy must be either "strict" or "promote"')
+        if self.layout_policy not in {"strict", "ignore"}:
+            raise ValueError('layout_policy must be either "strict" or "ignore"')
         if type(self.limit) is not int:
             raise TypeError("limit must be an integer")
         if self.limit < 1:
@@ -110,6 +118,8 @@ class TensorObservationComparison:
             "reason": self.reason,
             "reference_shape": _shape_text(reference),
             "candidate_shape": _shape_text(candidate),
+            "reference_stride": _stride_text(reference),
+            "candidate_stride": _stride_text(candidate),
             "reference_dtype": _dtype_text(reference),
             "candidate_dtype": _dtype_text(candidate),
             "reference_payload": reference.payload if reference else "",
@@ -322,6 +332,7 @@ class _TensorStateComparison:
         output_dir: str | Path,
         *,
         include_unchanged: bool = True,
+        overwrite: bool = False,
     ) -> dict[str, Path]:
         return _write_report(
             output_dir,
@@ -329,6 +340,7 @@ class _TensorStateComparison:
             payload=self.to_dict(),
             html_text=self.to_html(include_unchanged=include_unchanged),
             rows=self.observation_comparison_rows(include_unchanged=include_unchanged),
+            overwrite=overwrite,
         )
 
 
@@ -401,6 +413,14 @@ class TensorRunComparison:
             return (self.candidate_only_points[0], None)
         return None
 
+    def assert_ok(self) -> None:
+        if not self.ok:
+            issue = self.first_issue
+            detail = f"; first issue at {issue[0]!r}" if issue else ""
+            raise TensorComparisonError(
+                f"tensor run comparison is {self.status}{detail}"
+            )
+
     def to_text(self, *, include_unchanged: bool = True) -> str:
         lines = [
             f"Tensor run comparison {self.reference.name!r} -> "
@@ -467,6 +487,7 @@ class TensorRunComparison:
         output_dir: str | Path,
         *,
         include_unchanged: bool = True,
+        overwrite: bool = False,
     ) -> dict[str, Path]:
         rows = _aggregate_rows(
             self.point_comparisons, include_unchanged=include_unchanged
@@ -477,6 +498,7 @@ class TensorRunComparison:
             payload=self.to_dict(),
             html_text=self.to_html(include_unchanged=include_unchanged),
             rows=rows,
+            overwrite=overwrite,
         )
 
 
@@ -520,6 +542,14 @@ class TensorPointSeriesComparison:
             if comparison.first_issue is not None:
                 return (comparison.candidate.label, comparison.first_issue)
         return None
+
+    def assert_ok(self) -> None:
+        if not self.ok:
+            issue = self.first_issue
+            detail = f"; first issue at {issue[0]!r}" if issue else ""
+            raise TensorComparisonError(
+                f"tensor point-series comparison is {self.status}{detail}"
+            )
 
     def to_text(self, *, include_unchanged: bool = True) -> str:
         lines = [
@@ -575,6 +605,7 @@ class TensorPointSeriesComparison:
         output_dir: str | Path,
         *,
         include_unchanged: bool = True,
+        overwrite: bool = False,
     ) -> dict[str, Path]:
         rows = _aggregate_rows(
             self.point_comparisons, include_unchanged=include_unchanged
@@ -585,6 +616,7 @@ class TensorPointSeriesComparison:
             payload=self.to_dict(),
             html_text=self.to_html(include_unchanged=include_unchanged),
             rows=rows,
+            overwrite=overwrite,
         )
 
 
@@ -598,7 +630,7 @@ def compare_snapshots(
 
     if (
         reference.probe_id == candidate.probe_id
-        and candidate.replay_index <= reference.replay_index
+        and candidate.snapshot_index <= reference.snapshot_index
     ):
         raise ValueError("candidate snapshot must follow reference snapshot")
     selected = options or TensorComparisonOptions()
@@ -795,6 +827,12 @@ def _compare_observations(
             reference,
             candidate,
             f"shape differs: {reference.shape} -> {candidate.shape}",
+        )
+    if options.layout_policy == "strict" and reference.stride != candidate.stride:
+        return _metadata_comparison(
+            reference,
+            candidate,
+            f"stride differs: {reference.stride} -> {candidate.stride}",
         )
     dtype_changed = reference.dtype != candidate.dtype
     if dtype_changed and options.dtype_policy == "strict":
@@ -1019,6 +1057,10 @@ def _shape_text(observation: TensorObservation | None) -> str:
     return str(observation.shape) if observation is not None else ""
 
 
+def _stride_text(observation: TensorObservation | None) -> str:
+    return str(observation.stride) if observation is not None else ""
+
+
 def _dtype_text(observation: TensorObservation | None) -> str:
     return str(observation.dtype) if observation is not None else ""
 
@@ -1084,41 +1126,23 @@ def _write_report(
     payload: Mapping[str, object],
     html_text: str,
     rows: Sequence[Mapping[str, object]],
+    overwrite: bool,
 ) -> dict[str, Path]:
-    root = Path(output_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    root = prepare_output_dir(output_dir, overwrite=overwrite)
     text_path = root / "report.txt"
     json_path = root / "report.json"
     html_path = root / "report.html"
     csv_path = root / "observations.csv"
-    text_path.write_text(text + "\n", encoding="utf-8")
-    json_path.write_text(
-        json.dumps(payload, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    html_path.write_text(html_text, encoding="utf-8")
-    _write_csv(csv_path, rows)
+    atomic_write_text(text_path, text + "\n")
+    atomic_write_json(json_path, payload)
+    atomic_write_text(html_path, html_text)
+    atomic_write_csv(csv_path, rows)
     return {
         "text": text_path,
         "json": json_path,
         "html": html_path,
         "observations": csv_path,
     }
-
-
-def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
-    fieldnames: list[str] = []
-    for row in rows:
-        for name in row:
-            if name not in fieldnames:
-                fieldnames.append(name)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        if not fieldnames:
-            handle.write("")
-            return
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def _html_report(

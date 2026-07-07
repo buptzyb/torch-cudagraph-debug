@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from ._collector import (
+    DeviceSelector,
     SnapshotProvider,
     SynchronizeTarget,
     _MemoryCollector,
@@ -27,6 +27,7 @@ class MemoryProbe:
         self,
         name: str = "memory",
         *,
+        devices: DeviceSelector = None,
         synchronize: SynchronizeTarget = True,
     ) -> None:
         if not name:
@@ -34,8 +35,17 @@ class MemoryProbe:
         self.name = name
         self.synchronize = synchronize
         self._probe_id = uuid.uuid4().hex
-        self._next_index = 0
-        self._collector = _MemoryCollector(synchronize=synchronize)
+        self._next_snapshot_index = 0
+        self._collector = _MemoryCollector(
+            devices=devices,
+            synchronize=synchronize,
+        )
+
+    @property
+    def devices(self) -> tuple[int, ...] | None:
+        """Selected device indices, resolved lazily by the first snapshot."""
+
+        return self._collector.devices
 
     @classmethod
     def _from_snapshot_provider(
@@ -43,10 +53,12 @@ class MemoryProbe:
         provider: SnapshotProvider,
         *,
         name: str = "memory",
+        devices: DeviceSelector = None,
         synchronize: SynchronizeTarget = True,
     ) -> "MemoryProbe":
-        probe = cls(name=name, synchronize=synchronize)
+        probe = cls(name=name, devices=devices, synchronize=synchronize)
         probe._collector = _MemoryCollector(
+            devices=devices,
             synchronize=synchronize,
             snapshot_provider=provider,
         )
@@ -57,14 +69,16 @@ class MemoryProbe:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> MemoryProbeSnapshot:
-        index = self._next_index
+        snapshot_index = self._next_snapshot_index
         marker = (
-            f"torch-cudagraph-debug:memory-probe:{self._probe_id}:{index}:{self.name}"
+            "torch-cudagraph-debug:memory-probe:"
+            f"{self._probe_id}:{snapshot_index}:{self.name}"
         )
         capture = self._collector.capture(marker, synchronize=synchronize)
         observations = tuple(
             MemoryObservation(
                 order=order,
+                device_index=key.device_index,
                 pool_id=key.pool_id,
                 stream=key.stream,
                 stats=stats,
@@ -74,14 +88,14 @@ class MemoryProbe:
         snapshot = MemoryProbeSnapshot(
             probe_id=self._probe_id,
             probe_name=self.name,
-            index=index,
+            snapshot_index=snapshot_index,
             timestamp=capture.timestamp,
             boundary_marker=capture.boundary_marker,
             observations=observations,
             warnings=capture.warnings,
             _raw_snapshot=capture.raw_snapshot,
         )
-        self._next_index += 1
+        self._next_snapshot_index += 1
         return snapshot
 
     def compare(
@@ -89,7 +103,6 @@ class MemoryProbe:
         reference: MemoryProbeSnapshot,
         candidate: MemoryProbeSnapshot,
         *,
-        pool_mapping: Mapping[object, object] | None = None,
         attribution: MemoryAttributionOptions | None = None,
     ) -> MemorySnapshotComparison:
         """Compare two chronologically ordered snapshots owned by this probe."""
@@ -102,7 +115,7 @@ class MemoryProbe:
                 raise MemoryOwnershipError(
                     f"{role} snapshot does not belong to MemoryProbe({self.name!r})"
                 )
-        if candidate.index <= reference.index:
+        if candidate.snapshot_index <= reference.snapshot_index:
             raise ValueError("candidate snapshot must follow reference snapshot")
 
         from .comparison import compare_snapshots
@@ -110,6 +123,5 @@ class MemoryProbe:
         return compare_snapshots(
             reference,
             candidate,
-            pool_mapping=pool_mapping,
             attribution=attribution,
         )

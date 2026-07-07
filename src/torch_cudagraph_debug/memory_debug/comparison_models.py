@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from typing import Literal
 
-from ._pool_identity import PoolId, pool_id_label, stream_label
+from ._pool_identity import MemoryObservationKey, MemoryPoolKey
 from .stats import AllocatorScope, MemoryStats, MemoryStatsDelta
 
 MatchKind = Literal[
@@ -17,6 +17,121 @@ MatchKind = Literal[
     "reference_only",
     "candidate_only",
 ]
+
+
+PhaseMetric = Literal[
+    "reserved_bytes",
+    "allocated_bytes",
+    "active_bytes",
+    "awaiting_free_bytes",
+    "inactive_bytes",
+    "requested_bytes",
+    "internal_fragmentation_bytes",
+    "expandable_reserved_bytes",
+]
+
+PHASE_METRICS: tuple[PhaseMetric, ...] = (
+    "reserved_bytes",
+    "allocated_bytes",
+    "active_bytes",
+    "awaiting_free_bytes",
+    "inactive_bytes",
+    "requested_bytes",
+    "internal_fragmentation_bytes",
+    "expandable_reserved_bytes",
+)
+
+
+@dataclass(frozen=True)
+class MemoryPhaseComponents:
+    """The four-point memory equation for one metric."""
+
+    metric: PhaseMetric
+    start_gap_bytes: int
+    baseline_change_bytes: int
+    candidate_change_bytes: int
+    end_gap_bytes: int
+
+    @property
+    def change_gap_bytes(self) -> int:
+        return self.candidate_change_bytes - self.baseline_change_bytes
+
+    @property
+    def identity_holds(self) -> bool:
+        return (
+            self.end_gap_bytes
+            == self.start_gap_bytes
+            + self.candidate_change_bytes
+            - self.baseline_change_bytes
+        )
+
+    @property
+    def changed(self) -> bool:
+        return any(
+            (
+                self.start_gap_bytes,
+                self.baseline_change_bytes,
+                self.candidate_change_bytes,
+                self.end_gap_bytes,
+            )
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "metric": self.metric,
+            "start_gap_bytes": self.start_gap_bytes,
+            "baseline_change_bytes": self.baseline_change_bytes,
+            "candidate_change_bytes": self.candidate_change_bytes,
+            "change_gap_bytes": self.change_gap_bytes,
+            "end_gap_bytes": self.end_gap_bytes,
+            "identity_holds": self.identity_holds,
+        }
+
+
+@dataclass(frozen=True)
+class MemoryAllocatorScopePhaseDecomposition:
+    """Four-point decomposition for one allocator scope and metric."""
+
+    scope: AllocatorScope
+    components: MemoryPhaseComponents
+
+    @property
+    def changed(self) -> bool:
+        return self.components.changed
+
+    def to_dict(self) -> dict[str, object]:
+        return {"scope": self.scope, **self.components.to_dict()}
+
+    def to_row(self) -> dict[str, object]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
+class MemoryPoolPhaseDecomposition:
+    """Four-point decomposition for one mapped pool pair and metric."""
+
+    baseline_key: MemoryPoolKey
+    candidate_key: MemoryPoolKey
+    components: MemoryPhaseComponents
+
+    @property
+    def changed(self) -> bool:
+        return self.components.changed
+
+    @property
+    def label(self) -> str:
+        return f"{self.baseline_key.label} -> {self.candidate_key.label}"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "baseline_pool_key": self.baseline_key.label,
+            "candidate_pool_key": self.candidate_key.label,
+            "pool": self.label,
+            **self.components.to_dict(),
+        }
+
+    def to_row(self) -> dict[str, object]:
+        return self.to_dict()
 
 
 @dataclass(frozen=True)
@@ -57,7 +172,7 @@ class MemoryLifecycleDelta:
     new_segment_bytes: int = 0
     removed_segment_bytes: int = 0
     newly_active_bytes: int = 0
-    released_bytes: int = 0
+    became_inactive_bytes: int = 0
 
     @classmethod
     def combine(
@@ -68,7 +183,7 @@ class MemoryLifecycleDelta:
             new_segment_bytes=sum(item.new_segment_bytes for item in items),
             removed_segment_bytes=sum(item.removed_segment_bytes for item in items),
             newly_active_bytes=sum(item.newly_active_bytes for item in items),
-            released_bytes=sum(item.released_bytes for item in items),
+            became_inactive_bytes=sum(item.became_inactive_bytes for item in items),
         )
 
     @property
@@ -81,10 +196,10 @@ class MemoryLifecycleDelta:
 
 @dataclass(frozen=True)
 class MemoryPoolComparison:
-    """One pool-level reference/candidate comparison."""
+    """One device/pool-level reference/candidate comparison."""
 
-    reference_pool_id: PoolId | None
-    candidate_pool_id: PoolId | None
+    reference_key: MemoryPoolKey | None
+    candidate_key: MemoryPoolKey | None
     match: MatchKind
     reference: MemoryStats
     candidate: MemoryStats
@@ -92,8 +207,8 @@ class MemoryPoolComparison:
     lifecycle: MemoryLifecycleDelta | None
 
     @property
-    def pool_id(self) -> PoolId:
-        value = self.candidate_pool_id or self.reference_pool_id
+    def pool_key(self) -> MemoryPoolKey:
+        value = self.candidate_key or self.reference_key
         assert value is not None
         return value
 
@@ -103,8 +218,8 @@ class MemoryPoolComparison:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "reference_pool_id": _pool_value(self.reference_pool_id),
-            "candidate_pool_id": _pool_value(self.candidate_pool_id),
+            "reference_key": _pool_key_value(self.reference_key),
+            "candidate_key": _pool_key_value(self.candidate_key),
             "match": self.match,
             "reference": self.reference.to_dict(),
             "candidate": self.candidate.to_dict(),
@@ -115,8 +230,8 @@ class MemoryPoolComparison:
     def to_row(self) -> dict[str, object]:
         return _comparison_row(
             {
-                "reference_pool_id": _pool_label(self.reference_pool_id),
-                "candidate_pool_id": _pool_label(self.candidate_pool_id),
+                "reference_key": _pool_key_label(self.reference_key),
+                "candidate_key": _pool_key_label(self.candidate_key),
                 "match": self.match,
             },
             self.reference,
@@ -128,12 +243,10 @@ class MemoryPoolComparison:
 
 @dataclass(frozen=True)
 class MemoryObservationComparison:
-    """One pool/stream reference/candidate comparison."""
+    """One device/pool/stream reference/candidate comparison."""
 
-    reference_pool_id: PoolId | None
-    reference_stream: Any | None
-    candidate_pool_id: PoolId | None
-    candidate_stream: Any | None
+    reference_key: MemoryObservationKey | None
+    candidate_key: MemoryObservationKey | None
     match: MatchKind
     reference: MemoryStats
     candidate: MemoryStats
@@ -146,10 +259,8 @@ class MemoryObservationComparison:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "reference_pool_id": _pool_value(self.reference_pool_id),
-            "reference_stream": self.reference_stream,
-            "candidate_pool_id": _pool_value(self.candidate_pool_id),
-            "candidate_stream": self.candidate_stream,
+            "reference_key": _observation_key_value(self.reference_key),
+            "candidate_key": _observation_key_value(self.candidate_key),
             "match": self.match,
             "reference": self.reference.to_dict(),
             "candidate": self.candidate.to_dict(),
@@ -160,10 +271,8 @@ class MemoryObservationComparison:
     def to_row(self) -> dict[str, object]:
         return _comparison_row(
             {
-                "reference_pool_id": _pool_label(self.reference_pool_id),
-                "reference_stream": _stream_label(self.reference_stream),
-                "candidate_pool_id": _pool_label(self.candidate_pool_id),
-                "candidate_stream": _stream_label(self.candidate_stream),
+                "reference_key": _observation_key_label(self.reference_key),
+                "candidate_key": _observation_key_label(self.candidate_key),
                 "match": self.match,
             },
             self.reference,
@@ -195,13 +304,27 @@ def _comparison_row(
     return row
 
 
-def _pool_value(pool_id: PoolId | None) -> list[Any] | None:
-    return list(pool_id) if pool_id is not None else None
+def _pool_key_value(key: MemoryPoolKey | None) -> dict[str, object] | None:
+    if key is None:
+        return None
+    return {"device_index": key.device_index, "pool_id": list(key.pool_id)}
 
 
-def _pool_label(pool_id: PoolId | None) -> str:
-    return pool_id_label(pool_id) if pool_id is not None else ""
+def _observation_key_value(
+    key: MemoryObservationKey | None,
+) -> dict[str, object] | None:
+    if key is None:
+        return None
+    return {
+        "device_index": key.device_index,
+        "pool_id": list(key.pool_id),
+        "stream": key.stream,
+    }
 
 
-def _stream_label(stream: Any | None) -> str:
-    return stream_label(stream) if stream is not None else ""
+def _pool_key_label(key: MemoryPoolKey | None) -> str:
+    return key.label if key is not None else ""
+
+
+def _observation_key_label(key: MemoryObservationKey | None) -> str:
+    return key.label if key is not None else ""

@@ -8,7 +8,9 @@ import torch
 
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
+    MemoryDisplayOptions,
     MemoryLifetimeOptions,
+    MemoryLifetimeSelection,
     MemoryRecorder,
     MemoryRun,
 )
@@ -96,8 +98,8 @@ def test_real_full_history_produces_marker_delimited_events() -> None:
                 on_missing="error",
             ),
         )
-        assert comparison.events_available is True
-        assert comparison.events_complete is True
+        assert comparison.attribution_status.events.available is True
+        assert comparison.attribution_status.events.complete is True
         assert any(event.action == "alloc" for event in comparison.allocator_events)
         assert any(
             "_allocate_with_named_stack" in event.stack_key
@@ -131,12 +133,12 @@ def test_real_full_history_attributes_allocation_free_completion() -> None:
         recorder.record_point("completed")
 
         report = recorder.finish().lifetimes(
-            "anchor",
+            MemoryLifetimeSelection.active_at("anchor"),
             through="completed",
             options=MemoryLifetimeOptions(
                 events=True,
                 on_missing="error",
-                stack_depth=4,
+                display=MemoryDisplayOptions(stack_depth=4),
             ),
         )
 
@@ -188,11 +190,11 @@ def test_real_cross_stream_free_waits_for_completion() -> None:
         gc.collect()
         recorder.record_point("completed", synchronize=False)
         report = recorder.finish().lifetimes(
-            "owned",
+            MemoryLifetimeSelection.active_at("owned"),
             options=MemoryLifetimeOptions(
                 events=True,
                 on_missing="error",
-                stack_depth=4,
+                display=MemoryDisplayOptions(stack_depth=4),
             ),
         )
 
@@ -232,11 +234,11 @@ def test_real_full_history_keeps_event_only_born_and_freed_generation() -> None:
         recorder.record_point("after")
 
         report = recorder.finish().lifetimes(
-            born_between=("before", "after"),
+            MemoryLifetimeSelection.born_between("before", "after"),
             options=MemoryLifetimeOptions(
                 events=True,
                 on_missing="error",
-                stack_depth=4,
+                display=MemoryDisplayOptions(stack_depth=4),
             ),
         )
 

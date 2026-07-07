@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 import torch
 
 from torch_cudagraph_debug import _native
 from torch_cudagraph_debug.tensor_debug import (
-    TensorObservationKey,
-    TensorProbe,
     CheckAction,
-    TensorCheckError,
-    TensorDebugError,
     PrintAction,
     RecordAction,
+    TensorCheckError,
+    TensorDebugError,
+    TensorObservationKey,
+    TensorProbe,
 )
 
 pytestmark = pytest.mark.gpu
@@ -857,7 +859,7 @@ def test_record_and_check_share_first_mismatch_replay_index() -> None:
     probe.close()
 
 
-def test_print_every_uses_graph_replay_index(capfd: pytest.CaptureFixture[str]) -> None:
+def test_print_every_uses_graph_replay_index() -> None:
     if not torch.cuda.is_available() or not _native.extension_available():
         pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
 
@@ -871,13 +873,24 @@ def test_print_every_uses_graph_replay_index(capfd: pytest.CaptureFixture[str]) 
     with torch.cuda.graph(g):
         probe(x, name="printed")
 
-    for _ in range(3):
-        g.replay()
-    torch.cuda.synchronize()
+    read_fd, write_fd = os.pipe()
+    original_stderr = os.dup(2)
+    try:
+        os.dup2(write_fd, 2)
+        os.close(write_fd)
+        for _ in range(3):
+            g.replay()
+        torch.cuda.synchronize()
+    finally:
+        os.dup2(original_stderr, 2)
+        os.close(original_stderr)
+
+    with os.fdopen(read_fd, encoding="utf-8") as captured:
+        stderr = captured.read()
 
     lines = [
         line
-        for line in capfd.readouterr().err.splitlines()
+        for line in stderr.splitlines()
         if "torch-cudagraph-debug:print-every" in line
     ]
     assert len(lines) == 1

@@ -2,31 +2,47 @@
 
 from __future__ import annotations
 
-import csv
-import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from .lifetimes import AllocationCohort
-from .comparison_models import (
-    MemoryAllocatorScopeComparison,
-    MemoryObservationComparison,
-    MemoryPoolComparison,
+from .._reporting import (
+    atomic_write_csv,
+    atomic_write_json,
+    atomic_write_text,
+    prepare_output_dir,
 )
-from .stacks import AllocationStackCoverage, AllocationStackDelta
-from .events import AllocatorEventSummary
 from .allocator_snapshot import (
-    format_comparison,
     format_bytes,
+    format_comparison,
     format_delta_bytes,
     pool_id_label,
     stream_label,
 )
+from .attribution import MemoryAttributionStatus
+from .comparison_models import (
+    MemoryAllocatorScopeComparison,
+    MemoryAllocatorScopePhaseDecomposition,
+    MemoryObservationComparison,
+    MemoryPoolComparison,
+    MemoryPoolPhaseDecomposition,
+)
+from .events import AllocatorEventSummary
+from .lifetimes import AllocationCohort
+from .stacks import AllocationStackCoverage, AllocationStackDelta
+from .stats import MemoryStats, MemoryStatsDelta
 
 if TYPE_CHECKING:
+    from .run_groups import (
+        MemoryRankPhaseDecomposition,
+        MemoryRankPointAggregate,
+        MemoryRankPointState,
+        MemoryRankPoolPhaseDecomposition,
+        MemoryRunGroup,
+        MemoryRunGroupPhaseAggregate,
+    )
     from .timeline import (
         MemoryAllocatorScopeTimelineEntry,
         MemoryObservationTimelineEntry,
@@ -39,31 +55,6 @@ _CORE_MEMORY_METRICS = (
     "reserved_bytes",
     "active_bytes",
     "requested_bytes",
-)
-_REPORT_ARTIFACTS = frozenset(
-    {
-        "report.txt",
-        "report.json",
-        "report.html",
-        "allocator_scopes.csv",
-        "pools.csv",
-        "observations.csv",
-        "allocation_stack_comparisons.csv",
-        "events.csv",
-        "cohorts.csv",
-        "cohort_points.csv",
-        "size_histograms.csv",
-        "size_outcomes.csv",
-        "birth_stacks.csv",
-        "free_request_stacks.csv",
-        "free_completion_stacks.csv",
-        "pool_decomposition.csv",
-        "allocator_scope_decomposition.csv",
-        "rank_point_entries.csv",
-        "point_aggregates.csv",
-        "rank_decomposition.csv",
-        "phase_aggregates.csv",
-    }
 )
 
 
@@ -371,6 +362,7 @@ class MemoryAllocationLifetimeAnalysis:
         *,
         limit: int | None = None,
         stack_depth: int | None = None,
+        overwrite: bool = False,
     ) -> dict[str, Path]:
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
@@ -378,7 +370,7 @@ class MemoryAllocationLifetimeAnalysis:
             limit=limit,
             stack_depth=stack_depth,
         )
-        root = _prepare_output(output_dir)
+        root = _prepare_output(output_dir, overwrite=overwrite)
         paths = _write_report_documents(
             root,
             text=self.to_text(limit=limit, stack_depth=stack_depth),
@@ -470,8 +462,9 @@ class _MemoryStateComparison:
     candidate_stack_coverage: AllocationStackCoverage | None = None
     allocator_events: tuple[AllocatorEventSummary, ...] = ()
     allocation_lifetimes: MemoryAllocationLifetimeAnalysis | None = None
-    events_available: bool = False
-    events_complete: bool = True
+    attribution_status: MemoryAttributionStatus = field(
+        default_factory=MemoryAttributionStatus
+    )
     lifecycle_available: bool = False
     warnings: tuple[str, ...] = ()
     display_stack_depth: int = 2
@@ -616,7 +609,8 @@ class _MemoryStateComparison:
                 f"(showing {len(visible)} of {len(self.allocator_events)}):"
             )
             lines.extend(
-                f"{indent}  {pool_id_label(item.pool_id)} "
+                f"{indent}  device[{item.device_index}] "
+                f"{pool_id_label(item.pool_id) if item.pool_id is not None else 'pool[unknown]'} "
                 f"{stream_label(item.stream)} {item.action}: "
                 f"{format_bytes(item.size_bytes)} in {item.count} events "
                 f"[{item.attribution_confidence}] at "
@@ -663,14 +657,14 @@ class _MemoryStateComparison:
             lines.append("    no changed pools")
         for item in selected_pool_comparisons:
             lines.extend(_pool_text(item))
-        lines.append("  pool/stream observations:")
+        lines.append("  device/pool/stream observations:")
         selected_observation_comparisons = [
             item
             for item in self.observation_comparisons
             if include_unchanged or item.changed
         ]
         if not selected_observation_comparisons:
-            lines.append("    no changed pool/stream observations")
+            lines.append("    no changed device/pool/stream observations")
         for item in selected_observation_comparisons:
             lines.extend(_observation_text(item))
 
@@ -707,8 +701,7 @@ class _MemoryStateComparison:
             "reference": self.reference.descriptor(),
             "candidate": self.candidate.descriptor(),
             "lifecycle_available": self.lifecycle_available,
-            "events_available": self.events_available,
-            "events_complete": self.events_complete,
+            "attribution_status": self.attribution_status.to_dict(),
             "display_stack_depth": self.display_stack_depth,
             "display_limit": self.display_limit,
             "warnings": list(self.warnings),
@@ -793,7 +786,7 @@ class _MemoryStateComparison:
             "<h2>Pool/Stream Observations</h2>",
             _render_table(
                 self.observation_comparison_rows(include_unchanged=include_unchanged),
-                "No changed pool/stream observations",
+                "No changed device/pool/stream observations",
             ),
         ]
         if stack_rows:
@@ -850,6 +843,7 @@ class _MemoryStateComparison:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        overwrite: bool = False,
     ) -> dict[str, Path]:
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
@@ -857,7 +851,7 @@ class _MemoryStateComparison:
             limit=limit,
             stack_depth=stack_depth,
         )
-        root = _prepare_output(output_dir)
+        root = _prepare_output(output_dir, overwrite=overwrite)
         paths = _write_common(
             root,
             text=self.to_text(
@@ -912,7 +906,7 @@ def _state_label(value: Any) -> str:
     label = getattr(value, "label", None)
     if label is not None:
         return str(label)
-    return f"{value.probe_name}@snapshot-{value.index}"
+    return f"{value.probe_name}@snapshot-{value.snapshot_index}"
 
 
 def _state_scope(reference: Any, candidate: Any) -> str:
@@ -953,14 +947,14 @@ class MemoryTimeline:
         return [
             item.to_row()
             for item in self.allocator_scope_entries
-            if include_unchanged or item.delta.changed
+            if include_unchanged or (item.delta is not None and item.delta.changed)
         ]
 
     def pool_rows(self, *, include_unchanged: bool = True) -> list[dict[str, object]]:
         return [
             item.to_row()
             for item in self.pool_entries
-            if include_unchanged or item.delta.changed
+            if include_unchanged or (item.delta is not None and item.delta.changed)
         ]
 
     def observation_rows(
@@ -969,7 +963,7 @@ class MemoryTimeline:
         return [
             item.to_row()
             for item in self.observation_entries
-            if include_unchanged or item.delta.changed
+            if include_unchanged or (item.delta is not None and item.delta.changed)
         ]
 
     def to_text(
@@ -1001,7 +995,9 @@ class MemoryTimeline:
         for point in self.run.points:
             point_lines = []
             for item in allocator_scopes_by_point.get(point.index, []):
-                if not include_unchanged and not item.delta.changed:
+                if not include_unchanged and (
+                    item.delta is None or not item.delta.changed
+                ):
                     continue
                 point_lines.extend(
                     _timeline_stats_text(
@@ -1012,22 +1008,26 @@ class MemoryTimeline:
                     )
                 )
             for item in pools_by_point.get(point.index, []):
-                if not include_unchanged and not item.delta.changed:
+                if not include_unchanged and (
+                    item.delta is None or not item.delta.changed
+                ):
                     continue
                 point_lines.extend(
                     _timeline_stats_text(
-                        pool_id_label(item.pool_id),
+                        item.key.label,
                         item.stats,
                         item.delta,
                         indent="    ",
                     )
                 )
             for item in observations_by_point.get(point.index, []):
-                if not include_unchanged and not item.delta.changed:
+                if not include_unchanged and (
+                    item.delta is None or not item.delta.changed
+                ):
                     continue
                 point_lines.extend(
                     _timeline_stats_text(
-                        f"{pool_id_label(item.pool_id)} {stream_label(item.stream)}",
+                        item.key.label,
                         item.stats,
                         item.delta,
                         indent="      ",
@@ -1209,6 +1209,7 @@ class MemoryTimeline:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        overwrite: bool = False,
     ) -> dict[str, Path]:
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
@@ -1216,7 +1217,7 @@ class MemoryTimeline:
             limit=limit,
             stack_depth=stack_depth,
         )
-        root = _prepare_output(output_dir)
+        root = _prepare_output(output_dir, overwrite=overwrite)
         paths = _write_common(
             root,
             text=self.to_text(
@@ -1270,8 +1271,8 @@ class MemoryPhaseComparison:
     candidate_change: MemoryPointComparison
     start_gap: MemoryPointComparison
     end_gap: MemoryPointComparison
-    allocator_scope_decomposition: tuple[dict[str, object], ...]
-    pool_decomposition: tuple[dict[str, object], ...]
+    allocator_scope_decomposition: tuple[MemoryAllocatorScopePhaseDecomposition, ...]
+    pool_decomposition: tuple[MemoryPoolPhaseDecomposition, ...]
     display_stack_depth: int = 2
     display_limit: int = 20
 
@@ -1292,18 +1293,18 @@ class MemoryPhaseComparison:
         self, *, include_unchanged: bool = True
     ) -> list[dict[str, object]]:
         return [
-            row
-            for row in self.allocator_scope_decomposition
-            if include_unchanged or _phase_row_changed(row)
+            item.to_row()
+            for item in self.allocator_scope_decomposition
+            if include_unchanged or item.changed
         ]
 
     def pool_decomposition_rows(
         self, *, include_unchanged: bool = True
     ) -> list[dict[str, object]]:
         return [
-            row
-            for row in self.pool_decomposition
-            if include_unchanged or _phase_row_changed(row)
+            item.to_row()
+            for item in self.pool_decomposition
+            if include_unchanged or item.changed
         ]
 
     def to_text(
@@ -1386,8 +1387,10 @@ class MemoryPhaseComparison:
             "display_stack_depth": self.display_stack_depth,
             "display_limit": self.display_limit,
             "warnings": list(self.warnings),
-            "allocator_scope_decomposition": list(self.allocator_scope_decomposition),
-            "pool_decomposition": list(self.pool_decomposition),
+            "allocator_scope_decomposition": [
+                item.to_dict() for item in self.allocator_scope_decomposition
+            ],
+            "pool_decomposition": [item.to_dict() for item in self.pool_decomposition],
             "baseline_change": self.baseline_change.to_dict(),
             "candidate_change": self.candidate_change.to_dict(),
             "start_gap": self.start_gap.to_dict(),
@@ -1448,7 +1451,7 @@ class MemoryPhaseComparison:
                         comparison.observation_comparison_rows(
                             include_unchanged=include_unchanged
                         ),
-                        "No selected pool/stream observations",
+                        "No selected device/pool/stream observations",
                     ),
                 ]
             )
@@ -1529,6 +1532,7 @@ class MemoryPhaseComparison:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        overwrite: bool = False,
     ) -> dict[str, Path]:
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
@@ -1536,7 +1540,7 @@ class MemoryPhaseComparison:
             limit=limit,
             stack_depth=stack_depth,
         )
-        root = _prepare_output(output_dir)
+        root = _prepare_output(output_dir, overwrite=overwrite)
         phase_comparisons = (
             ("baseline_change", self.baseline_change),
             ("candidate_change", self.candidate_change),
@@ -1676,31 +1680,32 @@ class MemoryPhaseComparison:
 class MemoryRunGroupSummary:
     """Per-rank point states and cross-rank extrema for one run group."""
 
-    run_group: Any
-    rank_point_entries: tuple[dict[str, object], ...]
-    point_aggregates: tuple[dict[str, object], ...]
+    run_group: MemoryRunGroup
+    rank_points: tuple[MemoryRankPointState, ...]
+    point_aggregates: tuple[MemoryRankPointAggregate, ...]
     warnings: tuple[str, ...] = ()
 
     def to_text(self) -> str:
         lines = [
-            f"Memory run group summary {self.run_group.name!r} ranks={list(self.run_group.ranks)}",
+            f"Memory run group summary {self.run_group.name!r} "
+            f"ranks={list(self.run_group.ranks)}",
             "  values are per rank; GPU memory is not summed across ranks",
         ]
         lines.extend(f"  warning: {warning}" for warning in self.warnings)
         current_point: tuple[int, str] | None = None
-        for row in self.point_aggregates:
-            if row["metric"] not in _CORE_MEMORY_METRICS:
+        for item in self.point_aggregates:
+            if item.metric not in _CORE_MEMORY_METRICS:
                 continue
-            point = (int(row["point_index"]), str(row["point_label"]))
+            point = (item.point_index, item.point_label)
             if point != current_point:
                 lines.append(f"  [{point[0]}] {point[1]}")
                 current_point = point
             lines.append(
                 "    "
-                f"total[{row['scope']}] {row['metric']}: "
-                f"min {format_bytes(int(row['min_value']))} on rank {row['min_rank']}, "
-                f"max {format_bytes(int(row['max_value']))} on rank {row['max_rank']}, "
-                f"spread {format_bytes(int(row['spread_value']))}"
+                f"total[{item.scope}] {item.metric}: "
+                f"min {format_bytes(item.min_value)} on rank {item.min_rank}, "
+                f"max {format_bytes(item.max_value)} on rank {item.max_rank}, "
+                f"spread {format_bytes(item.spread_value)}"
             )
         return "\n".join(lines)
 
@@ -1711,44 +1716,42 @@ class MemoryRunGroupSummary:
             "aggregation": "per_rank_extrema_no_sum",
             "run_group": self.run_group.descriptor(),
             "warnings": list(self.warnings),
-            "rank_point_entries": list(self.rank_point_entries),
-            "point_aggregates": list(self.point_aggregates),
+            "rank_points": [item.to_dict() for item in self.rank_points],
+            "point_aggregates": [item.to_dict() for item in self.point_aggregates],
         }
 
     def to_html(self) -> str:
+        aggregate_rows = [
+            item.to_dict()
+            for item in self.point_aggregates
+            if item.metric in _CORE_MEMORY_METRICS
+        ]
+        rank_rows = []
+        for item in self.rank_points:
+            row = item.to_dict()
+            rank_rows.append(
+                {
+                    **{
+                        key: row[key]
+                        for key in (
+                            "rank",
+                            "run_id",
+                            "point_index",
+                            "point_label",
+                            "scope",
+                        )
+                    },
+                    **{metric: row[metric] for metric in _CORE_MEMORY_METRICS},
+                }
+            )
         return _html_document(
             f"Memory run group summary {self.run_group.name}",
             (
                 "<p>Values are per rank; GPU memory is not summed across ranks.</p>",
                 "<h2>Cross-Rank Point Summary</h2>",
-                _render_table(
-                    [
-                        row
-                        for row in self.point_aggregates
-                        if row["metric"] in _CORE_MEMORY_METRICS
-                    ],
-                    "No point summaries",
-                ),
+                _render_table(aggregate_rows, "No point summaries"),
                 "<h2>Per-Rank Point States</h2>",
-                _render_table(
-                    [
-                        {
-                            **{
-                                key: row[key]
-                                for key in (
-                                    "rank",
-                                    "run_id",
-                                    "point_index",
-                                    "point_label",
-                                    "scope",
-                                )
-                            },
-                            **{metric: row[metric] for metric in _CORE_MEMORY_METRICS},
-                        }
-                        for row in self.rank_point_entries
-                    ],
-                    "No rank point states",
-                ),
+                _render_table(rank_rows, "No rank point states"),
             ),
             self.warnings,
         )
@@ -1756,19 +1759,23 @@ class MemoryRunGroupSummary:
     def write(
         self,
         output_dir: str | Path,
+        *,
+        overwrite: bool = False,
     ) -> dict[str, Path]:
-        root = _prepare_output(output_dir)
+        root = _prepare_output(output_dir, overwrite=overwrite)
         paths = _write_report_documents(
             root,
             text=self.to_text(),
             payload=self.to_dict(),
             html=self.to_html(),
         )
-        paths["rank_point_entries"] = _write_csv(
-            root / "rank_point_entries.csv", self.rank_point_entries
+        paths["rank_points"] = _write_csv(
+            root / "rank_points.csv",
+            [item.to_dict() for item in self.rank_points],
         )
         paths["point_aggregates"] = _write_csv(
-            root / "point_aggregates.csv", self.point_aggregates
+            root / "point_aggregates.csv",
+            [item.to_dict() for item in self.point_aggregates],
         )
         return paths
 
@@ -1777,11 +1784,12 @@ class MemoryRunGroupSummary:
 class MemoryRunGroupPhaseComparison:
     """Rank-paired four-point phase equations and cross-rank skew."""
 
-    baseline_group: Any
-    candidate_group: Any
+    baseline_group: MemoryRunGroup
+    candidate_group: MemoryRunGroup
     rank_comparisons: Mapping[int, MemoryPhaseComparison]
-    rank_decomposition: tuple[dict[str, object], ...]
-    phase_aggregates: tuple[dict[str, object], ...]
+    rank_decomposition: tuple[MemoryRankPhaseDecomposition, ...]
+    rank_pool_decomposition: tuple[MemoryRankPoolPhaseDecomposition, ...]
+    phase_aggregates: tuple[MemoryRunGroupPhaseAggregate, ...]
     warnings: tuple[str, ...] = ()
     display_stack_depth: int = 2
     display_limit: int = 20
@@ -1790,18 +1798,27 @@ class MemoryRunGroupPhaseComparison:
         self, *, include_unchanged: bool = True
     ) -> list[dict[str, object]]:
         return [
-            row
-            for row in self.rank_decomposition
-            if include_unchanged or _phase_row_changed(row)
+            item.to_dict()
+            for item in self.rank_decomposition
+            if include_unchanged or item.changed
+        ]
+
+    def rank_pool_decomposition_rows(
+        self, *, include_unchanged: bool = True
+    ) -> list[dict[str, object]]:
+        return [
+            item.to_dict()
+            for item in self.rank_pool_decomposition
+            if include_unchanged or item.changed
         ]
 
     def phase_aggregate_rows(
         self, *, include_unchanged: bool = True
     ) -> list[dict[str, object]]:
         return [
-            row
-            for row in self.phase_aggregates
-            if include_unchanged or _group_phase_row_changed(row)
+            item.to_dict()
+            for item in self.phase_aggregates
+            if include_unchanged or item.changed
         ]
 
     def to_text(
@@ -1830,7 +1847,7 @@ class MemoryRunGroupPhaseComparison:
             "active_bytes",
             "requested_bytes",
             "inactive_bytes",
-            "fragmentation_bytes",
+            "internal_fragmentation_bytes",
         }
         selected_rows = [
             row
@@ -1874,8 +1891,11 @@ class MemoryRunGroupPhaseComparison:
             "display_stack_depth": self.display_stack_depth,
             "display_limit": self.display_limit,
             "warnings": list(self.warnings),
-            "rank_decomposition": list(self.rank_decomposition),
-            "phase_aggregates": list(self.phase_aggregates),
+            "rank_decomposition": [item.to_dict() for item in self.rank_decomposition],
+            "rank_pool_decomposition": [
+                item.to_dict() for item in self.rank_pool_decomposition
+            ],
+            "phase_aggregates": [item.to_dict() for item in self.phase_aggregates],
             "rank_comparisons": {
                 str(rank): comparison.to_dict()
                 for rank, comparison in self.rank_comparisons.items()
@@ -1938,6 +1958,11 @@ class MemoryRunGroupPhaseComparison:
                 self.rank_decomposition_rows(include_unchanged=include_unchanged),
                 "No rank phase rows",
             ),
+            "<h2>Per-Rank Pool Phase Equations</h2>",
+            _render_table(
+                self.rank_pool_decomposition_rows(include_unchanged=include_unchanged),
+                "No rank pool phase rows",
+            ),
         ]
         if stack_rows:
             sections.extend(
@@ -1975,6 +2000,7 @@ class MemoryRunGroupPhaseComparison:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        overwrite: bool = False,
     ) -> dict[str, Path]:
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
@@ -1982,7 +2008,7 @@ class MemoryRunGroupPhaseComparison:
             limit=limit,
             stack_depth=stack_depth,
         )
-        root = _prepare_output(output_dir)
+        root = _prepare_output(output_dir, overwrite=overwrite)
         paths = _write_report_documents(
             root,
             text=self.to_text(
@@ -2000,6 +2026,10 @@ class MemoryRunGroupPhaseComparison:
         paths["rank_decomposition"] = _write_csv(
             root / "rank_decomposition.csv",
             self.rank_decomposition_rows(include_unchanged=include_unchanged),
+        )
+        paths["rank_pool_decomposition"] = _write_csv(
+            root / "rank_pool_decomposition.csv",
+            self.rank_pool_decomposition_rows(include_unchanged=include_unchanged),
         )
         paths["phase_aggregates"] = _write_csv(
             root / "phase_aggregates.csv",
@@ -2035,26 +2065,6 @@ def _phase_components(
         ("candidate_change", phase.candidate_change),
         ("start_gap", phase.start_gap),
         ("end_gap", phase.end_gap),
-    )
-
-
-def _group_phase_row_changed(row: Mapping[str, object]) -> bool:
-    return any(
-        int(value)
-        for key, value in row.items()
-        if key.endswith("_bytes") and value is not None
-    )
-
-
-def _phase_row_changed(row: Mapping[str, object]) -> bool:
-    return any(
-        int(row.get(key, 0))
-        for key in (
-            "start_gap_bytes",
-            "baseline_change_bytes",
-            "candidate_change_bytes",
-            "end_gap_bytes",
-        )
     )
 
 
@@ -2111,16 +2121,8 @@ def _display_event_row(
 
 
 def _pool_text(item: MemoryPoolComparison) -> list[str]:
-    reference = (
-        pool_id_label(item.reference_pool_id)
-        if item.reference_pool_id is not None
-        else "<none>"
-    )
-    candidate = (
-        pool_id_label(item.candidate_pool_id)
-        if item.candidate_pool_id is not None
-        else "<none>"
-    )
+    reference = item.reference_key.label if item.reference_key else "<none>"
+    candidate = item.candidate_key.label if item.candidate_key else "<none>"
     return [
         f"    {reference} -> {candidate} [{item.match}]",
         *_comparison_stats_text(
@@ -2130,16 +2132,8 @@ def _pool_text(item: MemoryPoolComparison) -> list[str]:
 
 
 def _observation_text(item: MemoryObservationComparison) -> list[str]:
-    reference = (
-        f"{pool_id_label(item.reference_pool_id)} {stream_label(item.reference_stream)}"
-        if item.reference_pool_id is not None
-        else "<none>"
-    )
-    candidate = (
-        f"{pool_id_label(item.candidate_pool_id)} {stream_label(item.candidate_stream)}"
-        if item.candidate_pool_id is not None
-        else "<none>"
-    )
+    reference = item.reference_key.label if item.reference_key else "<none>"
+    candidate = item.candidate_key.label if item.candidate_key else "<none>"
     return [
         f"    {reference} -> {candidate} [{item.match}]",
         *_comparison_stats_text(
@@ -2178,10 +2172,14 @@ def _comparison_stats_text(
     diagnostics = []
     for label, name, is_bytes in (
         ("inactive", "inactive_bytes", True),
-        ("fragmentation", "fragmentation_bytes", True),
+        ("awaiting free", "awaiting_free_bytes", True),
+        ("fragmentation", "internal_fragmentation_bytes", True),
         ("segments", "segment_count", False),
         ("blocks", "block_count", False),
+        ("inactive blocks", "inactive_block_count", False),
         ("largest inactive block", "largest_inactive_block_bytes", True),
+        ("expandable segments", "expandable_segment_count", False),
+        ("expandable reserved", "expandable_reserved_bytes", True),
     ):
         change = int(getattr(delta, name))
         if not change:
@@ -2213,8 +2211,8 @@ def _stack_delta_text(
     indent: str,
     stack_depth: int,
 ) -> str:
-    reference = pool_id_label(item.reference_pool_id)
-    candidate = pool_id_label(item.candidate_pool_id)
+    reference = item.reference_key.label
+    candidate = item.candidate_key.label
     pool = reference if reference == candidate else f"{reference} -> {candidate}"
     stream = f" {stream_label(item.stream)}" if item.stream is not None else ""
     return (
@@ -2229,53 +2227,65 @@ def _stack_delta_text(
 
 def _timeline_stats_text(
     label: str,
-    stats: Any,
-    delta: Any,
+    stats: MemoryStats,
+    delta: MemoryStatsDelta | None,
     *,
     indent: str,
 ) -> list[str]:
+    def render_bytes(name: str) -> str:
+        current = int(getattr(stats, name))
+        if delta is None:
+            return format_bytes(current)
+        return (
+            f"{format_bytes(current)} "
+            f"(delta {format_delta_bytes(int(getattr(delta, name)))})"
+        )
+
     lines = [
         f"{indent}{label} "
-        f"allocated={format_bytes(stats.allocated_bytes)} "
-        f"(delta {format_delta_bytes(delta.allocated_bytes)}), "
-        f"reserved={format_bytes(stats.reserved_bytes)} "
-        f"(delta {format_delta_bytes(delta.reserved_bytes)}), "
-        f"active={format_bytes(stats.active_bytes)} "
-        f"(delta {format_delta_bytes(delta.active_bytes)}), "
-        f"requested={format_bytes(stats.requested_bytes)} "
-        f"(delta {format_delta_bytes(delta.requested_bytes)})"
+        f"allocated={render_bytes('allocated_bytes')}, "
+        f"reserved={render_bytes('reserved_bytes')}, "
+        f"active={render_bytes('active_bytes')}, "
+        f"requested={render_bytes('requested_bytes')}"
     ]
     diagnostics = []
     for diagnostic_label, name, is_bytes in (
         ("inactive", "inactive_bytes", True),
-        ("fragmentation", "fragmentation_bytes", True),
+        ("awaiting free", "awaiting_free_bytes", True),
+        ("internal fragmentation", "internal_fragmentation_bytes", True),
         ("segments", "segment_count", False),
         ("blocks", "block_count", False),
+        ("inactive blocks", "inactive_block_count", False),
         ("largest inactive block", "largest_inactive_block_bytes", True),
+        ("expandable segments", "expandable_segment_count", False),
+        ("expandable reserved", "expandable_reserved_bytes", True),
     ):
-        change = int(getattr(delta, name))
-        if not change:
-            continue
         current = int(getattr(stats, name))
-        rendered = (
-            f"{format_bytes(current)} (delta {format_delta_bytes(change)})"
-            if is_bytes
-            else f"{current} (delta {change:+d})"
-        )
+        if delta is None:
+            if not current:
+                continue
+            rendered = format_bytes(current) if is_bytes else str(current)
+        else:
+            change = int(getattr(delta, name))
+            if not change:
+                continue
+            rendered = (
+                f"{format_bytes(current)} (delta {format_delta_bytes(change)})"
+                if is_bytes
+                else f"{current} (delta {change:+d})"
+            )
         diagnostics.append(f"{diagnostic_label}={rendered}")
     if diagnostics:
         lines.append(f"{indent}  diagnostics: " + ", ".join(diagnostics))
     return lines
 
 
-def _prepare_output(output_dir: str | Path) -> Path:
-    root = Path(output_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    for name in _REPORT_ARTIFACTS:
-        path = root / name
-        if path.is_file():
-            path.unlink()
-    return root
+def _prepare_output(
+    output_dir: str | Path,
+    *,
+    overwrite: bool,
+) -> Path:
+    return prepare_output_dir(output_dir, overwrite=overwrite)
 
 
 def _write_report_documents(
@@ -2288,12 +2298,9 @@ def _write_report_documents(
     text_path = root / "report.txt"
     json_path = root / "report.json"
     html_path = root / "report.html"
-    text_path.write_text(text + "\n", encoding="utf-8")
-    json_path.write_text(
-        json.dumps(payload, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    html_path.write_text(html, encoding="utf-8")
+    atomic_write_text(text_path, text + "\n")
+    atomic_write_json(json_path, payload)
+    atomic_write_text(html_path, html)
     return {"text": text_path, "json": json_path, "html": html_path}
 
 
@@ -2326,22 +2333,12 @@ def _write_common(
 
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> Path:
-    fields: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        for key in row:
-            if key not in seen:
-                seen.add(key)
-                fields.append(key)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=fields or ["row_type"],
-            extrasaction="ignore",
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-    return path
+    return atomic_write_csv(
+        path,
+        rows,
+        empty_fieldnames=("row_type",),
+        extrasaction="ignore",
+    )
 
 
 def _html_document(

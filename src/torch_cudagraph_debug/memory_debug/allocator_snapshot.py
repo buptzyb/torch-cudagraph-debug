@@ -9,11 +9,16 @@ from typing import Any
 
 from ._pool_identity import (
     DEFAULT_POOL_ID,
+    MemoryObservationKey,
     PoolId,
-    UNKNOWN_STREAM,
+    normalize_device_index,
     normalize_pool_id,
     normalize_stream,
+)
+from ._pool_identity import (
     pool_id_label as pool_id_label,
+)
+from ._pool_identity import (
     stream_label as stream_label,
 )
 from ._stack_trace import normalize_stack_frames, stack_key
@@ -42,18 +47,6 @@ ALLOCATION_LIFETIME_ACTIONS = frozenset({"alloc", "free_requested", "free_comple
 
 
 @dataclass(frozen=True)
-class MemoryObservationKey:
-    """Stable grouping key for one allocator pool on one CUDA stream."""
-
-    pool_id: PoolId
-    stream: Any
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "pool_id", normalize_pool_id(self.pool_id))
-        object.__setattr__(self, "stream", normalize_stream(self.stream))
-
-
-@dataclass(frozen=True)
 class AllocatorTraceEntry:
     """Normalized allocator trace event from ``_snapshot()["device_traces"]``."""
 
@@ -78,8 +71,9 @@ def normalize_snapshot(
     normalized = []
     for segment_index, segment in enumerate(segments):
         context = f"segment[{segment_index}]"
+        device = normalize_device_index(_int_field(segment, "device", context))
         pool_id = normalize_pool_id(segment.get("segment_pool_id", DEFAULT_POOL_ID))
-        stream = normalize_stream(segment.get("stream", UNKNOWN_STREAM))
+        stream = normalize_stream(segment.get("stream", None))
         address = _optional_int_field(segment, "address", context)
         blocks = []
         block_address = address
@@ -107,7 +101,7 @@ def normalize_snapshot(
         normalized.append(
             {
                 "address": address,
-                "device": _optional_int_field(segment, "device", context),
+                "device": device,
                 "stream": stream,
                 "segment_pool_id": pool_id,
                 "segment_type": _string_field(
@@ -117,6 +111,7 @@ def normalize_snapshot(
                 "allocated_size": _int_field(segment, "allocated_size", context),
                 "active_size": _int_field(segment, "active_size", context),
                 "requested_size": _int_field(segment, "requested_size", context),
+                "is_expandable": _bool_field(segment, "is_expandable", False),
                 "blocks": tuple(blocks),
                 "frames": _frames_field(segment, context),
             }
@@ -221,7 +216,7 @@ def _normalize_trace_entry(
         action=_string_field(raw, "action", f"trace[{trace_index}]", "unknown"),
         addr=_optional_int_value(addr, f"trace[{trace_index}].addr"),
         size_bytes=_int_field(raw, "size", f"trace[{trace_index}]"),
-        stream=normalize_stream(raw.get("stream", UNKNOWN_STREAM)),
+        stream=normalize_stream(raw.get("stream", None)),
         frames=_frames_field(raw, f"trace[{trace_index}]"),
         time_us=_optional_int_field(raw, "time_us", f"trace[{trace_index}]"),
         user_metadata=_string_field(raw, "user_metadata", f"trace[{trace_index}]", ""),
@@ -236,7 +231,7 @@ def _normalize_trace_entry(
 def summarize_snapshot(
     snapshot: AllocatorSnapshotData,
 ) -> dict[MemoryObservationKey, MemoryStats]:
-    """Summarize a snapshot by ``(pool, stream)`` group."""
+    """Summarize a snapshot by ``(device, pool, stream)`` group."""
 
     return summarize_segments(normalize_snapshot(snapshot))
 
@@ -247,8 +242,9 @@ def summarize_segments(
     grouped: dict[MemoryObservationKey, list[Mapping[str, Any]]] = defaultdict(list)
     for segment in segments:
         key = MemoryObservationKey(
+            normalize_device_index(_int(segment.get("device"))),
             normalize_pool_id(segment.get("segment_pool_id", DEFAULT_POOL_ID)),
-            normalize_stream(segment.get("stream", UNKNOWN_STREAM)),
+            normalize_stream(segment.get("stream", None)),
         )
         grouped[key].append(segment)
     return {key: _summarize_group(items) for key, items in grouped.items()}
@@ -300,7 +296,7 @@ def compare_observation_lifecycle(
             new_segment_bytes=values[0],
             removed_segment_bytes=values[1],
             newly_active_bytes=values[2],
-            released_bytes=values[3],
+            became_inactive_bytes=values[3],
         )
         for key, values in counters.items()
     }
@@ -361,11 +357,17 @@ def _segments_from_snapshot(
 def _summarize_group(
     segments: Sequence[Mapping[str, Any]],
 ) -> MemoryStats:
-    reserved = allocated = active = requested = block_count = largest_inactive = 0
+    reserved = allocated = active = requested = block_count = 0
+    inactive_block_count = largest_inactive = 0
+    expandable_segment_count = expandable_reserved = 0
     for segment in segments:
-        reserved += _int(segment.get("total_size"))
+        segment_reserved = _int(segment.get("total_size"))
+        reserved += segment_reserved
         allocated += _int(segment.get("allocated_size"))
         active += _int(segment.get("active_size"))
+        if bool(segment.get("is_expandable", False)):
+            expandable_segment_count += 1
+            expandable_reserved += segment_reserved
         for block in segment.get("blocks", []) or []:
             state = str(block.get("state", "unknown"))
             size = _int(block.get("size"))
@@ -373,6 +375,7 @@ def _summarize_group(
             if state in ACTIVE_STATES:
                 requested += _int(block.get("requested_size"))
             elif state == "inactive":
+                inactive_block_count += 1
                 largest_inactive = max(largest_inactive, size)
     return MemoryStats(
         reserved_bytes=reserved,
@@ -381,7 +384,10 @@ def _summarize_group(
         requested_bytes=requested,
         segment_count=len(segments),
         block_count=block_count,
+        inactive_block_count=inactive_block_count,
         largest_inactive_block_bytes=largest_inactive,
+        expandable_segment_count=expandable_segment_count,
+        expandable_reserved_bytes=expandable_reserved,
     )
 
 
@@ -390,6 +396,7 @@ def _segment_key(
 ) -> tuple[MemoryObservationKey, int | None, int]:
     return (
         MemoryObservationKey(
+            normalize_device_index(_int(segment.get("device"))),
             normalize_pool_id(segment.get("segment_pool_id")),
             normalize_stream(segment.get("stream")),
         ),
@@ -404,6 +411,7 @@ def _block_map(
     result = {}
     for segment in segments:
         key = MemoryObservationKey(
+            normalize_device_index(_int(segment.get("device"))),
             normalize_pool_id(segment.get("segment_pool_id")),
             normalize_stream(segment.get("stream")),
         )
@@ -466,6 +474,15 @@ def _optional_int_value(value: Any, context: str) -> int | None:
     if value < 0:
         raise ValueError(f"{context} must be non-negative")
     return value
+
+
+def _bool_field(value: Mapping[str, Any], name: str, default: bool) -> bool:
+    if name not in value:
+        return default
+    raw = value[name]
+    if type(raw) is not bool:
+        raise TypeError(f"{name} must be a boolean")
+    return raw
 
 
 def _string_field(

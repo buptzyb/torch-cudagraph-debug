@@ -15,6 +15,7 @@ def test_tensor_cli_summary_compare_runs_and_series(
 ) -> None:
     reference_bundle = tmp_path / "reference.tcgd-tensor"
     candidate_bundle = tmp_path / "candidate.tcgd-tensor"
+    mapped_candidate_bundle = tmp_path / "mapped-candidate.tcgd-tensor"
     make_tensor_run(
         [("forward", [("x", torch.tensor([1.0]), "full")])],
         name="reference",
@@ -27,6 +28,11 @@ def test_tensor_cli_summary_compare_runs_and_series(
         ],
         name="candidate",
         bundle_dir=candidate_bundle,
+    )
+    make_tensor_run(
+        [("replay-1", [("x", torch.tensor([1.0]), "full")])],
+        name="mapped-candidate",
+        bundle_dir=mapped_candidate_bundle,
     )
 
     assert main(["summary", str(reference_bundle)]) == 0
@@ -89,4 +95,17 @@ def test_tensor_cli_summary_compare_runs_and_series(
             ]
         )
         == 1
+    )
+
+    assert (
+        main(
+            [
+                "compare-runs",
+                str(reference_bundle),
+                str(mapped_candidate_bundle),
+                "--point-map",
+                "forward=replay-1",
+            ]
+        )
+        == 0
     )

@@ -8,6 +8,7 @@ from torch_cudagraph_debug.tensor_debug import (
     CheckAction,
     PrintAction,
     RecordAction,
+    TensorObservationKey,
 )
 
 
@@ -58,6 +59,27 @@ def test_check_accepts_single_tensor_or_numpy_array() -> None:
     assert torch.equal(tensor_spec["expected"][0], torch.tensor([1.0]))
     assert len(array_spec["expected"]) == 1
     assert torch.equal(array_spec["expected"][0], torch.tensor([2.0]))
+
+
+def test_check_accepts_semantic_observation_mapping() -> None:
+    hidden_key = TensorObservationKey("hidden", 0)
+    output_key = TensorObservationKey("output", 1)
+
+    spec = CheckAction(
+        {
+            hidden_key: torch.tensor([1.0]),
+            output_key: np.array([2.0], dtype=np.float32),
+        }
+    )._to_native()
+
+    assert [(item["name"], item["invocation_index"]) for item in spec["expected"]] == [
+        ("hidden", 0),
+        ("output", 1),
+    ]
+    assert all(isinstance(item["tensor"], torch.Tensor) for item in spec["expected"])
+
+    with pytest.raises(TypeError, match="TensorObservationKey"):
+        CheckAction({"hidden": torch.tensor([1.0])})._to_native()  # type: ignore[dict-item]
 
 
 def test_check_rejects_empty_expected_sequence() -> None:

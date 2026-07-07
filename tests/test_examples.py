@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import ast
 import importlib
-from pathlib import Path
 import re
+from pathlib import Path
 
 import torch_cudagraph_debug
 import torch_cudagraph_debug.memory_debug as memory_debug
@@ -74,21 +74,29 @@ MAJOR_WORKFLOW_COVERAGE = {
     "tensor_debug/recorder/forward_backward.py": (
         "recorder.observe(",
         "recorder.watch_grad(",
-        "recorder.snapshot_run(",
+        "recorder.preview(",
     ),
     "tensor_debug/recorder/replay_series.py": ("compare_point_series(",),
+    "tensor_debug/recorder/distributed_run_groups.py": (
+        "TensorRunGroup.load(",
+        "compare_run_groups(",
+        "torch.distributed",
+    ),
     "memory_debug/probe/quickstart.py": (
         "probe.snapshot(",
         "probe.compare(",
+        "snapshot_index",
     ),
     "memory_debug/probe/private_pool_inactive.py": (
         "inactive_bytes",
         "graph.replay()",
+        "pool_key.pool_id",
+        "pool_key.label",
     ),
     "memory_debug/probe/snapshot_comparison.py": ("compare_snapshots(",),
     "memory_debug/recorder/timeline_and_reports.py": (
         'record_point("during_capture")',
-        "recorder.snapshot_run(",
+        "recorder.preview(",
         "MemoryRun.load(",
         ".timeline(",
     ),
@@ -103,7 +111,13 @@ MAJOR_WORKFLOW_COVERAGE = {
         "lifetimes=True",
     ),
     "memory_debug/recorder/allocation_lifetimes.py": (".lifetimes(",),
-    "memory_debug/recorder/compare_runs_and_phases.py": ("compare_phases(",),
+    "memory_debug/recorder/compare_runs_and_phases.py": (
+        "compare_phases(",
+        "MemoryPoolKey",
+        "pool_key.device_index",
+        "pool_key.pool_id",
+        "row.components.identity_holds",
+    ),
     "memory_debug/recorder/distributed_run_groups.py": (
         "MemoryRunGroup.load(",
         "compare_run_group_phases(",
@@ -185,6 +199,23 @@ def test_root_readme_delegates_domain_details() -> None:
 
     assert "### Gradient Probes" not in readme
     assert "### Allocator History Is Application-Owned" not in readme
+
+
+def test_root_readme_memory_output_uses_device_aware_identities() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    memory_section = readme.split("## Memory Quick Start", 1)[1].split(
+        "## Agent Workflows", 1
+    )[0]
+    output = memory_section.split("Output from the tested run:", 1)[1].split(
+        "Read the report top-down:", 1
+    )[0]
+
+    assert "device[0]/pool[0,0]" in output
+    assert "device[0]/pool[1,0]" in output
+    assert "device/pool/stream observations:" in output
+    assert "diagnostics:" in output
+    assert "\n    pool[" not in output
+    assert "each device's `pool[0,0]`" in memory_section
 
 
 def test_workflow_docs_separate_control_flow_from_containment() -> None:
@@ -350,6 +381,20 @@ def test_public_markdown_links_resolve() -> None:
                 )
 
 
+def test_package_root_public_facade() -> None:
+    assert set(torch_cudagraph_debug.__all__) == {
+        "__version__",
+        "CudaGraphDebugError",
+        "FrozenJSONValue",
+        "JSONScalar",
+        "JSONValue",
+        "NativeExtensionUnavailableError",
+    }
+    assert all(
+        hasattr(torch_cudagraph_debug, name) for name in torch_cudagraph_debug.__all__
+    )
+
+
 def test_api_reference_covers_every_supported_export() -> None:
     reference = (ROOT / "docs" / "api.md").read_text(encoding="utf-8")
     modules = (torch_cudagraph_debug, tensor_debug, memory_debug, advanced)
@@ -373,6 +418,12 @@ def test_docs_do_not_split_hyphenated_words_across_lines() -> None:
         assert pattern.search(text) is None, document
 
 
+def test_markdown_shell_continuations_are_single_backslashes() -> None:
+    doubled = re.compile(r"\\\\$", re.MULTILINE)
+    for document in _public_markdown_files():
+        assert doubled.search(document.read_text(encoding="utf-8")) is None, document
+
+
 def test_release_checklist_covers_every_runnable_example() -> None:
     checklist = (ROOT / "docs" / "release_checklist.md").read_text(encoding="utf-8")
     scripts = sorted(
@@ -384,6 +435,9 @@ def test_release_checklist_covers_every_runnable_example() -> None:
         assert script in checklist, script
     assert "TCGD_REPO_ROOT" in checklist
     assert "TCGD_TEST_INSTALLED=1" in checklist
+    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1" in checklist
+    assert "python -m pytest -s -q" in checklist
+    assert "--no-build-isolation" in checklist
     assert "architecture spec" not in checklist.lower()
     assert "\npip install" not in checklist
 
@@ -396,6 +450,38 @@ def test_public_docs_use_supported_api_terminology() -> None:
     assert "stable facade" not in combined
     assert "clear_snapshot" not in combined
     assert re.search(r"status queries,\s+clear,", combined) is None
+
+
+def test_examples_use_current_memory_option_keywords() -> None:
+    allowed = {
+        "MemoryAttributionOptions": {
+            "stacks",
+            "events",
+            "lifetimes",
+            "on_missing",
+            "display",
+        },
+        "MemoryLifetimeOptions": {"events", "on_missing", "display"},
+    }
+    for path in sorted(EXAMPLES.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function_name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else None
+            )
+            if function_name not in allowed:
+                continue
+            keywords = {item.arg for item in node.keywords if item.arg is not None}
+            assert keywords <= allowed[function_name], (
+                f"{path}: unsupported {function_name} keywords "
+                f"{sorted(keywords - allowed[function_name])}"
+            )
 
 
 def test_memory_docs_distinguish_lifetime_and_attribution_options() -> None:

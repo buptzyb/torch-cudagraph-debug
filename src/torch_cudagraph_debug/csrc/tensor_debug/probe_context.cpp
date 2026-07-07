@@ -46,6 +46,25 @@ bool same_shape(const std::vector<int64_t>& expected_shape, at::IntArrayRef actu
     return true;
 }
 
+const ExpectedTensorConfig* find_expected(
+    const CheckActionConfig& check,
+    uint64_t order,
+    const std::string& observation_name,
+    uint64_t invocation_index) {
+    if (!check.keyed) {
+        return order < check.expected.size()
+            ? &check.expected[static_cast<size_t>(order)]
+            : nullptr;
+    }
+    for (const ExpectedTensorConfig& expected : check.expected) {
+        if (expected.observation_name == observation_name &&
+            expected.invocation_index == invocation_index) {
+            return &expected;
+        }
+    }
+    return nullptr;
+}
+
 torch::Tensor observation_to_tensor(const TensorObservationData& observation) {
     auto options = torch::TensorOptions().device(torch::kCPU).dtype(observation.dtype);
     torch::Tensor tensor = torch::empty(observation.shape, options);
@@ -382,10 +401,12 @@ void ProbeContext::on_callback(const CallbackPayload& payload) noexcept {
                     std::fflush(stderr);
                 }
             } else if (action.kind == ActionConfig::Kind::Check && action.check.enabled) {
-                if (order >= action.check.expected.size()) {
+                const ExpectedTensorConfig* expected_ptr = find_expected(
+                    action.check, order, observation_name, invocation_index);
+                if (expected_ptr == nullptr) {
                     std::ostringstream oss;
-                    oss << "CheckAction expected list for probe " << name_
-                        << " has no tensor for observation " << observation_name
+                    oss << "CheckAction expected values for probe " << name_
+                        << " have no tensor for observation " << observation_name
                         << "[" << invocation_index << "] at order " << order;
                     set_failure(
                         replay_index,
@@ -395,8 +416,7 @@ void ProbeContext::on_callback(const CallbackPayload& payload) noexcept {
                         oss.str());
                     continue;
                 }
-                const ExpectedTensorConfig& expected =
-                    action.check.expected[static_cast<size_t>(order)];
+                const ExpectedTensorConfig& expected = *expected_ptr;
                 if (payload.dtype != expected.expected_dtype ||
                     payload.shape != expected.expected_shape ||
                     payload.numel != expected.expected_numel) {
@@ -489,15 +509,16 @@ void ProbeContext::validate_check_actions(
         if (action.kind != ActionConfig::Kind::Check || !action.check.enabled) {
             continue;
         }
-        if (order >= action.check.expected.size()) {
+        const ExpectedTensorConfig* expected_ptr = find_expected(
+            action.check, order, observation_name, invocation_index);
+        if (expected_ptr == nullptr) {
             std::ostringstream oss;
-            oss << "CheckAction expected list for probe " << name_
-                << " has no tensor for observation " << observation_name
+            oss << "CheckAction expected values for probe " << name_
+                << " have no tensor for observation " << observation_name
                 << "[" << invocation_index << "] at order " << order;
             throw std::runtime_error(oss.str());
         }
-        const ExpectedTensorConfig& expected =
-            action.check.expected[static_cast<size_t>(order)];
+        const ExpectedTensorConfig& expected = *expected_ptr;
         if (tensor.scalar_type() != expected.expected_dtype) {
             std::ostringstream oss;
             oss << "CheckAction expected dtype does not match probe input dtype"

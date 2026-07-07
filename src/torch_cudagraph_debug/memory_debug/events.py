@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ._pool_identity import PoolId
 from ._pool_ranges import PoolRangeIndex, build_pool_range_index
 from ._stack_trace import (
     display_stack,
@@ -47,9 +48,10 @@ class _WindowBounds:
 
 @dataclass(frozen=True)
 class AllocatorEventSummary:
-    """Allocator events grouped by pool, stream, action, and event stack."""
+    """Allocator events grouped by device, pool, stream, action, and stack."""
 
-    pool_id: tuple[Any, ...]
+    device_index: int
+    pool_id: PoolId | None
     stream: Any
     action: str
     stack_frames: tuple[Mapping[str, Any], ...]
@@ -82,7 +84,12 @@ class AllocatorEventSummary:
         return {
             "reference_label": reference_label,
             "candidate_label": candidate_label,
-            "pool_id": pool_id_label(self.pool_id),
+            "device_index": self.device_index,
+            "pool_id": (
+                pool_id_label(self.pool_id)
+                if self.pool_id is not None
+                else "pool[unknown]"
+            ),
             "stream_id": stream_label(self.stream),
             "action": self.action,
             "stack_key": self.stack_key,
@@ -212,7 +219,7 @@ def summarize_allocator_events(
     """Aggregate historical events separately from active allocation stacks."""
 
     ranges = build_pool_range_index(candidate_segments, reference_segments)
-    totals: dict[tuple[tuple[Any, ...], Any, str, str, str], Counter[str]] = (
+    totals: dict[tuple[int, PoolId | None, Any, str, str, str], Counter[str]] = (
         defaultdict(Counter)
     )
     stack_frames: dict[str, tuple[Mapping[str, Any], ...]] = {}
@@ -228,14 +235,22 @@ def summarize_allocator_events(
         frames = normalize_stack_frames(entry.frames)
         fingerprint = stack_fingerprint(frames)
         stack_frames[fingerprint] = frames
-        key = (pool_id, entry.stream, entry.action, fingerprint, confidence)
+        key = (
+            entry.device_index,
+            pool_id,
+            entry.stream,
+            entry.action,
+            fingerprint,
+            confidence,
+        )
         totals[key]["count"] += 1
         totals[key]["size"] += abs(entry.size_bytes)
 
-    rows = tuple(
+    return tuple(
         sorted(
             (
                 AllocatorEventSummary(
+                    device_index=device_index,
                     pool_id=pool_id,
                     stream=stream,
                     action=action,
@@ -246,6 +261,7 @@ def summarize_allocator_events(
                     attribution_confidence=confidence,
                 )
                 for (
+                    device_index,
                     pool_id,
                     stream,
                     action,
@@ -256,7 +272,8 @@ def summarize_allocator_events(
             key=lambda item: (
                 -item.size_bytes,
                 -item.count,
-                pool_id_label(item.pool_id),
+                item.device_index,
+                (pool_id_label(item.pool_id) if item.pool_id is not None else ""),
                 stream_label(item.stream),
                 item.action,
                 item.stack_key,
@@ -264,7 +281,6 @@ def summarize_allocator_events(
             ),
         )
     )
-    return rows
 
 
 def _last_marker_index(
@@ -292,10 +308,10 @@ def _attribute_pool(
     device_index: int,
     addr: int | None,
     ranges: PoolRangeIndex,
-) -> tuple[tuple[Any, ...], str]:
+) -> tuple[PoolId | None, str]:
     if addr is None:
-        return ("unknown",), "unknown"
+        return None, "unknown"
     pool_id = ranges.find(device_index, addr)
     if pool_id is not None:
         return pool_id, "matched"
-    return ("unknown",), "unknown"
+    return None, "unknown"

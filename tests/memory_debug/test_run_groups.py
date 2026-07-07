@@ -10,6 +10,7 @@ import pytest
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
     MemoryBundleError,
+    MemoryDisplayOptions,
     MemoryRunGroup,
     compare_run_group_phases,
 )
@@ -61,50 +62,53 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
     assert group.ranks == (0, 1)
     assert group.group_id == "baseline-job"
     assert group.world_size == 2
+    assert group.missing_ranks == ()
+    assert group.complete is True
     assert group.point_labels == ("start", "end")
     assert not group.warnings
     assert group[0]["end"]._snapshot_cache == {}
-    assert group[0]["end"].raw_snapshot()["segments"]
-    assert group[0]["end"]._snapshot_cache == {}
-    assert len(report.rank_point_entries) == 12
-    end_active = next(
-        row
-        for row in report.point_aggregates
-        if row["point_label"] == "end"
-        and row["scope"] == "all"
-        and row["metric"] == "active_bytes"
-    )
-    assert end_active["min_value"] == 30
-    assert end_active["min_rank"] == 0
-    assert end_active["max_value"] == 35
-    assert end_active["worst_rank"] == 1
-    assert end_active["spread_value"] == 5
+    assert len(report.rank_points) == 12
     text = report.to_text()
     assert "not summed across ranks" in text
+    assert group[0]["end"].raw_snapshot()["segments"]
+    assert group[0]["end"]._snapshot_cache == {}
+    end_active = next(
+        item
+        for item in report.point_aggregates
+        if item.point_label == "end"
+        and item.scope == "all"
+        and item.metric == "active_bytes"
+    )
+    assert end_active.min_value == 30
+    assert end_active.min_rank == 0
+    assert end_active.max_value == 35
+    assert end_active.worst_rank == 1
+    assert end_active.spread_value == 5
     assert "allocated_bytes" in text
     assert "reserved_bytes" in text
     assert "active_bytes" in text
     assert "requested_bytes" in text
     assert "inactive_bytes" not in text
-    assert "fragmentation_bytes" not in text
+    assert "internal_fragmentation_bytes" not in text
 
     paths = report.write(tmp_path / "summary")
     assert set(paths) == {
         "text",
         "json",
         "html",
-        "rank_point_entries",
+        "rank_points",
         "point_aggregates",
     }
     payload = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert payload["aggregation"] == "per_rank_extrema_no_sum"
     assert payload["kind"] == "run-group-summary"
     assert any(
-        row["metric"] == "fragmentation_bytes" for row in payload["point_aggregates"]
+        row["metric"] == "internal_fragmentation_bytes"
+        for row in payload["point_aggregates"]
     )
     html = paths["html"].read_text(encoding="utf-8")
     assert "active_bytes" in html
-    assert "fragmentation_bytes" not in html
+    assert "internal_fragmentation_bytes" not in html
 
     cached = MemoryRunGroup.load(root, cache_snapshots=True)
     assert cached[0]["end"].raw_snapshot()["segments"]
@@ -144,7 +148,12 @@ def test_group_warns_for_missing_rank_and_metadata_mismatch() -> None:
     group = MemoryRunGroup.from_runs((rank0, rank2))
 
     assert any("missing ranks 1" in warning for warning in group.warnings)
+    assert group.missing_ranks == (1,)
+    assert group.complete is False
     assert any("metadata differs" in warning for warning in group.warnings)
+    assert any(
+        row.metric == "awaiting_free_bytes" for row in group.summary().point_aggregates
+    )
 
 
 def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) -> None:
@@ -193,17 +202,17 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
     )
 
     assert tuple(report.rank_comparisons) == (0, 1)
-    assert len(report.rank_decomposition) == 36
+    assert len(report.rank_decomposition) == 48
     active = next(
-        row
-        for row in report.phase_aggregates
-        if row["scope"] == "all" and row["metric"] == "active_bytes"
+        item
+        for item in report.phase_aggregates
+        if item.scope == "all" and item.metric == "active_bytes"
     )
-    assert active["end_gap_min_bytes"] == 25
-    assert active["end_gap_max_bytes"] == 30
-    assert active["end_gap_max_rank"] == 1
-    assert active["end_gap_spread_bytes"] == 5
-    assert active["identity_holds"] is True
+    assert active.end_gap.min_bytes == 25
+    assert active.end_gap.max_bytes == 30
+    assert active.end_gap.max_rank == 1
+    assert active.end_gap.spread_bytes == 5
+    assert active.identity_holds is True
     assert "not summed across ranks" in report.to_text()
 
     paths = report.write(tmp_path / "phase")
@@ -212,6 +221,7 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
         "json",
         "html",
         "rank_decomposition",
+        "rank_pool_decomposition",
         "phase_aggregates",
     }
     assert paths["rank_decomposition"].is_file()
@@ -257,8 +267,7 @@ def test_group_phase_attribution_is_display_limited_but_csv_is_complete(
         candidate_end="end",
         attribution=MemoryAttributionOptions(
             stacks=True,
-            stack_depth=1,
-            limit=1,
+            display=MemoryDisplayOptions(stack_depth=1, limit=1),
         ),
     )
 
@@ -294,3 +303,34 @@ def test_group_phase_attribution_is_display_limited_but_csv_is_complete(
     assert "shared.py:1:allocate" in html
     assert "left.py:2:forward" not in html
     assert "right.py:3:forward" not in html
+
+
+def test_group_provenance_compares_multi_device_properties_not_uuid() -> None:
+    rank0 = _distributed_run((10, 20), name="run", rank=0, group_id="job")
+    rank1 = _distributed_run((10, 20), name="run", rank=1, group_id="job")
+    base_device = {
+        "index": 0,
+        "name": "GPU",
+        "capability": [9, 0],
+        "total_memory_bytes": 100,
+        "uuid": "rank-specific-0",
+    }
+    rank0 = replace(rank0, provenance={"devices": [base_device]})
+    rank1 = replace(
+        rank1,
+        provenance={"devices": [{**base_device, "uuid": "rank-specific-1"}]},
+    )
+
+    matching = MemoryRunGroup.from_runs((rank0, rank1))
+    assert not any("provenance differs" in warning for warning in matching.warnings)
+
+    different = MemoryRunGroup.from_runs(
+        (
+            rank0,
+            replace(
+                rank1,
+                provenance={"devices": [{**base_device, "name": "other GPU"}]},
+            ),
+        )
+    )
+    assert any("provenance differs" in warning for warning in different.warnings)

@@ -59,7 +59,7 @@ flowchart TB
 
     TPS -->|supports| TI["Direct inspection or snapshot comparison"]
     MPS -->|supports| MI["Direct inspection or snapshot comparison"]
-    TRun -->|supports| TA["Point, run, and series analysis"]
+    TRun -->|supports| TA["Point, run, series, and run-group analysis"]
     MRun -->|supports| MA["Point, timeline, phase, and run-group analysis"]
 
     TC -. "same role; no cross-domain base class" .-> MC
@@ -92,6 +92,11 @@ or timestamp. Those ownership and ordering fields live on `ProbeSnapshot` or
 `Point`. This lets Probe and Recorder reuse the same immutable leaf model
 without pretending a standalone snapshot belongs to a run.
 
+Every Probe snapshot has a Probe-local `snapshot_index` that orders host
+queries. Tensor snapshots additionally carry the GPU `replay_index` that
+identifies which graph replay supplied their values. Recorder Points use labels
+and indices; CUDA Graph TensorPoints may also retain replay evidence.
+
 `SnapshotComparison` and `PointComparison` are sibling public result types in
 both domains. They share private state-comparison behavior, but direct Probe
 comparison consumes the observations contained by a `ProbeSnapshot` directly;
@@ -102,8 +107,9 @@ The leaf data has domain-specific meaning:
 
 - A tensor observation identifies one named probe invocation and its tensor
   payload or summary.
-- A memory observation identifies one allocator scope, such as a pool and
-  stream, within a point-in-time allocator snapshot.
+- A memory observation identifies one `(device_index, pool_id, stream)` state
+  within a point-in-time allocator snapshot. Pool and allocator-scope totals are
+  derived views rather than separate observation types.
 
 ## Quick Workflow
 
@@ -127,7 +133,7 @@ Recorder when those capabilities are needed.
 A Recorder has one terminal result. Normal `finish()` or normal context exit
 sets `complete=True`. Exceptional context exit preserves collected points,
 sets `finished_at`, persists `complete=False`, and freezes further collection;
-it does not relabel a partial investigation as complete. `snapshot_run()` is a
+it does not relabel a partial investigation as complete. `preview()` is a
 nonterminal view before exit and returns the terminal result afterward.
 
 Tensor collectors own CUDA-visible storage. `snapshot()`, status queries, and
@@ -139,9 +145,11 @@ eager callback payloads are destroyed when they fire. `when="always"` eager
 collection is single-stream, and eager use is rejected after that collector has
 participated in capture.
 
-Memory collectors have no persistent native graph resources to close. Their
-Probe and Recorder semantics are expressed by immutable snapshots and terminal
-runs instead.
+Memory collectors have no persistent native graph resources to close. Probe and
+Recorder semantics are expressed by immutable snapshots and terminal runs
+instead. Memory collection is device-aware: device index is part of pool and
+observation identity, and one Probe or Recorder may select one device, a device
+sequence, or all visible devices.
 
 ## Architectural Boundaries
 
@@ -153,7 +161,8 @@ runs instead.
    in the private collection layer.
 3. Probe returns standalone `ProbeSnapshot` values; Recorder produces `Run`
    values. A Run contains Points, while ProbeSnapshot and Point both contain
-   ownerless Observations.
+   ownerless Observations. Both domains can group rank-local Runs without
+   merging rank identity.
 4. Tensor and memory Collectors have matching responsibilities but no synthetic
    common base class. Their execution and synchronization mechanisms remain
    domain-specific.

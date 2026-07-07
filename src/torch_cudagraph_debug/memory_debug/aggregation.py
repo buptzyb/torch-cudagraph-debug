@@ -1,35 +1,37 @@
-"""Allocator-wide totals derived from pool summaries."""
+"""Allocator-wide totals derived from device-aware pool summaries."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
 
+from ._pool_identity import DEFAULT_POOL_ID, MemoryObservationKey, MemoryPoolKey
 from .comparison_models import MemoryAllocatorScopeComparison
 from .stats import AllocatorScope, MemoryStats, MemoryStatsDelta
-from .allocator_snapshot import DEFAULT_POOL_ID, MemoryObservationKey
 
 ALLOCATOR_SCOPES: tuple[AllocatorScope, ...] = ("all", "default", "private")
 
 
 def summarize_pools(
     observations: Mapping[MemoryObservationKey, MemoryStats],
-) -> dict[tuple[object, ...], MemoryStats]:
-    """Aggregate pool/stream states into pool states."""
+) -> dict[MemoryPoolKey, MemoryStats]:
+    """Aggregate device/pool/stream states into device/pool states."""
 
-    by_pool: defaultdict[tuple[object, ...], list[MemoryStats]] = defaultdict(list)
+    by_pool: defaultdict[MemoryPoolKey, list[MemoryStats]] = defaultdict(list)
     for key, stats in observations.items():
-        by_pool[key.pool_id].append(stats)
-    return {pool_id: MemoryStats.combine(values) for pool_id, values in by_pool.items()}
+        by_pool[key.pool_key].append(stats)
+    return {
+        pool_key: MemoryStats.combine(values) for pool_key, values in by_pool.items()
+    }
 
 
 def summarize_allocator_scopes(
-    pools: Mapping[tuple[object, ...], MemoryStats],
+    pools: Mapping[MemoryPoolKey, MemoryStats],
 ) -> dict[AllocatorScope, MemoryStats]:
-    """Return all/default/private totals without inventing synthetic pool IDs."""
+    """Return allocator totals across the selected devices."""
 
-    default = [value for pool_id, value in pools.items() if pool_id == DEFAULT_POOL_ID]
-    private = [value for pool_id, value in pools.items() if pool_id != DEFAULT_POOL_ID]
+    default = [value for key, value in pools.items() if key.pool_id == DEFAULT_POOL_ID]
+    private = [value for key, value in pools.items() if key.pool_id != DEFAULT_POOL_ID]
     return {
         "all": MemoryStats.combine(pools.values()),
         "default": MemoryStats.combine(default),

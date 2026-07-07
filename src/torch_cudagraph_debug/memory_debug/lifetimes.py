@@ -7,39 +7,41 @@ import json
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from ._pool_ranges import PoolRangeIndex, build_pool_range_index
 from ._stack_trace import (
     display_stack,
     normalize_stack_frames,
-    stack_fingerprint as _stack_fingerprint,
     stack_frames_json,
     stack_key,
+)
+from ._stack_trace import (
+    stack_fingerprint as _stack_fingerprint,
+)
+from .allocator_snapshot import (
+    ACTIVE_STATES,
+    ALLOCATION_LIFETIME_ACTIONS,
+    AWAITING_FREE_STATES,
+    KNOWN_TRACE_ACTIONS,
+    OWNER_ACTIVE_STATES,
+    AllocatorTraceEntry,
+    normalize_pool_id,
+    normalize_snapshot,
+    normalize_trace_entries,
+    trace_device_indices,
 )
 from .errors import MemoryHistoryError
 from .events import (
     extract_event_window,
     extract_event_window_from_snapshot,
 )
-from .allocator_snapshot import (
-    ALLOCATION_LIFETIME_ACTIONS,
-    ACTIVE_STATES,
-    AWAITING_FREE_STATES,
-    AllocatorTraceEntry,
-    KNOWN_TRACE_ACTIONS,
-    OWNER_ACTIVE_STATES,
-    normalize_pool_id,
-    normalize_snapshot,
-    normalize_trace_entries,
-    trace_device_indices,
-)
 
 if TYPE_CHECKING:
     from .attribution import MemoryLifetimeOptions
     from .recording import MemoryPoint, MemoryRun
-    from .snapshots import MemoryProbeSnapshot
     from .reports import MemoryAllocationLifetimeAnalysis
+    from .snapshots import MemoryProbeSnapshot
 
 
 LifetimeConfidence = Literal["event_exact", "snapshot_inferred"]
@@ -412,6 +414,23 @@ class _IntervalHistory:
     warnings: tuple[str, ...]
 
 
+_REPLAY_WARNING_EXAMPLE_LIMIT = 3
+
+
+@dataclass
+class _ReplayWarningGroup:
+    count: int = 0
+    example_addresses: list[int] = field(default_factory=list)
+
+    def add(self, address: int) -> None:
+        self.count += 1
+        if (
+            address not in self.example_addresses
+            and len(self.example_addresses) < _REPLAY_WARNING_EXAMPLE_LIMIT
+        ):
+            self.example_addresses.append(address)
+
+
 def analyze_allocation_lifetimes(
     run: MemoryRun,
     *,
@@ -425,7 +444,7 @@ def analyze_allocation_lifetimes(
     """Build allocation cohorts for a range in one recorded run."""
 
     return _analyze_allocation_lifetimes(
-        run.points[start.index : end.index + 1],
+        run.points[_state_index(start) : _state_index(end) + 1],
         source_kind="run",
         source_id=run.run_id,
         source_name=run.name,
@@ -449,7 +468,7 @@ def analyze_probe_snapshot_lifetimes(
 
     if reference.probe_id != candidate.probe_id:
         raise ValueError("probe lifetime endpoints must belong to one MemoryProbe")
-    if candidate.index <= reference.index:
+    if candidate.snapshot_index <= reference.snapshot_index:
         raise ValueError("candidate snapshot must follow reference snapshot")
     return _analyze_allocation_lifetimes(
         (reference, candidate),
@@ -509,15 +528,17 @@ def _analyze_allocation_lifetimes(
     instances, replay_warnings = _track_instances(points, observations, histories)
     warnings.extend(replay_warnings)
     if active_at is not None:
-        instances = [item for item in instances if active_at.index in item.observations]
+        instances = [
+            item for item in instances if _state_index(active_at) in item.observations
+        ]
     elif born_between is not None:
         born_start, born_end = born_between
         instances = [
             item
             for item in instances
             if item.birth is not None
-            and item.birth.start_index >= born_start.index
-            and item.birth.end_index <= born_end.index
+            and item.birth.start_index >= _state_index(born_start)
+            and item.birth.end_index <= _state_index(born_end)
         ]
         if not options.events:
             warnings.append(
@@ -564,8 +585,8 @@ def _analyze_allocation_lifetimes(
         history_complete=options.events and all(item.complete for item in histories),
         total_instance_bytes=total_instance_bytes,
         attributed_instance_bytes=attributed_instance_bytes,
-        display_stack_depth=options.stack_depth,
-        display_limit=options.limit,
+        display_stack_depth=options.display.stack_depth,
+        display_limit=options.display.limit,
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
@@ -574,7 +595,12 @@ def _state_label(state: Any) -> str:
     label = getattr(state, "label", None)
     if label is not None:
         return str(label)
-    return f"{state.probe_name}@snapshot-{state.index}"
+    return f"{state.probe_name}@snapshot-{state.snapshot_index}"
+
+
+def _state_index(state: Any) -> int:
+    snapshot_index = getattr(state, "snapshot_index", None)
+    return int(state.index if snapshot_index is None else snapshot_index)
 
 
 def _scan_points(
@@ -600,7 +626,9 @@ def _scan_points(
     )
     for point, snapshot in zip(points, snapshots):
         segments = normalize_snapshot(snapshot)
-        observations[point.index] = _active_blocks_from_segments(point, segments)
+        observations[_state_index(point)] = _active_blocks_from_segments(
+            point, segments
+        )
         if previous is None or previous_segments is None:
             previous = point
             previous_segments = segments
@@ -684,7 +712,7 @@ def _active_blocks_from_segments(
             address = int(address_value) if address_value is not None else None
             rows.append(
                 _BlockObservation(
-                    point_index=point.index,
+                    point_index=_state_index(point),
                     point_label=_state_label(point),
                     ordinal=ordinal,
                     device=device,
@@ -709,8 +737,16 @@ def _track_instances(
     instances: list[_AllocationInstance] = []
     current: dict[tuple[int | None, int], _AllocationInstance] = {}
     missing_address: list[_AllocationInstance] = []
-    warnings: list[str] = []
+    warning_groups: dict[tuple[str, int | None], _ReplayWarningGroup] = {}
     event_order = 0
+
+    def record_warning(
+        kind: str,
+        *,
+        device: int | None,
+        address: int,
+    ) -> None:
+        warning_groups.setdefault((kind, device), _ReplayWarningGroup()).add(address)
 
     def create_from_block(
         block: _BlockObservation,
@@ -758,7 +794,7 @@ def _track_instances(
         )
         instance.free_completion_order = event_order
 
-    for block in observations.get(points[0].index, ()):
+    for block in observations.get(_state_index(points[0]), ()):
         item = create_from_block(block)
         if block.address is None:
             missing_address.append(item)
@@ -785,10 +821,18 @@ def _track_instances(
                     instance.free_request_order = event_order
                 continue
             if entry.action == "free_completed":
-                if instance is None or not _event_size_matches(entry, instance):
-                    warnings.append(
-                        "free_completed could not be matched to an active allocation "
-                        f"on device {entry.device_index} at address {entry.addr}"
+                if instance is None:
+                    record_warning(
+                        "free_completed_without_allocation",
+                        device=entry.device_index,
+                        address=entry.addr,
+                    )
+                    continue
+                if not _event_size_matches(entry, instance):
+                    record_warning(
+                        "free_completed_size_mismatch",
+                        device=entry.device_index,
+                        address=entry.addr,
                     )
                     continue
                 if instance.free_request is None:
@@ -797,8 +841,10 @@ def _track_instances(
                     )
                     instance.free_request_order = event_order
                     event_order += 1
-                    warnings.append(
-                        "free_completed had no matching free_requested; inferred the request"
+                    record_warning(
+                        "free_completed_without_request",
+                        device=entry.device_index,
+                        address=entry.addr,
                     )
                 if instance.free_completion is None:
                     instance.free_completion = _transition_from_event(
@@ -811,10 +857,10 @@ def _track_instances(
 
             if instance is not None:
                 infer_free_completion(history, instance)
-                warnings.append(
-                    "allocation address was reused before a matching free_completed "
-                    f"event was observed on device {entry.device_index} at "
-                    f"address {entry.addr}"
+                record_warning(
+                    "allocation_address_reused",
+                    device=entry.device_index,
+                    address=entry.addr,
                 )
                 assert key is not None
                 current.pop(key, None)
@@ -822,8 +868,8 @@ def _track_instances(
             pool_id = _event_pool_id(entry, history.pool_ranges)
             frames = normalize_stack_frames(entry.frames)
             birth = CohortBirth(
-                start_index=history.start.index,
-                end_index=history.end.index,
+                start_index=_state_index(history.start),
+                end_index=_state_index(history.end),
                 start_label=_state_label(history.start),
                 end_label=_state_label(history.end),
                 stack_frames=frames,
@@ -846,7 +892,7 @@ def _track_instances(
             instances.append(item)
             current[(entry.device_index, entry.addr)] = item
 
-        end_blocks = list(observations.get(history.end.index, ()))
+        end_blocks = list(observations.get(_state_index(history.end), ()))
         exact_blocks, fallback_blocks = _block_indexes(end_blocks)
         consumed_after: set[int] = set()
         next_current: dict[tuple[int | None, int], _AllocationInstance] = {}
@@ -889,8 +935,8 @@ def _track_instances(
                 continue
             event_order += 1
             birth = CohortBirth(
-                start_index=history.start.index,
-                end_index=history.end.index,
+                start_index=_state_index(history.start),
+                end_index=_state_index(history.end),
                 start_label=_state_label(history.start),
                 end_label=_state_label(history.end),
                 stack_frames=block.stack_frames,
@@ -911,7 +957,46 @@ def _track_instances(
             else:
                 next_current[(block.device, block.address)] = item
         current = next_current
-    return instances, tuple(dict.fromkeys(warnings))
+    return instances, _format_replay_warnings(warning_groups)
+
+
+def _format_replay_warnings(
+    groups: Mapping[tuple[str, int | None], _ReplayWarningGroup],
+) -> tuple[str, ...]:
+    messages: list[str] = []
+    for (kind, device), group in groups.items():
+        device_label = f"device {device}" if device is not None else "an unknown device"
+        count_label = "event" if group.count == 1 else "events"
+        if kind == "free_completed_without_allocation":
+            message = (
+                f"{group.count} free_completed {count_label} could not be matched to "
+                f"an active allocation on {device_label} because no allocation was "
+                "tracked; allocator history may start mid-lifetime or be truncated"
+            )
+        elif kind == "free_completed_size_mismatch":
+            message = (
+                f"{group.count} free_completed {count_label} could not be matched to "
+                f"an active allocation on {device_label} because event sizes differed "
+                "from the tracked generation"
+            )
+        elif kind == "free_completed_without_request":
+            message = (
+                f"{group.count} free_completed {count_label} on {device_label} had no "
+                "matching free_requested; requests were inferred from snapshot boundaries"
+            )
+        elif kind == "allocation_address_reused":
+            message = (
+                f"{group.count} allocation {count_label} reused an active address before "
+                f"a matching free_completed on {device_label}; prior completions were "
+                "inferred from snapshot boundaries"
+            )
+        else:  # pragma: no cover - all callers use the closed set above.
+            raise AssertionError(f"unknown replay warning kind: {kind}")
+        addresses = ", ".join(hex(address) for address in group.example_addresses)
+        if addresses:
+            message = f"{message}; example addresses: {addresses}"
+        messages.append(message)
+    return tuple(messages)
 
 
 def _find_address_instance(
@@ -1024,8 +1109,8 @@ def _transition_from_event(
 ) -> TransitionT:
     frames = normalize_stack_frames(entry.frames)
     return kind(
-        start_index=history.start.index,
-        end_index=history.end.index,
+        start_index=_state_index(history.start),
+        end_index=_state_index(history.end),
         start_label=_state_label(history.start),
         end_label=_state_label(history.end),
         stack_frames=frames,
@@ -1042,8 +1127,8 @@ def _transition_from_snapshot(
     instance: _AllocationInstance,
 ) -> TransitionT:
     return kind(
-        start_index=history.start.index,
-        end_index=history.end.index,
+        start_index=_state_index(history.start),
+        end_index=_state_index(history.end),
         start_label=_state_label(history.start),
         end_label=_state_label(history.end),
         stack_frames=(),
@@ -1074,7 +1159,7 @@ def _cohorts(
         ].append(instance)
 
     pending = []
-    last_index = points[-1].index
+    last_index = _state_index(points[-1])
     for (
         device,
         pool_id,
@@ -1085,9 +1170,9 @@ def _cohorts(
         point_states = []
         for point in points:
             observed = [
-                member.observations[point.index]
+                member.observations[_state_index(point)]
                 for member in members
-                if point.index in member.observations
+                if _state_index(point) in member.observations
             ]
             owner_active = [
                 item for item in observed if item.state in OWNER_ACTIVE_STATES
@@ -1097,7 +1182,7 @@ def _cohorts(
             ]
             point_states.append(
                 CohortPointState(
-                    point_index=point.index,
+                    point_index=_state_index(point),
                     point_label=_state_label(point),
                     owner_active_bytes=sum(item.size_bytes for item in owner_active),
                     owner_requested_bytes=sum(
@@ -1163,7 +1248,7 @@ def _cohorts(
         ]
         active_values = [item.active_bytes for item in point_states]
         born_bytes = sum(member.size_bytes for member in members if member.birth)
-        owner_peak, unreusable_peak = _event_peaks(members, points[0].index)
+        owner_peak, unreusable_peak = _event_peaks(members, _state_index(points[0]))
         peak_active = max(active_values)
         if born_between is not None:
             anchor_bytes = born_bytes
@@ -1171,7 +1256,7 @@ def _cohorts(
             anchor_bytes = next(
                 item.active_bytes
                 for item in point_states
-                if item.point_index == active_at.index
+                if item.point_index == _state_index(active_at)
             )
         else:
             anchor_bytes = max(peak_active, unreusable_peak)
@@ -1185,7 +1270,9 @@ def _cohorts(
             assert member_births
             first_birth = min(member_births, key=lambda item: item.end_index)
             last_boundary = max(_instance_last_boundary(member) for member in members)
-            point_labels = {point.index: _state_label(point) for point in points}
+            point_labels = {
+                _state_index(point): _state_label(point) for point in points
+            }
             first_seen_index = first_birth.end_index
             first_seen_label = first_birth.end_label
             last_seen_index = last_boundary

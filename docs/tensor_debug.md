@@ -104,9 +104,11 @@ from torch_cudagraph_debug.tensor_debug import (
 )
 
 def forward(inputs, recorder):
-    inputs = recorder.observe("input", inputs)
-    hidden = recorder.observe("layers.0.hidden", inputs + 1)
-    return recorder.observe("output", hidden.square())
+    inputs = recorder.observe(inputs, name="input")
+    hidden = recorder.observe(inputs + 1, name="layers.0.hidden")
+    return recorder.observe(hidden.square(), name="output")
+
+replay_stream = torch.cuda.current_stream()
 
 with TensorRecorder(
     execution="eager",
@@ -128,6 +130,9 @@ with TensorRecorder(
     with graph_recorder.record_point("replay-1", synchronize=replay_stream):
         graph.replay()
 
+    # No future replay may occur after Recorder resources are closed.
+    del graph, graph_output
+
 eager = TensorRun.load("eager.tcgd-tensor")
 candidate = TensorRun.load("cg.tcgd-tensor")
 comparison = compare_points(eager["forward"], candidate["replay-1"])
@@ -147,6 +152,11 @@ its fixed slot layout, and reads those slots when a later `record_point()` wraps
 one internal `RecordAction` session, one replay counter, and one counter
 increment kernel. Tensor payload copies still occur once per observed slot.
 
+Set `strict_scope=True` when an instrumentation call outside the active eager
+point or CUDA Graph capture should be treated as a bug. The default leaves such
+calls as transparent no-ops so one instrumented function can serve warmup and
+collection.
+
 `record_point()` applies the same synchronization policy as quick Probe queries.
 Pass the replay or eager execution stream when it is known. `False` is valid
 only after the application has synchronized every relevant D2H copy.
@@ -164,8 +174,8 @@ observation:
 
 ```python
 recorder = TensorRecorder(execution="eager", payload="summary")
-hidden = recorder.observe("hidden", hidden)
-output = recorder.observe("output", output, payload="full")
+hidden = recorder.observe(hidden, name="hidden")
+output = recorder.observe(output, name="output", payload="full")
 ```
 
 Every observation stores metadata, SHA-256, and finite/NaN/Inf/zero counts plus
@@ -202,16 +212,21 @@ and invocations are mismatches. Set `mode="exact"` for raw-value identity or
 `dtype_policy="promote"` to explicitly compare different numeric dtypes after
 promotion.
 
-`compare_runs(reference, candidate)` aligns points by label and reports
-missing points. `compare_point_series(reference_point, candidate_run)` compares
-one reference against every candidate point in order. Point-series comparison
-is intended for replay drift, stale static inputs, and state-update bugs.
+Source stride is part of tensor metadata. The default
+`layout_policy="strict"` reports a stride difference as a mismatch; use
+`layout_policy="ignore"` only when different layouts are intentional.
+
+`compare_runs(reference, candidate)` aligns points by label and reports missing
+points. Pass `point_mapping` when semantically equivalent point labels differ.
+`compare_point_series(reference_point, candidate_run)` compares one reference
+against every candidate point in order and is intended for replay drift, stale
+static inputs, and state-update bugs.
 
 Reports identify the first issue in reference execution order and label it as
 `mismatch` or `inconclusive`; a later definite mismatch still makes the overall
 status `mismatch`. They rank the worst value mismatches by mismatch fraction
-and absolute error. Result objects provide text, JSON, CSV, and standalone HTML
-output through `write()`.
+and absolute error. Comparison results provide `assert_ok()`, text, JSON, CSV,
+and standalone HTML output. `write()` persists the report set.
 
 The CLI performs the same offline analysis without CUDA or the native extension:
 
@@ -219,7 +234,10 @@ The CLI performs the same offline analysis without CUDA or the native extension:
 tcgd-tensor summary eager.tcgd-tensor
 tcgd-tensor compare-points eager.tcgd-tensor cg.tcgd-tensor \
   --reference-point forward --candidate-point replay-1
-tcgd-tensor compare-runs baseline.tcgd-tensor candidate.tcgd-tensor
+tcgd-tensor compare-runs baseline.tcgd-tensor candidate.tcgd-tensor \
+  --point-map eager-forward=graph-forward
+tcgd-tensor group-summary eager-group --output eager-group-report
+tcgd-tensor compare-run-groups eager-group cg-group --output group-comparison
 tcgd-tensor compare-point-series eager.tcgd-tensor cg.tcgd-tensor \
   --reference-point forward --output tensor-report
 ```
@@ -227,9 +245,36 @@ tcgd-tensor compare-point-series eager.tcgd-tensor cg.tcgd-tensor \
 Omit the candidate bundle from `compare-points` or `compare-point-series` to
 reuse the reference bundle.
 
-Use `--mode exact`, `--promote-dtypes`, `--rtol`, `--atol`,
+Use `--mode exact`, `--promote-dtypes`, `--ignore-layout`, `--rtol`, `--atol`,
 `--equal-nan`, and `--only-changed` to control comparison and presentation.
+Output directories are optional and require `--overwrite` when nonempty.
 Mismatch and inconclusive reports return a nonzero status.
+
+### Multi-Rank Run Groups
+
+Distributed jobs write one rank-local bundle per process. Load each parent
+directory and compare common ranks without collapsing rank identity:
+
+```python
+from torch_cudagraph_debug.tensor_debug import TensorRunGroup, compare_run_groups
+
+reference = TensorRunGroup.load("eager-group")
+candidate = TensorRunGroup.load("cuda-graph-group")
+comparison = compare_run_groups(reference, candidate)
+print(comparison.to_text(include_unchanged=False))
+comparison.assert_ok()
+comparison.write("group-report")
+```
+
+`group.missing_ranks` and `group.complete` make rank coverage explicit. Missing
+ranks, unknown world size, or incomplete bundles make an otherwise matching
+group comparison `inconclusive`. Use `point_mapping` when point labels differ.
+Group summaries and comparisons can be rendered directly with `to_text()`,
+`to_dict()`, and `to_html()` or persisted with `write()`. Use
+`comparison.assert_ok()` when mismatch or inconclusive status should fail an
+automated workflow.
+
+The equivalent CLI commands are `group-summary` and `compare-run-groups`.
 
 Bundles use the `torch-cudagraph-debug/tensor-run` schema. The manifest is
 strict JSON; full payloads are content-addressed raw byte blobs. Loading is lazy
@@ -251,10 +296,12 @@ keyword-only `synchronize` argument:
   synchronized probe query or after the application has synchronized all
   relevant CUDA work.
 
-Only those three types are accepted; strings, integer device indices, and
-`None` are rejected. A stream or device from another CUDA device is also an
-error. A synchronization-enabled query during CUDA Graph capture raises an
-error. Defer host queries until after capture; `False` skips synchronization
+Omitting `synchronize` inherits the Probe or Recorder policy. Explicit overrides
+accept only `bool`, `torch.cuda.Stream`, or CUDA `torch.device`; strings,
+integer device indices, and CPU devices are rejected. A stream or device from
+another CUDA device is also an error. A synchronization-enabled query during
+CUDA Graph capture raises an error.
+Defer host queries until after capture; `False` skips synchronization
 but does not make in-capture host reads meaningful. Closing an enabled probe is
 rejected during capture even with `False` because destroying captured resources
 is never valid.
@@ -263,11 +310,11 @@ When several queries follow one replay, synchronize once and use `False` for
 the rest. This avoids repeated waits while preserving explicit ownership of the
 ordering.
 
-`close()` defaults to the same correctness-first device synchronization. Pass
-the replay stream to avoid waiting on unrelated streams, or pass `False` only
-after a prior stream-scoped query/synchronization has completed all probe work.
-An unsynchronized close reports pending eager callbacks instead of freeing
-their payloads.
+`close()` inherits the object's configured synchronization policy when omitted.
+Pass the replay stream to avoid waiting on unrelated streams, or pass `False`
+only after prior synchronization has completed all probe work. An
+unsynchronized close reports pending eager callbacks instead of freeing their
+payloads.
 
 ## Replay And Invocation Indices
 
@@ -317,13 +364,15 @@ retains only the latest value for each capture slot, not a replay history.
 single value corresponds only to global capture order 0; it is not broadcast
 when the same probe is called more than once in one capture. For repeated
 calls, pass expected values in capture-call order:
-
 ```python
 probe = TensorProbe(
     "layers.hidden",
     [CheckAction([expected_layer0, expected_layer1])],
 )
 ```
+
+For semantic binding independent of global capture order, pass a mapping from
+`TensorObservationKey(name, invocation_index)` to expected tensors.
 
 Each capture-time call owns a globally ordered slot with its own pinned staging
 storage and a semantic `(name, invocation_index)` key.

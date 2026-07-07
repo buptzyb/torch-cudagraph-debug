@@ -7,11 +7,12 @@ import pytest
 import torch
 
 from torch_cudagraph_debug.tensor_debug import (
+    TensorComparisonError,
     TensorComparisonOptions,
     TensorObservationKey,
+    compare_point_series,
     compare_points,
     compare_runs,
-    compare_point_series,
 )
 
 from ._run_helpers import make_tensor_run
@@ -170,6 +171,8 @@ def test_run_and_series_comparison_compose_point_comparisons() -> None:
 
     runs = compare_runs(reference, candidate)
     assert runs.status == "mismatch"
+    with pytest.raises(TensorComparisonError, match="run comparison"):
+        runs.assert_ok()
     assert runs.candidate_only_points == ("step-3",)
     assert runs.first_issue is not None
     assert runs.to_dict()["kind"] == "run-comparison"
@@ -180,6 +183,8 @@ def test_run_and_series_comparison_compose_point_comparisons() -> None:
 
     series = compare_point_series(reference["step-1"], candidate)
     assert series.status == "mismatch"
+    with pytest.raises(TensorComparisonError, match="point-series comparison"):
+        series.assert_ok()
     assert series.conclusive
     assert len(series.point_comparisons) == 3
     assert series.point_comparisons[0].status == "match"
@@ -248,3 +253,31 @@ def test_reports_write_text_json_html_and_csv(tmp_path: Path) -> None:
     assert payload["observation_comparisons"][0]["name"] == "x"
     assert "Tensor comparison" in paths["text"].read_text(encoding="utf-8")
     assert "<table>" in paths["html"].read_text(encoding="utf-8")
+
+
+def test_layout_policy_uses_recorded_source_stride() -> None:
+    reference_tensor = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    candidate_tensor = torch.tensor([[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]).t()
+    assert torch.equal(reference_tensor, candidate_tensor)
+    assert reference_tensor.stride() != candidate_tensor.stride()
+
+    reference = make_tensor_run(
+        [("point", [("hidden", reference_tensor, "full")])],
+        name="reference",
+    )
+    candidate = make_tensor_run(
+        [("point", [("hidden", candidate_tensor, "full")])],
+        name="candidate",
+    )
+
+    strict = compare_points(reference["point"], candidate["point"])
+    assert strict.status == "mismatch"
+    assert strict.observation_comparisons[0].kind == "metadata"
+    assert "stride" in strict.observation_comparisons[0].reason
+
+    ignored = compare_points(
+        reference["point"],
+        candidate["point"],
+        options=TensorComparisonOptions(layout_policy="ignore"),
+    )
+    assert ignored.ok

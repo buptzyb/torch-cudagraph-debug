@@ -67,9 +67,9 @@ else
         "${RECORDER_DIR}/distributed_run_groups.py" \
         --output-dir "${GROUP_ROOT}" --record-only
 
-    "${TCGD_MEMORY_BIN}" summarize-run-group "${GROUP_ROOT}/baseline" \
+    "${TCGD_MEMORY_BIN}" group-summary "${GROUP_ROOT}/baseline" \
         --output "${REPORTS}/baseline-summary"
-    "${TCGD_MEMORY_BIN}" summarize-run-group "${GROUP_ROOT}/candidate" \
+    "${TCGD_MEMORY_BIN}" group-summary "${GROUP_ROOT}/candidate" \
         --output "${REPORTS}/candidate-summary"
     "${TCGD_MEMORY_BIN}" compare-run-group-phases \
         "${GROUP_ROOT}/baseline" "${GROUP_ROOT}/candidate" \

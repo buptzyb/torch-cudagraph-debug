@@ -33,7 +33,7 @@ flowchart LR
     RUN -->|contains| PT["<b>Point</b>"]
     PT -->|contains| O
 
-    O -->|used by| T["<b>Tensor Debug</b><br/>values / gradients / online checks<br/>snapshot / point / run / series comparison<br/>bundles / reports / TensorBoard"]
+    O -->|used by| T["<b>Tensor Debug</b><br/>values / gradients / online checks<br/>snapshot / point / run / series / run-group comparison<br/>bundles / reports / TensorBoard"]
     O -->|used by| M["<b>Memory Debug</b><br/>pools / streams / attribution<br/>timeline / lifetime / phase / run-group analysis<br/>bundles / reports"]
 ```
 
@@ -129,7 +129,7 @@ For a one-off eager-to-CUDA-Graph check, collect independent Probe snapshots and
 call `compare_snapshots()`. Use `TensorRecorder` when the investigation spans
 multiple points, processes, code revisions, or devices. Recorder runs can be
 saved as `.tcgd-tensor` bundles and analyzed with `compare_points()`,
-`compare_runs()`, or `compare_point_series()`.
+`compare_runs()`, `compare_point_series()`, or `compare_run_groups()`.
 
 See the
 [standalone snapshot example](examples/tensor_debug/probe/snapshot_comparison.py)
@@ -178,39 +178,51 @@ Memory comparison 'graph-capture@snapshot-0' -> 'graph-capture@snapshot-1' (same
     total[all]
       allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 18.00 MiB (delta +18.00 MiB)
       active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
+      diagnostics: inactive=0 B -> 2.00 MiB (delta +2.00 MiB), fragmentation=0 B -> 1008 B (delta +1008 B), segments=0 -> 2 (delta +2), blocks=0 -> 4 (delta +4), inactive blocks=0 -> 1 (delta +1), largest inactive block=0 B -> 2.00 MiB (delta +2.00 MiB)
     total[default]
       allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
       active: 0 B -> 1.00 KiB (delta +1.00 KiB), requested: 0 B -> 16 B (delta +16 B)
+      diagnostics: inactive=0 B -> 2.00 MiB (delta +2.00 MiB), fragmentation=0 B -> 1008 B (delta +1008 B), segments=0 -> 1 (delta +1), blocks=0 -> 3 (delta +3), inactive blocks=0 -> 1 (delta +1), largest inactive block=0 B -> 2.00 MiB (delta +2.00 MiB)
     total[private]
       allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
       active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
+      diagnostics: segments=0 -> 1 (delta +1), blocks=0 -> 1 (delta +1)
   pools:
-    pool[0,0] -> pool[0,0] [same_probe]
+    device[0]/pool[0,0] -> device[0]/pool[0,0] [same_probe]
       allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
       active: 0 B -> 1.00 KiB (delta +1.00 KiB), requested: 0 B -> 16 B (delta +16 B)
-    pool[1,0] -> pool[1,0] [same_probe]
+      diagnostics: inactive=0 B -> 2.00 MiB (delta +2.00 MiB), fragmentation=0 B -> 1008 B (delta +1008 B), segments=0 -> 1 (delta +1), blocks=0 -> 3 (delta +3), inactive blocks=0 -> 1 (delta +1), largest inactive block=0 B -> 2.00 MiB (delta +2.00 MiB)
+      lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
+    device[0]/pool[1,0] -> device[0]/pool[1,0] [same_probe]
       allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
       active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
-  pool/stream observations:
-    pool[0,0] stream[246971088] -> pool[0,0] stream[246971088] [same_probe]
+      diagnostics: segments=0 -> 1 (delta +1), blocks=0 -> 1 (delta +1)
+      lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
+  device/pool/stream observations:
+    device[0]/pool[0,0]/stream[152349184] -> device[0]/pool[0,0]/stream[152349184] [same_probe]
       allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
       active: 0 B -> 1.00 KiB (delta +1.00 KiB), requested: 0 B -> 16 B (delta +16 B)
-    pool[1,0] stream[246971088] -> pool[1,0] stream[246971088] [same_probe]
+      diagnostics: inactive=0 B -> 2.00 MiB (delta +2.00 MiB), fragmentation=0 B -> 1008 B (delta +1008 B), segments=0 -> 1 (delta +1), blocks=0 -> 3 (delta +3), inactive blocks=0 -> 1 (delta +1), largest inactive block=0 B -> 2.00 MiB (delta +2.00 MiB)
+      lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
+    device[0]/pool[1,0]/stream[152349184] -> device[0]/pool[1,0]/stream[152349184] [same_probe]
       allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
       active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
+      diagnostics: segments=0 -> 1 (delta +1), blocks=0 -> 1 (delta +1)
+      lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
 ```
 
 Read the report top-down:
 
 1. Every metric is `reference -> candidate (delta)`.
-2. `total[all]` combines every pool, `total[default]` is `pool[0,0]`, and
-   `total[private]` combines all non-default pools, including CUDA Graph
-   pools.
+2. `total[all]` combines every device and pool, `total[default]` combines
+   each device's `pool[0,0]`, and `total[private]` combines all non-default
+   pools, including CUDA Graph pools.
 3. `requested` is the original active allocation request, `allocated` is
    allocator-owned allocated space, `active` is space not yet reusable, and
    `reserved` is the full segment capacity held by the caching allocator.
-4. `pools` identifies which pool changed; `pool/stream observations` records
-   the state associated with each CUDA stream in that pool.
+4. `pools` identifies which device and pool changed;
+   `device/pool/stream observations` records the state associated with each CUDA
+   stream in that pool.
 
 The main signal here is `total[private]`: graph capture added a 16 MiB active
 allocation in a private pool. The small default-pool change is separate

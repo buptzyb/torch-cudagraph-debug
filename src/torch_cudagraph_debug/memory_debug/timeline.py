@@ -4,16 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any
 
-from ._pool_identity import PoolId, pool_id_label, stream_label
-from .aggregation import ALLOCATOR_SCOPES, summarize_allocator_scopes
-from .allocator_snapshot import MemoryObservationKey
+from ._pool_identity import MemoryObservationKey, MemoryPoolKey
+from .aggregation import ALLOCATOR_SCOPES
 from .attribution import MemoryAttributionOptions
 from .comparison import (
-    _MemoryStateView,
     _compare_same_run_views,
     _load_interval_views,
+    _MemoryStateView,
 )
 from .lifetimes import analyze_allocation_lifetimes
 from .recording import MemoryRun
@@ -23,31 +21,42 @@ from .stats import AllocatorScope, MemoryStats, MemoryStatsDelta
 
 @dataclass(frozen=True)
 class MemoryPoolTimelineEntry:
-    """One absolute pool state in a timeline."""
+    """One absolute device/pool state in a timeline."""
 
     point_index: int
     point_label: str
-    pool_id: PoolId
+    key: MemoryPoolKey
     stats: MemoryStats
-    delta: MemoryStatsDelta
+    delta: MemoryStatsDelta | None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "point_index": self.point_index,
             "point_label": self.point_label,
-            "pool_id": list(self.pool_id),
+            "key": {
+                "device_index": self.key.device_index,
+                "pool_id": list(self.key.pool_id),
+            },
             "state": self.stats.to_dict(),
-            "delta": self.delta.to_dict(),
+            "delta": self.delta.to_dict() if self.delta is not None else None,
         }
 
     def to_row(self) -> dict[str, object]:
-        return {
+        row: dict[str, object] = {
             "point_index": self.point_index,
             "point_label": self.point_label,
-            "pool_id": pool_id_label(self.pool_id),
+            "key": self.key.label,
             **{f"state_{key}": value for key, value in self.stats.to_dict().items()},
-            **{f"delta_{key}": value for key, value in self.delta.to_dict().items()},
         }
+        row.update(
+            {
+                f"delta_{key}": value
+                for key, value in (
+                    self.delta.to_dict() if self.delta is not None else {}
+                ).items()
+            }
+        )
+        return row
 
 
 @dataclass(frozen=True)
@@ -58,7 +67,7 @@ class MemoryAllocatorScopeTimelineEntry:
     point_label: str
     scope: AllocatorScope
     stats: MemoryStats
-    delta: MemoryStatsDelta
+    delta: MemoryStatsDelta | None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -66,49 +75,66 @@ class MemoryAllocatorScopeTimelineEntry:
             "point_label": self.point_label,
             "scope": self.scope,
             "state": self.stats.to_dict(),
-            "delta": self.delta.to_dict(),
+            "delta": self.delta.to_dict() if self.delta is not None else None,
         }
 
     def to_row(self) -> dict[str, object]:
-        return {
+        row: dict[str, object] = {
             "point_index": self.point_index,
             "point_label": self.point_label,
             "scope": self.scope,
             **{f"state_{key}": value for key, value in self.stats.to_dict().items()},
-            **{f"delta_{key}": value for key, value in self.delta.to_dict().items()},
         }
+        row.update(
+            {
+                f"delta_{key}": value
+                for key, value in (
+                    self.delta.to_dict() if self.delta is not None else {}
+                ).items()
+            }
+        )
+        return row
 
 
 @dataclass(frozen=True)
 class MemoryObservationTimelineEntry:
-    """One absolute pool/stream state in a timeline."""
+    """One absolute device/pool/stream state in a timeline."""
 
     point_index: int
     point_label: str
-    pool_id: PoolId
-    stream: Any
+    key: MemoryObservationKey
     stats: MemoryStats
-    delta: MemoryStatsDelta
+    delta: MemoryStatsDelta | None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "point_index": self.point_index,
             "point_label": self.point_label,
-            "pool_id": list(self.pool_id),
-            "stream": self.stream,
+            "key": {
+                "device_index": self.key.device_index,
+                "pool_id": list(self.key.pool_id),
+                "stream": self.key.stream,
+            },
             "state": self.stats.to_dict(),
-            "delta": self.delta.to_dict(),
+            "delta": self.delta.to_dict() if self.delta is not None else None,
         }
 
     def to_row(self) -> dict[str, object]:
-        return {
+        row: dict[str, object] = {
             "point_index": self.point_index,
             "point_label": self.point_label,
-            "pool_id": pool_id_label(self.pool_id),
-            "stream": stream_label(self.stream),
+            "key": self.key.label,
             **{f"state_{key}": value for key, value in self.stats.to_dict().items()},
-            **{f"delta_{key}": value for key, value in self.delta.to_dict().items()},
         }
+        row.update(
+            {
+                f"delta_{key}": value
+                for key, value in (
+                    self.delta.to_dict() if self.delta is not None else {}
+                ).items()
+            }
+        )
+        return row
 
 
 def _build_timeline(
@@ -117,9 +143,9 @@ def _build_timeline(
     allocator_scope_entries: list[MemoryAllocatorScopeTimelineEntry] = []
     pool_entries: list[MemoryPoolTimelineEntry] = []
     observation_entries: list[MemoryObservationTimelineEntry] = []
-    previous_pool_stats: Mapping[PoolId, MemoryStats] = {}
-    previous_allocator_scope_stats = summarize_allocator_scopes(previous_pool_stats)
-    previous_observations: Mapping[MemoryObservationKey, MemoryStats] = {}
+    previous_pool_stats: Mapping[MemoryPoolKey, MemoryStats] | None = None
+    previous_allocator_scope_stats: Mapping[AllocatorScope, MemoryStats] | None = None
+    previous_observations: Mapping[MemoryObservationKey, MemoryStats] | None = None
     for point in run.points:
         current_pool_stats = point.pool_stats
         current_allocator_scope_stats = point.allocator_scope_stats
@@ -131,39 +157,53 @@ def _build_timeline(
                     point_label=point.label,
                     scope=scope,
                     stats=stats,
-                    delta=MemoryStatsDelta.between(
-                        previous_allocator_scope_stats[scope], stats
+                    delta=(
+                        None
+                        if previous_allocator_scope_stats is None
+                        else MemoryStatsDelta.between(
+                            previous_allocator_scope_stats[scope], stats
+                        )
                     ),
                 )
             )
-        for pool_id in sorted(
-            set(previous_pool_stats) | set(current_pool_stats), key=pool_id_label
-        ):
-            reference_stats = previous_pool_stats.get(pool_id, MemoryStats())
-            stats = current_pool_stats.get(pool_id, MemoryStats())
+        pool_keys = set(current_pool_stats)
+        if previous_pool_stats is not None:
+            pool_keys.update(previous_pool_stats)
+        for pool_key in sorted(pool_keys, key=lambda item: item.label):
+            stats = current_pool_stats.get(pool_key, MemoryStats())
             pool_entries.append(
                 MemoryPoolTimelineEntry(
                     point_index=point.index,
                     point_label=point.label,
-                    pool_id=pool_id,
+                    key=pool_key,
                     stats=stats,
-                    delta=MemoryStatsDelta.between(reference_stats, stats),
+                    delta=(
+                        None
+                        if previous_pool_stats is None
+                        else MemoryStatsDelta.between(
+                            previous_pool_stats.get(pool_key, MemoryStats()), stats
+                        )
+                    ),
                 )
             )
-        for key in sorted(
-            set(previous_observations) | set(point.observation_stats),
-            key=lambda item: (pool_id_label(item.pool_id), stream_label(item.stream)),
-        ):
-            reference_stats = previous_observations.get(key, MemoryStats())
+        observation_keys = set(point.observation_stats)
+        if previous_observations is not None:
+            observation_keys.update(previous_observations)
+        for key in sorted(observation_keys, key=lambda item: item.label):
             stats = point.observation_stats.get(key, MemoryStats())
             observation_entries.append(
                 MemoryObservationTimelineEntry(
                     point_index=point.index,
                     point_label=point.label,
-                    pool_id=key.pool_id,
-                    stream=key.stream,
+                    key=key,
                     stats=stats,
-                    delta=MemoryStatsDelta.between(reference_stats, stats),
+                    delta=(
+                        None
+                        if previous_observations is None
+                        else MemoryStatsDelta.between(
+                            previous_observations.get(key, MemoryStats()), stats
+                        )
+                    ),
                 )
             )
         previous_pool_stats = current_pool_stats
@@ -197,8 +237,8 @@ def _build_timeline(
         observation_entries=tuple(observation_entries),
         point_comparisons=point_comparisons,
         allocation_lifetimes=allocation_lifetimes,
-        display_stack_depth=options.stack_depth,
-        display_limit=options.limit,
+        display_stack_depth=options.display.stack_depth,
+        display_limit=options.display.limit,
     )
 
 

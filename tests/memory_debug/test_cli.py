@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from torch_cudagraph_debug.memory_debug.cli import build_parser, main
 
 from ._helpers import make_run, segment, snapshot
@@ -141,7 +142,7 @@ def test_cli_pool_mapping_syntax(tmp_path: Path) -> None:
                 "--candidate-point",
                 "point",
                 "--pool-map",
-                "0,1=0,8",
+                "0:0,1=0:0,8",
                 "--output",
                 str(output),
             ]
@@ -224,10 +225,11 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
         ("candidate", "candidate-job", ((20, 35), (22, 42))),
     ):
         root = tmp_path / name
+        pool = (0, 1) if name == "baseline" else (0, 8)
         roots[name] = root
         for rank, states in enumerate(values):
             make_run(
-                [snapshot(segment(active=value)) for value in states],
+                [snapshot(segment(active=value, pool=pool)) for value in states],
                 name=name,
                 rank=rank,
                 group_id=group_id,
@@ -240,7 +242,7 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
     assert (
         main(
             [
-                "summarize-run-group",
+                "group-summary",
                 str(roots["baseline"]),
                 "--output",
                 str(summary_output),
@@ -248,7 +250,7 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
         )
         == 0
     )
-    assert (summary_output / "rank_point_entries.csv").exists()
+    assert (summary_output / "rank_points.csv").exists()
     assert (summary_output / "point_aggregates.csv").exists()
 
     phase_output = tmp_path / "group-phase"
@@ -266,6 +268,10 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
                 "start",
                 "--candidate-end",
                 "end",
+                "--pool-map",
+                "0@0:0,1=0:0,8",
+                "--pool-map",
+                "1@0:0,1=0:0,8",
                 "--output",
                 str(phase_output),
             ]
@@ -273,6 +279,7 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
         == 0
     )
     assert (phase_output / "rank_decomposition.csv").exists()
+    assert (phase_output / "rank_pool_decomposition.csv").exists()
     assert (phase_output / "phase_aggregates.csv").exists()
 
 

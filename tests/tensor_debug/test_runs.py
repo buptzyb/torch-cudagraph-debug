@@ -182,8 +182,8 @@ def test_recorder_watch_grad_validates_observation_name_at_registration() -> Non
     recorder = TensorRecorder(execution="eager")
     tensor = torch.ones(1, requires_grad=True)
 
-    with pytest.raises(ValueError, match="observation name must be non-empty"):
-        recorder.watch_grad("", tensor)
+    with pytest.raises(ValueError, match="observation name must be a non-empty string"):
+        recorder.watch_grad(tensor, name="")
 
     recorder.close()
 
@@ -270,7 +270,7 @@ def test_recorder_manifest_failures_do_not_commit_state(
     with pytest.raises(TensorBundleError, match="injected"):
         with recorder.record_point("point"):
             pass
-    assert recorder.snapshot_run().points == ()
+    assert recorder.preview().points == ()
 
     with recorder.record_point("point"):
         pass
@@ -367,8 +367,49 @@ def test_recorder_exception_exit_persists_incomplete_terminal_run(
     loaded = TensorRun.load(bundle)
     assert loaded.complete is False
     assert [point.label for point in loaded.points] == ["kept"]
-    assert recorder.snapshot_run() is recorder.result
+    assert recorder.preview() is recorder.result
     assert recorder.finish() is recorder.result
     with pytest.raises(TensorDebugError, match="closed"):
         with recorder.record_point("late"):
             pass
+
+
+def test_tensor_run_and_point_metadata_are_deeply_immutable() -> None:
+    source = {"nested": {"values": [1, 2]}}
+    recorder = TensorRecorder(
+        execution="eager",
+        run_metadata=source,
+    )
+    with recorder.record_point("point", metadata=source):
+        pass
+    run = recorder.finish()
+
+    source["nested"]["values"].append(3)
+    assert run.run_metadata["nested"]["values"] == (1, 2)
+    assert run["point"].metadata["nested"]["values"] == (1, 2)
+    with pytest.raises(TypeError):
+        run.run_metadata["nested"]["new"] = 1
+
+
+def test_eager_recorder_strict_scope_rejects_out_of_point_observation() -> None:
+    tensor = torch.ones(1)
+    permissive = TensorRecorder(execution="eager")
+    assert permissive.observe(tensor, name="ignored") is tensor
+
+    strict = TensorRecorder(execution="eager", strict_scope=True)
+    with pytest.raises(TensorDebugError, match="record_point"):
+        strict.observe(tensor, name="outside")
+
+
+def test_recorder_close_inherits_configured_synchronization() -> None:
+    recorder = TensorRecorder(execution="eager", synchronize=False)
+    calls: list[object] = []
+
+    class FakeCollector:
+        def close(self, *, synchronize: object) -> None:
+            calls.append(synchronize)
+
+    recorder._collector = FakeCollector()  # type: ignore[assignment]
+    recorder.close()
+
+    assert calls == [False]

@@ -13,9 +13,10 @@
   phase comparison modes with allocator-wide `all`, `default`, and `private`
   totals. Snapshot and Point comparisons are sibling result types and direct
   Probe analysis never constructs a synthetic Point or Run.
-- Automatic discovery of every `segment_pool_id` with pool and raw
-  `(pool, stream)` state, absolute values, signed deltas, and same-run
-  lifecycle observations.
+- Automatic discovery of every `segment_pool_id` across explicit single-device,
+  device-set, and all-visible-device collection, with device-aware pool and raw
+  `(device, pool, stream)` state, absolute values, signed deltas, provenance,
+  and same-run lifecycle observations.
 - Conservative cross-run matching with automatic default-pool pairing,
   explicit one-to-one private-pool mappings, and visible unmatched pools.
 - Optional live-allocation stack and marker-delimited allocator-event
@@ -26,6 +27,8 @@
   transient generations, owner/unreusable event peaks, stable full-stack cohort
   identity, lossless structured output, snapshot-inferred confidence, and
   explicit `run` or `probe` source metadata.
+- Strict allocator-state invariants plus explicit awaiting-free, inactive,
+  fragmentation, segment, block, and expandable-segment metrics.
 - Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
   summary and rank-paired phase analysis without summing memory across GPUs.
 - Canonical gzip JSON run bundles with atomic writes, exact manifest fields,
@@ -37,7 +40,7 @@
   `include_unchanged=False` consistently filters text, HTML, and CSV while
   JSON remains complete.
 - Consistent allocated, reserved, active, and requested metrics at allocator,
-  pool, and pool/stream scope, with structural and fragmentation details shown
+  device/pool, and device/pool/stream scope, with structural and fragmentation details shown
   as diagnostics when they explain a change.
 - The `tcgd-memory` CLI with summary, timeline, allocation-lifetime,
   point-comparison, phase-comparison, and multi-rank run-group commands.
@@ -58,14 +61,17 @@
 - Immutable `TensorRun`, `TensorPoint`, and `TensorObservation` models with
   strict content-addressed bundles, full or summary payloads, SHA-256
   verification, numerical summaries, deduplication, and lazy CPU-only loading.
-- Sibling standalone snapshot and point results plus same-label run and
-  replay-series comparisons with allclose or exact policies, strict or promoted
-  dtypes, first-divergence and worst-error reporting, and explicit
+- Sibling standalone snapshot and point results plus run and replay-series
+  comparisons with allclose or exact policies, strict or promoted dtypes,
+  first-divergence and worst-error reporting, and explicit
   match/mismatch/inconclusive results.
+- Rank-preserving `TensorRunGroup` summaries and comparisons with missing-rank,
+  completeness, provenance, metadata, and point-label validation.
 - Private domain collectors shared by each domain's Probe and Recorder
   workflows without introducing a synthetic cross-domain base class.
 - Text, JSON, CSV, and standalone HTML tensor reports plus the `tcgd-tensor`
-  `summary`, `compare-points`, `compare-runs`, and `compare-point-series` CLI.
+  `summary`, `compare-points`, `compare-runs`, `compare-point-series`,
+  `group-summary`, and `compare-run-groups` CLI.
 - TensorBoard export through `export_snapshots_to_tensorboard`.
 - Categorized, runnable Tensor Debug, Memory Debug, CLI, distributed, and
   TensorBoard examples with quickstarts and complete synthetic workflows.
@@ -103,7 +109,7 @@
   trace slots remain unavailable history rather than malformed data.
 - Verify content-addressed tensor payloads even when two observations advertise
   the same digest, and return defensive tensor copies from public observations.
-- Render all four core allocator metrics consistently for pool/stream rows and
+- Render all four core allocator metrics consistently for device/pool/stream rows and
   timeline charts, preserve stream-only stack attribution when pool aggregates
   cancel, clean stale optional report artifacts, and return absolute report paths.
 - Report HTML now states shown and total counts for every limited attribution
@@ -111,6 +117,9 @@
   are rejected before rendering or creating report output directories.
 - Preserve allocation identity by device, address, and generation so distinct
   same-sized blocks are not merged during lifetime analysis.
+- Aggregate lifetime replay reconciliation warnings by reason and device while
+  preserving total event counts and up to three example addresses, instead of
+  emitting one warning per allocator event.
 - Reclaim eager callback payloads, non-contiguous eager source temporaries, and
   replaced pinned staging instead of retaining them for the full Probe
   lifetime. Unsynchronized close now reports pending eager callbacks.

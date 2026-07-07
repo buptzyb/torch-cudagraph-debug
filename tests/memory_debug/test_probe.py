@@ -8,6 +8,7 @@ from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
     MemoryDebugError,
     MemoryOwnershipError,
+    MemoryPoolKey,
     MemoryProbe,
     compare_snapshots,
 )
@@ -28,11 +29,11 @@ def test_probe_snapshot_discovers_all_allocator_scopes() -> None:
 
     captured = probe.snapshot()
 
-    assert captured.index == 0
+    assert captured.snapshot_index == 0
     assert captured.probe_name == "memory"
     assert len(captured.observations) == 2
-    assert captured.pool_stats[(0, 0)].allocated_bytes == 10
-    assert captured.pool_stats[(1, 0)].allocated_bytes == 20
+    assert captured.pool_stats[MemoryPoolKey(0, (0, 0))].allocated_bytes == 10
+    assert captured.pool_stats[MemoryPoolKey(0, (1, 0))].allocated_bytes == 20
     assert captured.raw_snapshot()["segments"]
     assert not hasattr(captured, "run_id")
 
@@ -65,8 +66,8 @@ def test_same_probe_compare_supports_event_attribution() -> None:
         attribution=MemoryAttributionOptions(events=True, on_missing="error"),
     )
 
-    assert comparison.events_available is True
-    assert comparison.events_complete is True
+    assert comparison.attribution_status.events.available is True
+    assert comparison.attribution_status.events.complete is True
     assert comparison.allocator_events
     assert all(item.match == "same_probe" for item in comparison.pool_comparisons)
     assert comparison.to_dict()["kind"] == "snapshot-comparison"
@@ -161,3 +162,45 @@ def test_probe_snapshot_rejects_duplicate_observation_keys() -> None:
 
     with pytest.raises(ValueError, match="keys must be unique"):
         replace(captured, observations=(first, duplicate))
+
+
+def test_probe_selects_and_separates_multiple_devices() -> None:
+    device0 = segment(active=10, address=1000)
+    device0["device"] = 0
+    device1 = segment(active=20, address=2000)
+    device1["device"] = 1
+    value = snapshot(device0, device1)
+
+    all_devices = MemoryProbe._from_snapshot_provider(
+        lambda marker: value,
+        devices="all",
+    )
+    all_snapshot = all_devices.snapshot()
+    assert all_devices.devices == (0, 1)
+    assert set(all_snapshot.pool_stats) == {
+        MemoryPoolKey(0, (0, 0)),
+        MemoryPoolKey(1, (0, 0)),
+    }
+
+    device1_only = MemoryProbe._from_snapshot_provider(
+        lambda marker: value,
+        devices=[1],
+    )
+    selected = device1_only.snapshot()
+    assert device1_only.devices == (1,)
+    assert set(selected.pool_stats) == {MemoryPoolKey(1, (0, 0))}
+    assert selected.allocator_scope_stats["all"].active_bytes == 20
+
+
+def test_default_probe_delays_device_binding_after_empty_provider_snapshot() -> None:
+    device1 = segment(active=20, address=2000)
+    device1["device"] = 1
+    values = iter((snapshot(), snapshot(device1)))
+    probe = MemoryProbe._from_snapshot_provider(lambda marker: next(values))
+
+    first = probe.snapshot()
+    second = probe.snapshot()
+
+    assert first.observations == ()
+    assert probe.devices == (1,)
+    assert set(second.pool_stats) == {MemoryPoolKey(1, (0, 0))}

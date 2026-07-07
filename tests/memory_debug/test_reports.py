@@ -8,6 +8,7 @@ import pytest
 
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
+    MemoryDisplayOptions,
     compare_phases,
 )
 
@@ -64,7 +65,11 @@ def test_comparison_owns_all_report_formats(tmp_path: Path) -> None:
     default = next(
         item
         for item in payload["pool_comparisons"]
-        if item["candidate_pool_id"] == [0, 0]
+        if item["candidate_key"]
+        == {
+            "device_index": 0,
+            "pool_id": [0, 0],
+        }
     )
     assert default["reference"]["allocated_bytes"] == 10
     assert default["candidate"]["allocated_bytes"] == 15
@@ -150,7 +155,7 @@ def test_only_changed_filters_pool_and_stream_csv(tmp_path: Path) -> None:
     with (output / "pools.csv").open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert len(rows) == 1
-    assert rows[0]["candidate_pool_id"] == "pool[0,0]"
+    assert rows[0]["candidate_key"] == "device[0]/pool[0,0]"
 
 
 def test_timeline_html_contains_charts_and_zero_delta_rows(
@@ -256,7 +261,7 @@ def test_timeline_only_changed_filters_csv_and_html(tmp_path: Path) -> None:
 
     with (output / "pools.csv").open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert {row["point_label"] for row in rows} == {"start"}
+    assert rows == []
     assert ">steady<" not in (output / "report.html").read_text(encoding="utf-8")
 
 
@@ -269,7 +274,7 @@ def test_text_reports_show_core_metrics_at_pool_stream_scope() -> None:
     comparison_text = run.compare("before", "after").to_text()
     timeline_text = run.timeline().to_text()
 
-    assert "pool/stream observations:" in comparison_text
+    assert "device/pool/stream observations:" in comparison_text
     assert "active: 10 B -> 12 B" in comparison_text
     assert "requested: 10 B -> 11 B" in comparison_text
     assert "active=12 B (delta +2 B)" in timeline_text
@@ -299,7 +304,7 @@ def test_structural_only_changes_remain_explainable_when_filtered() -> None:
     assert "blocks=2 (delta +1)" in text
 
 
-def test_write_returns_absolute_paths_and_removes_stale_optional_artifacts(
+def test_write_requires_explicit_overwrite_for_nonempty_directory(
     tmp_path: Path,
 ) -> None:
     run = make_run(
@@ -310,11 +315,17 @@ def test_write_returns_absolute_paths_and_removes_stale_optional_artifacts(
     output.mkdir()
     stale = output / "events.csv"
     stale.write_text("stale", encoding="utf-8")
+    unrelated = output / "notes.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+    comparison = run.compare("before", "after")
 
-    paths = run.compare("before", "after").write(output)
+    with pytest.raises(FileExistsError, match="not empty"):
+        comparison.write(output)
 
+    paths = comparison.write(output, overwrite=True)
     assert all(path.is_absolute() for path in paths.values())
     assert not stale.exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep"
 
 
 def test_attribution_display_options_do_not_change_structured_results(
@@ -340,8 +351,7 @@ def test_attribution_display_options_do_not_change_structured_results(
         "after",
         attribution=MemoryAttributionOptions(
             stacks=True,
-            stack_depth=1,
-            limit=1,
+            display=MemoryDisplayOptions(stack_depth=1, limit=1),
         ),
     )
 
@@ -391,7 +401,9 @@ def test_timeline_and_phase_propagate_attribution_display_options(
         right_segment["blocks"][0]["frames"] = [shared, right]
         return snapshot(left_segment, right_segment)
 
-    options = MemoryAttributionOptions(stacks=True, stack_depth=1, limit=1)
+    options = MemoryAttributionOptions(
+        stacks=True, display=MemoryDisplayOptions(stack_depth=1, limit=1)
+    )
     baseline = make_run(
         [state(10, 20), state(15, 30)],
         name="baseline",
@@ -455,7 +467,9 @@ def test_reports_preserve_fx_frames_and_render_them_readably(
     result = run.compare(
         "before",
         "after",
-        attribution=MemoryAttributionOptions(stacks=True, limit=2),
+        attribution=MemoryAttributionOptions(
+            stacks=True, display=MemoryDisplayOptions(limit=2)
+        ),
     )
 
     text = result.to_text(stack_depth=1)

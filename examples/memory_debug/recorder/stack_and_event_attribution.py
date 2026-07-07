@@ -15,6 +15,7 @@ import torch
 
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
+    MemoryDisplayOptions,
     MemoryRecorder,
     MemoryRun,
 )
@@ -76,8 +77,7 @@ def main() -> None:
             events=True,
             lifetimes=True,
             on_missing="error",
-            stack_depth=4,
-            limit=20,
+            display=MemoryDisplayOptions(stack_depth=4, limit=20),
         )
 
         comparison = run.compare(
@@ -94,8 +94,8 @@ def main() -> None:
         )
         # stack_frames is the lossless programmatic form used by JSON and CSV.
         assert largest_stack_delta.stack_frames
-        assert comparison.events_available is True
-        assert comparison.events_complete is True
+        assert comparison.attribution_status.events.available is True
+        assert comparison.attribution_status.events.complete is True
         assert comparison.allocator_events
         assert comparison.allocation_lifetimes is not None
         assert comparison.allocation_lifetimes.history_complete is True
@@ -113,7 +113,8 @@ def main() -> None:
         timeline = run.timeline(attribution=options)
         assert len(timeline.point_comparisons) == 2
         assert all(
-            item.events_available and item.events_complete
+            item.attribution_status.events.available
+            and item.attribution_status.events.complete
             for item in timeline.point_comparisons
         )
         assert timeline.allocation_lifetimes is not None

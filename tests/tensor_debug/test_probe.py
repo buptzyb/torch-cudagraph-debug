@@ -6,14 +6,14 @@ import torch
 from torch_cudagraph_debug import _native
 from torch_cudagraph_debug._errors import NativeExtensionUnavailableError
 from torch_cudagraph_debug.tensor_debug import (
-    TensorObservationKey,
-    TensorProbe,
     CheckAction,
+    PrintAction,
+    RecordAction,
     TensorCheckError,
     TensorCheckStatus,
     TensorDebugError,
-    PrintAction,
-    RecordAction,
+    TensorObservationKey,
+    TensorProbe,
 )
 from torch_cudagraph_debug.tensor_debug import _collector as collector_module
 

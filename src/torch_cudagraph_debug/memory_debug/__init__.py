@@ -1,17 +1,50 @@
-"""CUDA allocator memory debugging with explicit points and immutable runs."""
+"""CUDA allocator memory debugging with Probe and Recorder workflows."""
 
-from .allocator_snapshot import MemoryObservationKey
-from .attribution import MemoryAttributionOptions, MemoryLifetimeOptions
+from ._pool_identity import (
+    MemoryObservationKey,
+    MemoryPoolKey,
+    PoolId,
+    StreamId,
+)
+from .attribution import (
+    MemoryAttributionOptions,
+    MemoryAttributionStatus,
+    MemoryDisplayOptions,
+    MemoryEvidenceStatus,
+    MemoryLifetimeOptions,
+    MissingPolicy,
+)
 from .comparison import compare_phases, compare_points, compare_snapshots
+from .comparison_models import (
+    MatchKind,
+    MemoryAllocatorScopeComparison,
+    MemoryAllocatorScopePhaseDecomposition,
+    MemoryLifecycleDelta,
+    MemoryObservationComparison,
+    MemoryPhaseComponents,
+    MemoryPoolComparison,
+    MemoryPoolPhaseDecomposition,
+    PhaseMetric,
+)
 from .errors import (
     MemoryBundleError,
     MemoryDebugError,
     MemoryHistoryError,
     MemoryOwnershipError,
 )
+from .events import AllocatorEventSummary
+from .lifetimes import (
+    AllocationCohort,
+    CohortBirth,
+    CohortFreeCompletion,
+    CohortFreeRequest,
+    CohortPointState,
+    CohortSizeBucket,
+    CohortSizeOutcome,
+)
 from .probe import MemoryProbe
-from .snapshots import MemoryProbeSnapshot
 from .recording import (
+    MemoryLifetimeSelection,
     MemoryObservation,
     MemoryPoint,
     MemoryRange,
@@ -22,40 +55,100 @@ from .reports import (
     MemoryAllocationLifetimeAnalysis,
     MemoryPhaseComparison,
     MemoryPointComparison,
-    MemorySnapshotComparison,
     MemoryRunGroupPhaseComparison,
     MemoryRunGroupSummary,
+    MemorySnapshotComparison,
     MemoryTimeline,
 )
-from .run_groups import MemoryRunGroup, compare_run_group_phases
-from .stats import MemoryStats
+from .run_groups import (
+    MemoryMetricExtrema,
+    MemoryRankPhaseDecomposition,
+    MemoryRankPointAggregate,
+    MemoryRankPointState,
+    MemoryRankPoolPhaseDecomposition,
+    MemoryRunGroup,
+    MemoryRunGroupPhaseAggregate,
+    compare_run_group_phases,
+)
+from .snapshots import MemoryProbeSnapshot
+from .stacks import (
+    AllocationStackCoverage,
+    AllocationStackDelta,
+    AllocationStackSummary,
+)
+from .stats import AllocatorScope, MemoryStatMetric, MemoryStats, MemoryStatsDelta
+from .timeline import (
+    MemoryAllocatorScopeTimelineEntry,
+    MemoryObservationTimelineEntry,
+    MemoryPoolTimelineEntry,
+)
 
 __all__ = [
+    "AllocationCohort",
+    "AllocationStackCoverage",
+    "AllocationStackDelta",
+    "AllocationStackSummary",
+    "AllocatorEventSummary",
+    "AllocatorScope",
+    "CohortBirth",
+    "CohortFreeCompletion",
+    "CohortFreeRequest",
+    "CohortPointState",
+    "CohortSizeBucket",
+    "CohortSizeOutcome",
+    "MatchKind",
+    "MemoryAllocationLifetimeAnalysis",
+    "MemoryAllocatorScopeComparison",
+    "MemoryAllocatorScopePhaseDecomposition",
+    "MemoryAllocatorScopeTimelineEntry",
+    "MemoryAttributionOptions",
+    "MemoryAttributionStatus",
+    "MemoryBundleError",
+    "MemoryDebugError",
+    "MemoryDisplayOptions",
+    "MemoryEvidenceStatus",
+    "MemoryHistoryError",
+    "MemoryLifetimeOptions",
+    "MemoryLifetimeSelection",
+    "MemoryLifecycleDelta",
+    "MemoryMetricExtrema",
+    "MemoryObservation",
+    "MemoryObservationComparison",
+    "MemoryObservationKey",
+    "MemoryObservationTimelineEntry",
+    "MemoryOwnershipError",
+    "MemoryPhaseComparison",
+    "MemoryPhaseComponents",
+    "MemoryPoint",
+    "MemoryPointComparison",
+    "MemoryPoolComparison",
+    "MemoryPoolKey",
+    "MemoryPoolPhaseDecomposition",
+    "MemoryPoolTimelineEntry",
     "MemoryProbe",
     "MemoryProbeSnapshot",
+    "MemoryRange",
+    "MemoryRankPhaseDecomposition",
+    "MemoryRankPointAggregate",
+    "MemoryRankPointState",
+    "MemoryRankPoolPhaseDecomposition",
     "MemoryRecorder",
     "MemoryRun",
     "MemoryRunGroup",
-    "MemoryPoint",
-    "MemoryObservation",
-    "MemoryObservationKey",
-    "MemoryStats",
-    "MemoryRange",
-    "MemoryTimeline",
-    "MemorySnapshotComparison",
-    "MemoryPointComparison",
-    "MemoryPhaseComparison",
-    "MemoryRunGroupSummary",
+    "MemoryRunGroupPhaseAggregate",
     "MemoryRunGroupPhaseComparison",
-    "MemoryAllocationLifetimeAnalysis",
-    "MemoryAttributionOptions",
-    "MemoryLifetimeOptions",
-    "compare_snapshots",
-    "compare_points",
+    "MemoryRunGroupSummary",
+    "MemorySnapshotComparison",
+    "MemoryStatMetric",
+    "MemoryStats",
+    "MemoryStatsDelta",
+    "MemoryTimeline",
+    "MissingPolicy",
+    "PhaseMetric",
+    "PoolId",
+    "StreamId",
     "compare_phases",
+    "compare_points",
     "compare_run_group_phases",
-    "MemoryDebugError",
-    "MemoryHistoryError",
-    "MemoryBundleError",
-    "MemoryOwnershipError",
+    "compare_snapshots",
 ]

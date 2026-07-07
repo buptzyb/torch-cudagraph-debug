@@ -8,9 +8,11 @@ import pytest
 from torch_cudagraph_debug.memory_debug import (
     MemoryAllocationLifetimeAnalysis,
     MemoryAttributionOptions,
-    MemoryLifetimeOptions,
     MemoryDebugError,
+    MemoryDisplayOptions,
     MemoryHistoryError,
+    MemoryLifetimeOptions,
+    MemoryLifetimeSelection,
     MemoryOwnershipError,
     MemoryPoint,
     MemoryRecorder,
@@ -46,9 +48,11 @@ def test_snapshot_lifetimes_group_sizes_and_infer_free_completion() -> None:
     )
 
     report = run.lifetimes(
-        "anchor",
+        MemoryLifetimeSelection.active_at("anchor"),
         through="final",
-        options=MemoryLifetimeOptions(events=False, stack_depth=4),
+        options=MemoryLifetimeOptions(
+            events=False, display=MemoryDisplayOptions(stack_depth=4)
+        ),
     )
 
     assert isinstance(report, MemoryAllocationLifetimeAnalysis)
@@ -117,12 +121,12 @@ def test_event_lifetimes_split_same_address_reuse_generation() -> None:
     run = recorder.finish()
 
     report = run.lifetimes(
-        "anchor",
+        MemoryLifetimeSelection.active_at("anchor"),
         through="reused",
         options=MemoryLifetimeOptions(
             events=True,
             on_missing="error",
-            stack_depth=4,
+            display=MemoryDisplayOptions(stack_depth=4),
         ),
     )
 
@@ -138,11 +142,11 @@ def test_event_lifetimes_split_same_address_reuse_generation() -> None:
     assert "new_alloc.py" not in cohort.stack_key
 
     born = run.lifetimes(
-        born_between=("anchor", "reused"),
+        MemoryLifetimeSelection.born_between("anchor", "reused"),
         options=MemoryLifetimeOptions(
             events=True,
             on_missing="error",
-            stack_depth=4,
+            display=MemoryDisplayOptions(stack_depth=4),
         ),
     )
     assert len(born.cohorts) == 1
@@ -194,11 +198,11 @@ def test_born_between_keeps_event_only_transient_allocation(tmp_path: Path) -> N
     recorder.record_point("before")
     recorder.record_point("after")
     report = recorder.finish().lifetimes(
-        born_between=("before", "after"),
+        MemoryLifetimeSelection.born_between("before", "after"),
         options=MemoryLifetimeOptions(
             events=True,
             on_missing="error",
-            stack_depth=4,
+            display=MemoryDisplayOptions(stack_depth=4),
         ),
     )
 
@@ -284,9 +288,11 @@ def test_born_between_snapshot_fallback_warns_and_misses_no_survivor() -> None:
     )
 
     report = run.lifetimes(
-        born_between=("before", "born"),
+        MemoryLifetimeSelection.born_between("before", "born"),
         through="completed",
-        options=MemoryLifetimeOptions(events=False, stack_depth=4),
+        options=MemoryLifetimeOptions(
+            events=False, display=MemoryDisplayOptions(stack_depth=4)
+        ),
     )
 
     assert len(report.cohorts) == 1
@@ -327,7 +333,7 @@ def test_born_between_uses_trace_devices_without_endpoint_segments() -> None:
     recorder.record_point("before")
     recorder.record_point("after")
     report = recorder.finish().lifetimes(
-        born_between=("before", "after"),
+        MemoryLifetimeSelection.born_between("before", "after"),
         options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
@@ -361,7 +367,7 @@ def test_incomplete_history_keeps_provable_free_request_and_warns() -> None:
     recorder.record_point("anchor")
     recorder.record_point("final")
     report = recorder.finish().lifetimes(
-        "anchor",
+        MemoryLifetimeSelection.active_at("anchor"),
         options=MemoryLifetimeOptions(events=True),
     )
 
@@ -371,7 +377,7 @@ def test_incomplete_history_keeps_provable_free_request_and_warns() -> None:
 
     with pytest.raises(MemoryHistoryError, match="unavailable or incomplete"):
         recorder.result.lifetimes(
-            "anchor",
+            MemoryLifetimeSelection.active_at("anchor"),
             options=MemoryLifetimeOptions(events=True, on_missing="error"),
         )
 
@@ -404,14 +410,103 @@ def test_free_completion_without_request_infers_missing_boundary() -> None:
     recorder.record_point("owned")
     recorder.record_point("completed")
     report = recorder.finish().lifetimes(
-        "owned",
+        MemoryLifetimeSelection.active_at("owned"),
         options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
     cohort = report.cohorts[0]
     assert cohort.snapshot_inferred_free_requested_bytes == 64
     assert cohort.event_exact_free_completed_bytes == 64
-    assert any("inferred the request" in warning for warning in report.warnings)
+    assert any("inferred from snapshot" in warning for warning in report.warnings)
+
+
+def test_replay_warnings_are_grouped_by_reason_and_device() -> None:
+    markers: list[str] = []
+
+    def provider(marker: str):
+        markers.append(marker)
+        if len(markers) == 1:
+            return snapshot(
+                _set_device(
+                    segment(
+                        active=64,
+                        address=5000,
+                        frame="tracked_size.py",
+                    ),
+                    0,
+                ),
+                _set_device(
+                    segment(
+                        active=64,
+                        address=6000,
+                        frame="tracked_reuse.py",
+                    ),
+                    0,
+                ),
+                traces=[
+                    [event("snapshot", marker=marker)],
+                    [event("snapshot", marker=marker)],
+                ],
+            )
+        return snapshot(
+            traces=[
+                [event("snapshot", marker=markers[0])]
+                + [
+                    event("free_completed", address=1000 + index, size=64)
+                    for index in range(12)
+                ]
+                + [event("free_completed", address=5000, size=32) for _ in range(2)]
+                + [
+                    event(
+                        "alloc",
+                        address=6000,
+                        size=64,
+                        frame=f"reuse_{index}.py",
+                    )
+                    for index in range(2)
+                ],
+                [event("snapshot", marker=markers[0])]
+                + [
+                    event("free_completed", address=2000 + index, size=64)
+                    for index in range(5)
+                ],
+            ]
+        )
+
+    recorder = MemoryRecorder._from_snapshot_provider(provider)
+    recorder.record_point("before")
+    recorder.record_point("after")
+    report = recorder.finish().lifetimes(
+        options=MemoryLifetimeOptions(events=True, on_missing="error")
+    )
+
+    unmatched = [
+        warning
+        for warning in report.warnings
+        if "could not be matched to an active allocation" in warning
+    ]
+    assert len(unmatched) == 3
+    device_0 = next(
+        warning for warning in unmatched if "12 free_completed events" in warning
+    )
+    assert "device 0" in device_0
+    assert device_0.count("0x") == 3
+    device_1 = next(
+        warning for warning in unmatched if "5 free_completed events" in warning
+    )
+    assert "device 1" in device_1
+    assert device_1.count("0x") == 3
+    size_mismatch = next(
+        warning for warning in unmatched if "event sizes differed" in warning
+    )
+    assert "2 free_completed events" in size_mismatch
+    assert size_mismatch.count("0x") == 1
+
+    address_reuse = next(
+        warning for warning in report.warnings if "reused an active address" in warning
+    )
+    assert "2 allocation events" in address_reuse
+    assert address_reuse.count("0x") == 1
 
 
 def test_lifetimes_keep_devices_separate_for_same_address() -> None:
@@ -473,7 +568,7 @@ def test_lifetimes_keep_devices_separate_for_same_address() -> None:
     recorder.record_point("anchor")
     recorder.record_point("final")
     report = recorder.finish().lifetimes(
-        "anchor",
+        MemoryLifetimeSelection.active_at("anchor"),
         options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
@@ -523,7 +618,7 @@ def test_lifetimes_do_not_match_event_to_other_device_same_address() -> None:
     recorder.record_point("anchor")
     recorder.record_point("final")
     report = recorder.finish().lifetimes(
-        "anchor",
+        MemoryLifetimeSelection.active_at("anchor"),
         options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
@@ -573,7 +668,7 @@ def test_event_only_birth_infers_pool_from_segment_range() -> None:
     recorder.record_point("before")
     recorder.record_point("after")
     report = recorder.finish().lifetimes(
-        born_between=("before", "after"),
+        MemoryLifetimeSelection.born_between("before", "after"),
         options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
@@ -628,7 +723,7 @@ def test_free_request_and_completion_are_distinct_lifetime_transitions() -> None
     recorder.record_point("awaiting")
     recorder.record_point("reusable")
     report = recorder.finish().lifetimes(
-        "owned",
+        MemoryLifetimeSelection.active_at("owned"),
         options=MemoryLifetimeOptions(events=True, on_missing="error"),
     )
 
@@ -660,8 +755,10 @@ def test_full_stack_identity_and_display_limit_do_not_drop_cohorts() -> None:
         labels=("start", "end"),
     )
     report = run.lifetimes(
-        "start",
-        options=MemoryLifetimeOptions(events=False, stack_depth=1, limit=1),
+        MemoryLifetimeSelection.active_at("start"),
+        options=MemoryLifetimeOptions(
+            events=False, display=MemoryDisplayOptions(stack_depth=1, limit=1)
+        ),
     )
 
     assert len(report.cohorts) == 2
@@ -678,8 +775,7 @@ def test_full_stack_identity_and_display_limit_do_not_drop_cohorts() -> None:
         attribution=MemoryAttributionOptions(
             lifetimes=True,
             events=False,
-            stack_depth=1,
-            limit=1,
+            display=MemoryDisplayOptions(stack_depth=1, limit=1),
         ),
     )
     assert comparison.allocation_lifetimes is not None
@@ -696,8 +792,10 @@ def test_full_stack_identity_and_display_limit_do_not_drop_cohorts() -> None:
         labels=("start", "end"),
     )
     reversed_report = reversed_run.lifetimes(
-        "start",
-        options=MemoryLifetimeOptions(events=False, stack_depth=1, limit=1),
+        MemoryLifetimeSelection.active_at("start"),
+        options=MemoryLifetimeOptions(
+            events=False, display=MemoryDisplayOptions(stack_depth=1, limit=1)
+        ),
     )
     assert {cohort.cohort_id for cohort in report.cohorts} == {
         cohort.cohort_id for cohort in reversed_report.cohorts
@@ -787,7 +885,7 @@ def test_allocator_action_taxonomy_is_complete_and_unknown_actions_warn() -> Non
     comparison = run.compare(
         "before",
         "after",
-        attribution=MemoryAttributionOptions(events=True, on_missing="error", limit=20),
+        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
     )
     assert {item.action for item in comparison.allocator_events} == (
         KNOWN_TRACE_ACTIONS - {"snapshot"}
@@ -807,7 +905,7 @@ def test_lifetime_report_owns_all_formats(tmp_path: Path) -> None:
         labels=("before", "anchor", "final"),
     )
     report = run.lifetimes(
-        "anchor",
+        MemoryLifetimeSelection.active_at("anchor"),
         options=MemoryLifetimeOptions(events=False),
     )
 
@@ -876,14 +974,17 @@ def test_lifetime_point_validation_and_empty_run() -> None:
     other = make_run([snapshot(segment(active=1))], labels=("point",))
 
     with pytest.raises(ValueError, match="must not come before"):
-        run.lifetimes("after", through="before")
+        run.lifetimes(
+            MemoryLifetimeSelection.active_at("after"),
+            through="before",
+        )
     with pytest.raises(MemoryOwnershipError):
-        run.lifetimes(other["point"])
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        run.lifetimes("before", born_between=("before", "after"))
+        run.lifetimes(MemoryLifetimeSelection.active_at(other["point"]))
+    with pytest.raises(ValueError, match="requires exactly one point"):
+        MemoryLifetimeSelection("active_at", start="before", end="after")
     with pytest.raises(ValueError, match="born_between end"):
         run.lifetimes(
-            born_between=("before", "after"),
+            MemoryLifetimeSelection.born_between("before", "after"),
             through="before",
         )
 

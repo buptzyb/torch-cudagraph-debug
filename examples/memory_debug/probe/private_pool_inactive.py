@@ -11,11 +11,7 @@ from torch_cudagraph_debug.memory_debug import MemoryProbe
 
 MIB = 1024 * 1024
 SCRATCH_BYTES = 64 * MIB
-DEFAULT_POOL = (0, 0)
-
-
-def _format_pool_id(pool_id: tuple[object, ...]) -> str:
-    return "pool[" + ",".join(str(item) for item in pool_id) + "]"
+DEFAULT_POOL_ID = (0, 0)
 
 
 def _format_bytes(value: int) -> str:
@@ -46,24 +42,28 @@ def main() -> None:
     graph.replay()
     after_replay = probe.snapshot()
 
-    private_pool_ids = sorted(
-        pool_id
-        for pool_id in set(after_capture.pool_stats) - set(before_capture.pool_stats)
-        if pool_id != DEFAULT_POOL
+    private_pool_keys = sorted(
+        (
+            pool_key
+            for pool_key in set(after_capture.pool_stats)
+            - set(before_capture.pool_stats)
+            if pool_key.pool_id != DEFAULT_POOL_ID
+        ),
+        key=lambda item: (item.device_index, item.pool_id),
     )
-    if len(private_pool_ids) != 1:
-        raise RuntimeError(f"expected one new private pool, found {private_pool_ids}")
+    if len(private_pool_keys) != 1:
+        raise RuntimeError(f"expected one new private pool, found {private_pool_keys}")
 
-    pool_id = private_pool_ids[0]
-    captured = after_capture.pool_stats[pool_id]
-    replayed = after_replay.pool_stats[pool_id]
+    pool_key = private_pool_keys[0]
+    captured = after_capture.pool_stats[pool_key]
+    replayed = after_replay.pool_stats[pool_key]
 
     assert captured.inactive_bytes == captured.reserved_bytes - captured.active_bytes
     assert captured.inactive_bytes >= SCRATCH_BYTES
     assert replayed.reserved_bytes == captured.reserved_bytes
     assert replayed.active_bytes == captured.active_bytes
 
-    print(_format_pool_id(pool_id))
+    print(pool_key.label)
     for label, stats in (("after capture", captured), ("after replay", replayed)):
         print(f"  {label}:")
         print(f"    reserved: {_format_bytes(stats.reserved_bytes)}")

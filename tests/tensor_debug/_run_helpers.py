@@ -24,14 +24,18 @@ def make_tensor_run(
     name: str = "run",
     bundle_dir: Path | None = None,
     default_payload: PayloadKind = "full",
+    rank: int = 0,
+    group_id: str | None = None,
+    world_size: int = 1,
 ) -> TensorRun:
     recorder = TensorRecorder(
         execution="eager",
         name=name,
         bundle_dir=bundle_dir,
         payload=default_payload,
-        rank=0,
-        world_size=1,
+        rank=rank,
+        group_id=group_id,
+        world_size=world_size,
         run_metadata={"test": name},
     )
     for label, values in points:
@@ -63,6 +67,7 @@ def make_probe_snapshot(
     *,
     probe_name: str = "mid",
     replay_index: int = 1,
+    snapshot_index: int | None = None,
     probe_id: str = "test-probe",
 ) -> TensorProbeSnapshot:
     run = make_tensor_run(
@@ -72,6 +77,7 @@ def make_probe_snapshot(
     return TensorProbeSnapshot(
         probe_id=probe_id,
         probe_name=probe_name,
+        snapshot_index=(replay_index if snapshot_index is None else snapshot_index),
         replay_index=replay_index,
         timestamp=0.0,
         observations=run.points[0].observations,

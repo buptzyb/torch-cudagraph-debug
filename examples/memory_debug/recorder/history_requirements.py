@@ -14,8 +14,10 @@ import torch
 
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
-    MemoryLifetimeOptions,
+    MemoryDisplayOptions,
     MemoryHistoryError,
+    MemoryLifetimeOptions,
+    MemoryLifetimeSelection,
     MemoryRecorder,
     MemoryRun,
 )
@@ -66,12 +68,12 @@ def _record_without_history(output_dir: Path) -> None:
             stacks=True,
             events=True,
             on_missing="warn",
-            stack_depth=4,
+            display=MemoryDisplayOptions(stack_depth=4),
         ),
     )
     assert warned.candidate_stack_coverage is not None
     assert warned.candidate_stack_coverage.unattributed_bytes >= 16 * MIB
-    assert warned.events_available is False
+    assert warned.attribution_status.events.available is False
     assert any("coverage is incomplete" in item for item in warned.warnings)
     assert any("allocator event history" in item for item in warned.warnings)
     warning_paths = warned.write(output_dir / "no-history-warning-comparison")
@@ -85,7 +87,7 @@ def _record_without_history(output_dir: Path) -> None:
                 stacks=True,
                 events=True,
                 on_missing="error",
-                stack_depth=4,
+                display=MemoryDisplayOptions(stack_depth=4),
             ),
         )
     except MemoryHistoryError as error:
@@ -94,12 +96,12 @@ def _record_without_history(output_dir: Path) -> None:
         raise AssertionError("strict missing-history policy did not raise")
 
     inferred = run.lifetimes(
-        born_between=("before", "after_alloc"),
+        MemoryLifetimeSelection.born_between("before", "after_alloc"),
         through="after_free",
         options=MemoryLifetimeOptions(
             events=False,
             on_missing="warn",
-            stack_depth=4,
+            display=MemoryDisplayOptions(stack_depth=4),
         ),
     )
     assert inferred.history_requested is False

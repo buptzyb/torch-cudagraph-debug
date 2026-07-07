@@ -27,9 +27,9 @@ def observed_forward(
     inputs: torch.Tensor,
     recorder: TensorRecorder,
 ) -> torch.Tensor:
-    inputs = recorder.observe("input", inputs)
-    hidden = recorder.observe("hidden", inputs * 2)
-    return recorder.observe("output", hidden + 3, payload="full")
+    inputs = recorder.observe(inputs, name="input")
+    hidden = recorder.observe(inputs * 2, name="hidden")
+    return recorder.observe(hidden + 3, name="output", payload="full")
 
 
 def parse_args() -> argparse.Namespace:

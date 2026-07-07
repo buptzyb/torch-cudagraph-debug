@@ -2,29 +2,33 @@
 
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
 
+from .._validation import comparable_provenance, json_signature
+from ._pool_identity import MemoryPoolKey
+from .aggregation import ALLOCATOR_SCOPES
 from .attribution import MemoryAttributionOptions
 from .comparison import compare_phases
-from .recording import MemoryRun
-from .errors import MemoryBundleError
-from .reports import MemoryRunGroupPhaseComparison, MemoryRunGroupSummary
-from .aggregation import ALLOCATOR_SCOPES
-
-GROUP_MEMORY_METRICS = (
-    "reserved_bytes",
-    "allocated_bytes",
-    "active_bytes",
-    "inactive_bytes",
-    "requested_bytes",
-    "fragmentation_bytes",
+from .comparison_models import (
+    MemoryAllocatorScopePhaseDecomposition,
+    MemoryPoolPhaseDecomposition,
+    PhaseMetric,
 )
+from .errors import MemoryBundleError
+from .recording import MemoryRun
+from .reports import MemoryRunGroupPhaseComparison, MemoryRunGroupSummary
+from .stats import (
+    MEMORY_STAT_METRICS,
+    AllocatorScope,
+    MemoryStatMetric,
+    MemoryStats,
+)
+
+GROUP_MEMORY_METRICS: tuple[MemoryStatMetric, ...] = MEMORY_STAT_METRICS
 PHASE_COMPONENTS = (
     "start_gap_bytes",
     "baseline_change_bytes",
@@ -32,6 +36,164 @@ PHASE_COMPONENTS = (
     "change_gap_bytes",
     "end_gap_bytes",
 )
+
+
+@dataclass(frozen=True)
+class MemoryRankPointState:
+    """Absolute allocator state for one rank, point, and scope."""
+
+    rank: int
+    run_id: str
+    point_index: int
+    point_label: str
+    scope: AllocatorScope
+    stats: MemoryStats
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "rank": self.rank,
+            "run_id": self.run_id,
+            "point_index": self.point_index,
+            "point_label": self.point_label,
+            "scope": self.scope,
+            **self.stats.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class MemoryRankPointAggregate:
+    """Cross-rank extrema for one point/scope metric."""
+
+    point_index: int
+    point_label: str
+    scope: AllocatorScope
+    metric: MemoryStatMetric
+    rank_count: int
+    min_value: int
+    min_rank: int
+    max_value: int
+    max_rank: int
+
+    @property
+    def worst_rank(self) -> int:
+        return self.max_rank
+
+    @property
+    def spread_value(self) -> int:
+        return self.max_value - self.min_value
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "point_index": self.point_index,
+            "point_label": self.point_label,
+            "scope": self.scope,
+            "metric": self.metric,
+            "rank_count": self.rank_count,
+            "min_value": self.min_value,
+            "min_rank": self.min_rank,
+            "max_value": self.max_value,
+            "max_rank": self.max_rank,
+            "worst_rank": self.worst_rank,
+            "spread_value": self.spread_value,
+        }
+
+
+@dataclass(frozen=True)
+class MemoryRankPhaseDecomposition:
+    """Allocator-scope phase equation for one rank."""
+
+    rank: int
+    decomposition: MemoryAllocatorScopePhaseDecomposition
+
+    @property
+    def changed(self) -> bool:
+        return self.decomposition.changed
+
+    def to_dict(self) -> dict[str, object]:
+        return {"rank": self.rank, **self.decomposition.to_dict()}
+
+
+@dataclass(frozen=True)
+class MemoryRankPoolPhaseDecomposition:
+    """Mapped-pool phase equation for one rank."""
+
+    rank: int
+    decomposition: MemoryPoolPhaseDecomposition
+
+    @property
+    def changed(self) -> bool:
+        return self.decomposition.changed
+
+    def to_dict(self) -> dict[str, object]:
+        return {"rank": self.rank, **self.decomposition.to_dict()}
+
+
+@dataclass(frozen=True)
+class MemoryMetricExtrema:
+    """Per-rank extrema and spread for one phase component."""
+
+    min_bytes: int
+    min_rank: int
+    max_bytes: int
+    max_rank: int
+
+    @property
+    def spread_bytes(self) -> int:
+        return self.max_bytes - self.min_bytes
+
+    def to_dict(self, prefix: str) -> dict[str, object]:
+        return {
+            f"{prefix}_min_bytes": self.min_bytes,
+            f"{prefix}_min_rank": self.min_rank,
+            f"{prefix}_max_bytes": self.max_bytes,
+            f"{prefix}_max_rank": self.max_rank,
+            f"{prefix}_spread_bytes": self.spread_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class MemoryRunGroupPhaseAggregate:
+    """Cross-rank extrema for one allocator-scope phase equation."""
+
+    scope: AllocatorScope
+    metric: PhaseMetric
+    rank_count: int
+    identity_holds: bool
+    start_gap: MemoryMetricExtrema
+    baseline_change: MemoryMetricExtrema
+    candidate_change: MemoryMetricExtrema
+    change_gap: MemoryMetricExtrema
+    end_gap: MemoryMetricExtrema
+
+    @property
+    def changed(self) -> bool:
+        return any(
+            extrema.min_bytes or extrema.max_bytes
+            for extrema in (
+                self.start_gap,
+                self.baseline_change,
+                self.candidate_change,
+                self.change_gap,
+                self.end_gap,
+            )
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        row: dict[str, object] = {
+            "scope": self.scope,
+            "metric": self.metric,
+            "rank_count": self.rank_count,
+            "identity_holds": self.identity_holds,
+        }
+        for name in (
+            "start_gap",
+            "baseline_change",
+            "candidate_change",
+            "change_gap",
+            "end_gap",
+        ):
+            row.update(getattr(self, name).to_dict(name))
+        return row
 
 
 @dataclass(frozen=True)
@@ -50,6 +212,20 @@ class MemoryRunGroup:
     def ranks(self) -> tuple[int, ...]:
         return tuple(self.runs)
 
+    @property
+    def missing_ranks(self) -> tuple[int, ...]:
+        if self.world_size is None:
+            return ()
+        return tuple(sorted(set(range(self.world_size)) - set(self.runs)))
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.world_size is not None
+            and not self.missing_ranks
+            and all(run.complete for run in self.runs.values())
+        )
+
     def __len__(self) -> int:
         return len(self.runs)
 
@@ -62,6 +238,8 @@ class MemoryRunGroup:
             "group_id": self.group_id,
             "world_size": self.world_size,
             "ranks": list(self.ranks),
+            "missing_ranks": list(self.missing_ranks),
+            "complete": self.complete,
             "point_labels": list(self.point_labels),
             "warnings": list(self.warnings),
             "runs": {str(rank): run.descriptor() for rank, run in self.runs.items()},
@@ -73,7 +251,7 @@ class MemoryRunGroup:
         rank_rows = _rank_point_rows(self)
         return MemoryRunGroupSummary(
             run_group=self,
-            rank_point_entries=rank_rows,
+            rank_points=rank_rows,
             point_aggregates=_aggregate_point_rows(rank_rows),
             warnings=self.warnings,
         )
@@ -93,11 +271,15 @@ class MemoryRunGroup:
                 f"memory run group directory does not exist: {group_root}"
             )
         bundles = tuple(
-            sorted(path for path in group_root.glob("*.tcgd-memory") if path.is_dir())
+            sorted(
+                path
+                for path in group_root.iterdir()
+                if path.is_dir() and (path / "manifest.json").is_file()
+            )
         )
         if not bundles:
             raise MemoryBundleError(
-                f"memory run group {group_root} has no direct *.tcgd-memory bundles"
+                f"memory run group {group_root} has no direct child memory bundles"
             )
         return cls.from_runs(
             (
@@ -218,16 +400,14 @@ class MemoryRunGroup:
                 + ", ".join(str(rank) for rank in missing_provenance)
             )
         provenance_signatures = {
-            _signature(_comparable_provenance(run.provenance))
+            json_signature(comparable_provenance(run.provenance))
             for run in materialized
             if run.provenance
         }
         if len(provenance_signatures) > 1:
             warnings.append("runtime provenance differs across ranks")
 
-        metadata_signatures = {
-            _signature(dict(run.run_metadata)) for run in materialized
-        }
+        metadata_signatures = {json_signature(run.run_metadata) for run in materialized}
         if len(metadata_signatures) > 1:
             warnings.append("user run metadata differs across ranks")
 
@@ -251,6 +431,7 @@ def compare_run_group_phases(
     baseline_end: str | int,
     candidate_start: str | int,
     candidate_end: str | int,
+    pool_mappings: Mapping[int, Mapping[MemoryPoolKey, MemoryPoolKey]] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryRunGroupPhaseComparison:
     """Compare four-point phase equations rank by rank and report skew."""
@@ -259,6 +440,12 @@ def compare_run_group_phases(
     if not common_ranks:
         raise MemoryBundleError(
             "baseline and candidate memory groups have no common ranks"
+        )
+    unknown_mapping_ranks = set(pool_mappings or {}) - set(common_ranks)
+    if unknown_mapping_ranks:
+        raise ValueError(
+            "pool_mappings contains ranks outside the comparison: "
+            + ", ".join(str(rank) for rank in sorted(unknown_mapping_ranks))
         )
 
     warnings = [
@@ -279,144 +466,154 @@ def compare_run_group_phases(
         )
 
     rank_comparisons = {}
-    rank_decomposition: list[dict[str, object]] = []
+    rank_decomposition: list[MemoryRankPhaseDecomposition] = []
+    rank_pool_decomposition: list[MemoryRankPoolPhaseDecomposition] = []
     options = attribution or MemoryAttributionOptions()
     for rank in common_ranks:
         phase = compare_phases(
             baseline[rank].between(baseline_start, baseline_end),
             candidate[rank].between(candidate_start, candidate_end),
+            pool_mapping=(pool_mappings or {}).get(rank),
             attribution=options,
         )
         rank_comparisons[rank] = phase
         rank_decomposition.extend(
-            {"rank": rank, **row} for row in phase.allocator_scope_decomposition
+            MemoryRankPhaseDecomposition(rank, item)
+            for item in phase.allocator_scope_decomposition
+        )
+        rank_pool_decomposition.extend(
+            MemoryRankPoolPhaseDecomposition(rank, item)
+            for item in phase.pool_decomposition
         )
         warnings.extend(f"rank {rank}: {warning}" for warning in phase.warnings)
 
-    immutable_rank_comparisons = MappingProxyType(rank_comparisons)
     frozen_rank_decomposition = tuple(rank_decomposition)
     return MemoryRunGroupPhaseComparison(
         baseline_group=baseline,
         candidate_group=candidate,
-        rank_comparisons=immutable_rank_comparisons,
+        rank_comparisons=MappingProxyType(rank_comparisons),
         rank_decomposition=frozen_rank_decomposition,
+        rank_pool_decomposition=tuple(rank_pool_decomposition),
         phase_aggregates=_aggregate_phase_rows(frozen_rank_decomposition),
         warnings=tuple(dict.fromkeys(warnings)),
-        display_stack_depth=options.stack_depth,
-        display_limit=options.limit,
+        display_stack_depth=options.display.stack_depth,
+        display_limit=options.display.limit,
     )
 
 
-def _rank_point_rows(group: MemoryRunGroup) -> tuple[dict[str, object], ...]:
+def _rank_point_rows(group: MemoryRunGroup) -> tuple[MemoryRankPointState, ...]:
     rows = []
     for rank, run in group.runs.items():
         for point in run.points:
             for scope in ALLOCATOR_SCOPES:
                 rows.append(
-                    {
-                        "rank": rank,
-                        "run_id": run.run_id,
-                        "point_index": point.index,
-                        "point_label": point.label,
-                        "scope": scope,
-                        **point.allocator_scope_stats[scope].to_dict(),
-                    }
+                    MemoryRankPointState(
+                        rank=rank,
+                        run_id=run.run_id,
+                        point_index=point.index,
+                        point_label=point.label,
+                        scope=scope,
+                        stats=point.allocator_scope_stats[scope],
+                    )
                 )
     return tuple(rows)
 
 
 def _aggregate_point_rows(
-    rows: Iterable[Mapping[str, object]],
-) -> tuple[dict[str, object], ...]:
-    grouped: dict[tuple[int, str, str], list[Mapping[str, object]]] = defaultdict(list)
+    rows: Iterable[MemoryRankPointState],
+) -> tuple[MemoryRankPointAggregate, ...]:
+    grouped: dict[
+        tuple[int, str, AllocatorScope],
+        list[MemoryRankPointState],
+    ] = defaultdict(list)
     for row in rows:
-        grouped[
-            (int(row["point_index"]), str(row["point_label"]), str(row["scope"]))
-        ].append(row)
+        grouped[(row.point_index, row.point_label, row.scope)].append(row)
 
     result = []
-    for (point_index, point_label, scope), members in sorted(grouped.items()):
+    for (point_index, point_label, scope), members in sorted(
+        grouped.items(),
+        key=lambda item: (
+            item[0][0],
+            item[0][1],
+            ALLOCATOR_SCOPES.index(item[0][2]),
+        ),
+    ):
         for metric in GROUP_MEMORY_METRICS:
-            values = sorted((int(item[metric]), int(item["rank"])) for item in members)
+            values = sorted(
+                (int(getattr(item.stats, metric)), item.rank) for item in members
+            )
             minimum, min_rank = values[0]
             maximum, max_rank = values[-1]
             result.append(
-                {
-                    "point_index": point_index,
-                    "point_label": point_label,
-                    "scope": scope,
-                    "metric": metric,
-                    "rank_count": len(values),
-                    "min_value": minimum,
-                    "min_rank": min_rank,
-                    "max_value": maximum,
-                    "max_rank": max_rank,
-                    "worst_rank": max_rank,
-                    "spread_value": maximum - minimum,
-                }
+                MemoryRankPointAggregate(
+                    point_index=point_index,
+                    point_label=point_label,
+                    scope=scope,
+                    metric=metric,
+                    rank_count=len(values),
+                    min_value=minimum,
+                    min_rank=min_rank,
+                    max_value=maximum,
+                    max_rank=max_rank,
+                )
             )
     return tuple(result)
 
 
 def _aggregate_phase_rows(
-    rows: Iterable[Mapping[str, object]],
-) -> tuple[dict[str, object], ...]:
-    grouped: dict[tuple[str, str], list[Mapping[str, object]]] = defaultdict(list)
+    rows: Iterable[MemoryRankPhaseDecomposition],
+) -> tuple[MemoryRunGroupPhaseAggregate, ...]:
+    grouped: dict[
+        tuple[AllocatorScope, PhaseMetric],
+        list[MemoryRankPhaseDecomposition],
+    ] = defaultdict(list)
     for row in rows:
-        grouped[(str(row["scope"]), str(row["metric"]))].append(row)
+        grouped[(row.decomposition.scope, row.decomposition.components.metric)].append(
+            row
+        )
 
     result = []
     scope_order = {scope: index for index, scope in enumerate(ALLOCATOR_SCOPES)}
     for (scope, metric), members in sorted(
-        grouped.items(), key=lambda item: (scope_order[item[0][0]], item[0][1])
+        grouped.items(),
+        key=lambda item: (scope_order[item[0][0]], item[0][1]),
     ):
-        summary: dict[str, object] = {
-            "scope": scope,
-            "metric": metric,
-            "rank_count": len(members),
-            "identity_holds": all(bool(item["identity_holds"]) for item in members),
-        }
-        for component in PHASE_COMPONENTS:
+        extrema: dict[str, MemoryMetricExtrema] = {}
+        for component in (
+            "start_gap_bytes",
+            "baseline_change_bytes",
+            "candidate_change_bytes",
+            "change_gap_bytes",
+            "end_gap_bytes",
+        ):
             values = sorted(
-                (int(item[component]), int(item["rank"])) for item in members
+                (
+                    int(getattr(item.decomposition.components, component)),
+                    item.rank,
+                )
+                for item in members
             )
             minimum, min_rank = values[0]
             maximum, max_rank = values[-1]
-            prefix = component.removesuffix("_bytes")
-            summary.update(
-                {
-                    f"{prefix}_min_bytes": minimum,
-                    f"{prefix}_min_rank": min_rank,
-                    f"{prefix}_max_bytes": maximum,
-                    f"{prefix}_max_rank": max_rank,
-                    f"{prefix}_spread_bytes": maximum - minimum,
-                }
+            extrema[component.removesuffix("_bytes")] = MemoryMetricExtrema(
+                min_bytes=minimum,
+                min_rank=min_rank,
+                max_bytes=maximum,
+                max_rank=max_rank,
             )
-        result.append(summary)
+        result.append(
+            MemoryRunGroupPhaseAggregate(
+                scope=scope,
+                metric=metric,
+                rank_count=len(members),
+                identity_holds=all(
+                    item.decomposition.components.identity_holds for item in members
+                ),
+                start_gap=extrema["start_gap"],
+                baseline_change=extrema["baseline_change"],
+                candidate_change=extrema["candidate_change"],
+                change_gap=extrema["change_gap"],
+                end_gap=extrema["end_gap"],
+            )
+        )
     return tuple(result)
-
-
-def _comparable_provenance(value: Mapping[str, Any]) -> dict[str, object]:
-    producer = value.get("producer")
-    runtime = value.get("runtime")
-    device = value.get("device")
-    result: dict[str, object] = {}
-    if isinstance(producer, Mapping):
-        result["producer"] = dict(producer)
-    if isinstance(runtime, Mapping):
-        result["runtime"] = {
-            key: runtime.get(key)
-            for key in ("python", "platform", "torch", "cuda")
-            if key in runtime
-        }
-    if isinstance(device, Mapping):
-        result["device"] = {
-            key: device.get(key)
-            for key in ("name", "capability", "total_memory_bytes")
-            if key in device
-        }
-    return result
-
-
-def _signature(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))

@@ -33,6 +33,18 @@ Codex reads the canonical skill from
 `.agents/skills/tcgd-case-study/SKILL.md` and the custom-agent definition from
 `.codex/agents/tcgd-debugger.toml`.
 
+Codex has no plugin marketplace. For cross-project use, link the canonical
+assets into the user-level Codex configuration:
+
+```bash
+ln -s /path/to/torch-cudagraph-debug/.agents/skills/tcgd-case-study \
+  ~/.codex/skills/tcgd-case-study
+```
+
+User-level custom-agent discovery varies by Codex version; when a user-level
+agents directory is unsupported, start Codex from this checkout for the
+`tcgd-debugger` agent instead.
+
 ## Claude Code
 
 Start Claude Code from the repository root.
@@ -44,6 +56,24 @@ Start Claude Code from the repository root.
 Claude Code discovers the same canonical skill through the
 `.claude/skills/tcgd-case-study` link. Its thin custom-agent definition preloads
 that skill instead of copying the workflow.
+
+## Claude Code Plugin
+
+For cross-project use the repository doubles as a Claude Code plugin
+marketplace. Install once and the assets are available in every project:
+
+```text
+/plugin marketplace add buptzyb/torch-cudagraph-debug
+/plugin install tcgd@torch-cudagraph-debug
+```
+
+Plugin skills are namespaced by plugin name, so invoke the skill as
+`/tcgd:tcgd-case-study`; the `tcgd-debugger` agent loads as a normal custom
+agent. The plugin directory contains no copies: `plugins/tcgd/` links to the
+canonical skill and the Claude agent definition, and marketplace installation
+dereferences marketplace-internal links into the plugin cache. Local
+`--plugin-dir` testing does not dereference links that leave the plugin
+directory; test through a marketplace source instead.
 
 ## External Workloads
 
@@ -61,3 +91,5 @@ another location, the skill uses a new timestamped directory under `/tmp`.
 Edit the workflow only in `.agents/skills/tcgd-case-study/`. The Claude skill
 path must remain a link to that canonical directory. Keep the Codex and Claude
 agent files limited to runtime-specific metadata and the shared role contract.
+The plugin under `plugins/tcgd/` must keep linking to the canonical assets
+rather than copying them; `tests/test_agent_assets.py` enforces the structure.

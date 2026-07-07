@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal, TypeAlias
 
 import torch
 
+from ._pool_identity import MemoryObservationKey, normalize_device_index
 from .allocator_snapshot import (
     AllocatorSnapshotData,
-    MemoryObservationKey,
     normalize_snapshot,
     summarize_segments,
 )
 from .stats import MemoryStats
 
 SynchronizeTarget = bool | torch.cuda.Stream | torch.device
+DeviceLike: TypeAlias = int | str | torch.device
+DeviceSelector: TypeAlias = DeviceLike | Sequence[DeviceLike] | Literal["all"] | None
 SnapshotProvider = Callable[[str], AllocatorSnapshotData]
 
 
@@ -24,6 +27,7 @@ SnapshotProvider = Callable[[str], AllocatorSnapshotData]
 class _CollectedMemorySnapshot:
     timestamp: float
     boundary_marker: str
+    devices: tuple[int, ...]
     raw_snapshot: AllocatorSnapshotData
     summaries: tuple[tuple[MemoryObservationKey, MemoryStats], ...]
     warnings: tuple[str, ...]
@@ -39,21 +43,29 @@ def validate_synchronize_target(synchronize: SynchronizeTarget) -> None:
 
 
 class _MemoryCollector:
-    """Capture and normalize the complete private PyTorch allocator snapshot."""
+    """Capture allocator state for a stable set of selected CUDA devices."""
 
     def __init__(
         self,
         *,
+        devices: DeviceSelector = None,
         synchronize: SynchronizeTarget = True,
         snapshot_provider: SnapshotProvider | None = None,
     ) -> None:
         validate_synchronize_target(synchronize)
         self.synchronize = synchronize
+        self._device_selector = devices
+        self._requested_devices = _normalize_device_selector(devices)
+        self._resolved_devices: tuple[int, ...] | None = None
         self._snapshot_provider = snapshot_provider
 
     @property
     def uses_snapshot_provider(self) -> bool:
         return self._snapshot_provider is not None
+
+    @property
+    def devices(self) -> tuple[int, ...] | None:
+        return self._resolved_devices
 
     def capture(
         self,
@@ -63,29 +75,65 @@ class _MemoryCollector:
     ) -> _CollectedMemorySnapshot:
         if not boundary_marker:
             raise ValueError("boundary_marker must be non-empty")
-        selected = self.synchronize if synchronize is None else synchronize
-        validate_synchronize_target(selected)
+        selected_sync = self.synchronize if synchronize is None else synchronize
+        validate_synchronize_target(selected_sync)
         warnings: list[str] = []
 
         if self._snapshot_provider is not None:
             raw = self._snapshot_provider(boundary_marker)
+            envelope = _snapshot_envelope(raw)
+            devices = self._resolve_devices(envelope)
         else:
-            self._synchronize(selected, warnings)
+            devices = self._resolve_devices(None)
+            self._synchronize(selected_sync, devices, warnings)
             raw = self._capture_torch_snapshot(boundary_marker, warnings)
+            envelope = _snapshot_envelope(raw)
 
-        snapshot = _snapshot_envelope(raw)
+        snapshot = _filter_snapshot_devices(envelope, devices)
         segments = normalize_snapshot(snapshot)
         return _CollectedMemorySnapshot(
             timestamp=time.time(),
             boundary_marker=boundary_marker,
+            devices=devices,
             raw_snapshot=snapshot,
             summaries=tuple(summarize_segments(segments).items()),
             warnings=tuple(warnings),
         )
 
+    def _resolve_devices(
+        self, snapshot: AllocatorSnapshotData | None
+    ) -> tuple[int, ...]:
+        if self._resolved_devices is not None:
+            return self._resolved_devices
+        if self._requested_devices == "all":
+            if snapshot is not None:
+                devices = _snapshot_device_indices(snapshot)
+            elif torch.cuda.is_available():
+                devices = tuple(range(torch.cuda.device_count()))
+            else:
+                devices = ()
+        elif isinstance(self._requested_devices, tuple):
+            devices = self._requested_devices
+        elif snapshot is not None and self._snapshot_provider is not None:
+            devices = _snapshot_device_indices(snapshot)
+        elif torch.cuda.is_available():
+            devices = (torch.cuda.current_device(),)
+        else:
+            devices = ()
+        if (
+            not devices
+            and snapshot is not None
+            and self._snapshot_provider is not None
+            and self._requested_devices is None
+        ):
+            return ()
+        self._resolved_devices = devices
+        return devices
+
     @staticmethod
     def _synchronize(
         synchronize: SynchronizeTarget,
+        devices: tuple[int, ...],
         warnings: list[str],
     ) -> None:
         if isinstance(synchronize, bool) and not synchronize:
@@ -106,11 +154,19 @@ class _MemoryCollector:
             )
             return
         if isinstance(synchronize, torch.cuda.Stream):
+            stream_device = normalize_device_index(synchronize.device.index)
+            if stream_device not in devices:
+                raise ValueError("synchronize stream is not on a selected device")
             synchronize.synchronize()
-        elif isinstance(synchronize, torch.device):
-            torch.cuda.synchronize(synchronize)
-        else:
-            torch.cuda.synchronize()
+            return
+        if isinstance(synchronize, torch.device):
+            device_index = _device_index(synchronize)
+            if device_index not in devices:
+                raise ValueError("synchronize device is not selected by this collector")
+            torch.cuda.synchronize(device_index)
+            return
+        for device_index in devices:
+            torch.cuda.synchronize(device_index)
 
     @staticmethod
     def _capture_torch_snapshot(
@@ -150,7 +206,35 @@ class _MemoryCollector:
                     )
 
 
-def _snapshot_envelope(snapshot: AllocatorSnapshotData) -> AllocatorSnapshotData:
+def _normalize_device_selector(
+    devices: DeviceSelector,
+) -> tuple[int, ...] | Literal["all"] | None:
+    if devices == "all":
+        return "all"
+    if devices is None:
+        return None
+    if isinstance(devices, Sequence) and not isinstance(devices, (str, bytes)):
+        normalized = tuple(_device_index(item) for item in devices)
+    else:
+        normalized = (_device_index(devices),)
+    if not normalized:
+        raise ValueError("devices must not be empty")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("devices must not contain duplicates")
+    return normalized
+
+
+def _device_index(device: DeviceLike) -> int:
+    if type(device) is int:
+        return normalize_device_index(device)
+    resolved = torch.device(device)
+    if resolved.type != "cuda":
+        raise ValueError("memory debug devices must identify CUDA devices")
+    index = torch.cuda.current_device() if resolved.index is None else resolved.index
+    return normalize_device_index(index)
+
+
+def _snapshot_envelope(snapshot: AllocatorSnapshotData) -> dict[str, object]:
     if isinstance(snapshot, Mapping):
         envelope = dict(snapshot)
     else:
@@ -159,6 +243,46 @@ def _snapshot_envelope(snapshot: AllocatorSnapshotData) -> AllocatorSnapshotData
     envelope.setdefault("external_annotations", [])
     envelope.setdefault("allocator_settings", {})
     return envelope
+
+
+def _snapshot_device_indices(snapshot: AllocatorSnapshotData) -> tuple[int, ...]:
+    if isinstance(snapshot, Mapping):
+        raw_segments = snapshot.get("segments", ())
+    else:
+        raw_segments = snapshot
+    devices: set[int] = set()
+    if isinstance(raw_segments, Sequence):
+        for segment in raw_segments:
+            if isinstance(segment, Mapping):
+                devices.add(normalize_device_index(segment.get("device", 0)))
+    if isinstance(snapshot, Mapping):
+        raw_traces = snapshot.get("device_traces", ())
+        if isinstance(raw_traces, Sequence):
+            devices.update(range(len(raw_traces)))
+    return tuple(sorted(devices))
+
+
+def _filter_snapshot_devices(
+    snapshot: Mapping[str, object], devices: tuple[int, ...]
+) -> dict[str, object]:
+    selected = set(devices)
+    filtered = dict(snapshot)
+    raw_segments = snapshot.get("segments", ())
+    if not isinstance(raw_segments, Sequence):
+        raise TypeError("allocator snapshot segments must be a sequence")
+    filtered["segments"] = [
+        segment
+        for segment in raw_segments
+        if isinstance(segment, Mapping)
+        and normalize_device_index(segment.get("device", 0)) in selected
+    ]
+    raw_traces = snapshot.get("device_traces", ())
+    if not isinstance(raw_traces, Sequence):
+        raise TypeError("allocator snapshot device_traces must be a sequence")
+    filtered["device_traces"] = [
+        trace if index in selected else [] for index, trace in enumerate(raw_traces)
+    ]
+    return filtered
 
 
 def _current_stream_capture_state() -> bool | None:

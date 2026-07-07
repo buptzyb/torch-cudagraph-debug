@@ -32,6 +32,7 @@ class _CollectedTensor:
     invocation_index: int
     tensor: torch.Tensor
     shape: tuple[int, ...]
+    stride: tuple[int, ...]
     dtype: torch.dtype
     source_device: str
 
@@ -154,6 +155,7 @@ class _TensorCollector:
         self.non_contiguous = validate_non_contiguous_policy(non_contiguous)
         self.when = validate_probe_when(when)
         self._closed = False
+        self._source_strides: dict[tuple[str, int], tuple[int, ...]] = {}
         self._actions = tuple(actions)
         self._enabled_actions = tuple(
             action for action in self._actions if bool(action.enabled)
@@ -207,6 +209,7 @@ class _TensorCollector:
         self._ensure_open()
         if self._handle is None:
             return tensor
+        self._source_strides[(name, invocation_index)] = tuple(tensor.stride())
         return self._handle.enqueue(tensor, name, invocation_index)
 
     def collect(
@@ -288,6 +291,7 @@ class _TensorCollector:
                     invocation_index=invocation_index,
                     tensor=tensor,
                     shape=shape,
+                    stride=self._source_strides[(name, invocation_index)],
                     dtype=tensor.dtype,
                     source_device=source_device,
                 )

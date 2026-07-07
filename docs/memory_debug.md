@@ -35,6 +35,9 @@ Import the supported public memory API from `memory_debug`:
 ```python
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
+    MemoryDisplayOptions,
+    MemoryLifetimeSelection,
+    MemoryPoolKey,
     MemoryLifetimeOptions,
     MemoryProbe,
     MemoryRecorder,
@@ -47,10 +50,12 @@ from torch_cudagraph_debug.memory_debug import (
 )
 ```
 
-Both workflows collect `torch.cuda.memory._snapshot()`. They discover every pool
-present in the snapshot; users do not pass pool handles. `pool[0,0]` is the
-default allocator pool, and other `segment_pool_id` values are private pools
-such as CUDA Graph pools.
+Both workflows collect `torch.cuda.memory._snapshot()` and discover every pool
+present on selected devices; users do not pass pool handles. `devices=None`
+binds the current device lazily, an explicit device or sequence selects known
+devices, and `devices="all"` selects every visible device. Within each device,
+`pool[0,0]` is the default pool and other IDs represent private pools such as
+CUDA Graph pools.
 
 The control-flow and containment relationships are distinct:
 
@@ -60,19 +65,30 @@ MemoryRecorder --produces--> MemoryRun --contains--> MemoryPoint
 MemoryProbeSnapshot and MemoryPoint --contain--> MemoryObservation
 ```
 
-Each snapshot or point contains one ordered observation for every `(pool_id,
+Each snapshot or point contains one ordered observation for every
+`(device_index, pool_id, stream)` key. `pool_stats` aggregates by
+`MemoryPoolKey(device_index, pool_id)`, and `allocator_scope_stats` provides
+`all`, `default`, and `private` totals across selected devices. Ownership and
+workflow metadata live on the snapshot or point, not on an observation.
 stream)` pair. Its `pool_stats` and `allocator_scope_stats` are derived views.
 Ownership and workflow metadata live on the snapshot or point, not on an
 observation.
 
 ## Interpreting CUDA Graph Private-Pool Inactive Memory
 
-`MemoryStats` separates allocator capacity from current block use:
+`MemoryStats` separates four allocator layers:
 
-- `reserved_bytes` is the total size of CUDA segments retained by the pool.
-- `active_bytes` is memory allocated or still awaiting a stream-safe free.
-- `inactive_bytes` is derived as `reserved_bytes - active_bytes` and is
-  currently reusable under that pool's allocator rules.
+- `reserved_bytes` is segment capacity retained by the pool.
+- `active_bytes` is block space that is allocated or still awaiting a
+  stream-safe free.
+- `allocated_bytes` is active block space still owned by live allocations.
+- `requested_bytes` is the unrounded request size represented by active blocks.
+- `awaiting_free_bytes = active_bytes - allocated_bytes` is no longer owned by
+  live allocations but cannot yet be reused.
+- `inactive_bytes = reserved_bytes - active_bytes` is currently reusable under
+  that pool's allocator rules.
+- `internal_fragmentation_bytes = active_bytes - requested_bytes` is allocator
+  rounding inside active or awaiting-free blocks.
 
 For a CUDA Graph private pool, inactive does not mean that the memory is
 available to the default pool or has been returned to the CUDA driver. Capture
@@ -222,14 +238,19 @@ options = MemoryAttributionOptions(
     stacks=True,
     events=True,
     on_missing="warn",
-    stack_depth=2,
-    limit=20,
+    display=MemoryDisplayOptions(stack_depth=2, limit=20),
 )
 comparison = run.compare("start", "end", attribution=options)
 ```
 
 `on_missing="warn"` preserves state results and adds warnings.
 `on_missing="error"` raises `MemoryHistoryError`.
+
+Every comparison exposes `attribution_status`. `requested` distinguishes an
+analysis the caller asked for, `available` means some usable evidence exists,
+and `complete` means that evidence covers the full request. Snapshot-inferred
+lifetimes are available but incomplete; exact event ordering requires complete
+history.
 
 A block's `frames` are the allocation call stack for memory still active in a
 snapshot. Entries under `device_traces` are historical allocator events, and
@@ -259,11 +280,14 @@ The default timeline is manifest-only: it computes absolute state and deltas
 without decompressing raw snapshots, and `timeline.point_comparisons` is empty.
 Passing `MemoryAttributionOptions(stacks=True)` or `events=True` streams one raw
 snapshot per point and attaches attributed adjacent comparisons.
+The first point has `delta=None`; each later point is compared with its immediate
+predecessor. Pools that disappear remain visible with zero state and a negative
+delta.
 
 Every point and comparison also exposes allocator-wide `all`, `default`, and
 `private` totals. These totals include unmatched private pools, so a cross-run
 headline does not silently become a default-pool-only number. Pool and
-pool/stream rows remain available for detailed inspection.
+device/pool/stream rows remain available for detailed inspection.
 
 Allocation cohort lifetimes are an optional focused same-run analysis, not a
 replacement for those modes. To answer "what was live here, and when did it
@@ -271,12 +295,12 @@ go away?", anchor the analysis at the point of interest:
 
 ```python
 lifetimes = run.lifetimes(
-    "before_capture",
+    MemoryLifetimeSelection.active_at("before_capture"),
     through="after_replay",
     options=MemoryLifetimeOptions(
         events=True,
         on_missing="warn",
-        stack_depth=4,
+        display=MemoryDisplayOptions(stack_depth=4, limit=20),
     ),
 )
 print(lifetimes.to_text())
@@ -307,20 +331,21 @@ segment was returned to CUDA or that pool `reserved_bytes` decreased.
 
 Snapshot-only lifetime analysis still works, but it cannot distinguish an
 unobserved free-and-reallocate cycle that reuses the same address and shape.
-The report describes allocator blocks, not Python tensor names or object
+When event replay finds mismatches, warnings summarize each reason and device
+with the total count and up to three example addresses. The report describes
+allocator blocks, not Python tensor names or object ownership.
+
 Synchronizing the recorded stream completes the CUDA work, but the caching
 allocator may not emit `free_completed` until a later allocator operation polls
 its pending events. A snapshot taken before that poll can still legitimately
 show `active_awaiting_free`.
-
-ownership.
 
 To answer a different question, "what was allocated in this interval?", use
 the half-open `(start, end]` birth selection:
 
 ```python
 born = run.lifetimes(
-    born_between=("before_capture", "after_capture"),
+    MemoryLifetimeSelection.born_between("before_capture", "after_capture"),
     through="after_replay",
     options=MemoryLifetimeOptions(events=True),
 )
@@ -349,16 +374,16 @@ candidate = MemoryRun.load("candidate-rank0.tcgd-memory")
 end_gap = compare_points(
     baseline["forward_end"],
     candidate["capture_end"],
-    pool_mapping={(0, 1): (0, 4)},
+    pool_mapping={MemoryPoolKey(0, (0, 1)): MemoryPoolKey(0, (0, 4))},
     attribution=MemoryAttributionOptions(stacks=True),
 )
 ```
 
 Cross-run rules are intentionally conservative:
 
-- `(0,0)` matches `(0,0)` automatically.
-- Private pools remain reference-only/candidate-only even when their raw IDs happen to
-  be equal, unless `pool_mapping` explicitly pairs them.
+- Default pools on the same device match automatically.
+- Private pools remain reference-only/candidate-only even when raw IDs happen
+  to be equal, unless `pool_mapping` explicitly pairs `MemoryPoolKey` objects.
 - Stream IDs are never matched across runs. Pool/stream observations remain
   reference-only or candidate-only.
 - Address lifecycle and allocator events are unavailable across runs.
@@ -370,7 +395,7 @@ change:
 phase = compare_phases(
     baseline.between("forward_start", "forward_end"),
     candidate.between("capture_start", "capture_end"),
-    pool_mapping={(0, 1): (0, 4)},
+    pool_mapping={MemoryPoolKey(0, (0, 1)): MemoryPoolKey(0, (0, 4))},
 )
 print(phase.to_text())
 ```
@@ -383,6 +408,11 @@ end_gap = start_gap + candidate_change - baseline_change
 
 The same four-point equation is emitted for `all`, `default`, and `private`
 totals independently of private-pool ID matching.
+
+A private-pool mapping is validated against the union of each run's phase
+endpoints. A pool may therefore be absent at phase start or end; the missing
+endpoint contributes zero state, preserving phases that create or destroy the
+pool.
 
 ## Multi-Rank Groups
 
@@ -410,17 +440,22 @@ group_phase = compare_run_group_phases(
     baseline_end="forward_end",
     candidate_start="capture_start",
     candidate_end="capture_end",
+    pool_mappings={
+        0: {MemoryPoolKey(0, (0, 1)): MemoryPoolKey(0, (0, 4))},
+    },
 )
 group_phase.write("reports/group-phase")
 ```
 
-Groups require unique ranks, matching point-label sequences, and consistent
-non-null group IDs/world sizes. Missing ranks and provenance mismatches are
-warnings. Reports preserve per-rank values and show min, max, spread, and the
-worst rank; GPU memory is deliberately not summed across ranks. Group loading
-defaults to `cache_snapshots=False` so decompressed payloads do not accumulate
-across ranks and points. Pass `cache_snapshots=True` only when repeated raw
-snapshot access is worth the additional host memory.
+Groups require unique ranks and matching point-label sequences. Conflicting
+non-null group IDs or world sizes are errors; missing identity, missing ranks,
+incomplete bundles, provenance differences, and metadata differences are
+warnings. `group.missing_ranks` and `group.complete` expose rank coverage
+programmatically. Reports preserve per-rank values and show min, max, spread,
+and the worst rank; GPU memory is deliberately not summed across ranks.
+`pool_mappings` is keyed by rank because private-pool identity is rank-local.
+Group loading defaults to `cache_snapshots=False`; use `True` only when repeated
+raw snapshot access is worth the additional host memory.
 
 ## Reports And Bundles
 
@@ -430,12 +465,13 @@ provide:
 - `to_text(include_unchanged=True, limit=None, stack_depth=None)`
 - `to_dict()`
 - `to_html(include_unchanged=True, limit=None, stack_depth=None)`
-- `write(output_dir, include_unchanged=True, limit=None, stack_depth=None)`
+- `write(output_dir, include_unchanged=True, limit=None, stack_depth=None, overwrite=False)`
 
 Lifetime analyses have no unchanged-row filter and provide `to_text(limit=None,
 stack_depth=None)`, `to_dict()`, `to_html(limit=None, stack_depth=None)`, and
-`write(output_dir, limit=None, stack_depth=None)`. Run-group summaries provide
-the corresponding parameter-free render methods.
+`write(output_dir, limit=None, stack_depth=None, overwrite=False)`. Run-group
+summaries provide the corresponding parameter-free render methods plus
+`overwrite` on `write()`.
 
 Allocation-stack and allocator-event identity always uses complete
 normalized stacks. Public attribution models expose those stacks as
@@ -449,25 +485,31 @@ Limited HTML tables state exactly how many rows or cohorts are shown. Invalid
 directory.
 
 `write()` always creates `report.txt`, `report.json`, and `report.html`.
+Report files are written atomically. `write()` rejects a nonempty directory
+unless `overwrite=True`.
+Overwrite removes known tcgd report artifacts from the prior report while
+preserving unrelated files in the directory.
+
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
 `observations.csv`. Attribution can add `allocation_stack_comparisons.csv` or
 `events.csv`; phase reports add `pool_decomposition.csv` and
 `allocator_scope_decomposition.csv`. Lifetime reports add `cohorts.csv`,
 `cohort_points.csv`, `size_histograms.csv`, `size_outcomes.csv`, and, when
 present, `birth_stacks.csv`, `free_request_stacks.csv`, and
-`free_completion_stacks.csv`. Group reports add either `rank_point_entries.csv`
-and `point_aggregates.csv`, or `rank_decomposition.csv` and
-`phase_aggregates.csv`. Attributed group-phase reports additionally export full
-rank/component `allocation_stack_comparisons.csv` and `events.csv`.
-Timeline HTML includes allocated, reserved, active, requested, and optional
-cohort charts.
+`free_completion_stacks.csv`. Group reports add either `rank_points.csv`
+and `point_aggregates.csv`, or `rank_decomposition.csv`,
+`rank_pool_decomposition.csv`, and `phase_aggregates.csv`. Attributed
+group-phase reports additionally export full rank/component
+`allocation_stack_comparisons.csv` and `events.csv`. Timeline HTML includes
+allocated, reserved, active, requested, and optional cohort charts.
 `include_unchanged=False` filters zero-change rows from text, HTML, and CSV;
 JSON always retains the complete result.
 
 Bundles use the `torch-cudagraph-debug/memory-run` schema: one
 `manifest.json` plus one gzip JSON snapshot per point. Manifest, point, and
-observation fields are canonical; derived inactive/fragmentation values are not
-stored. Loading a run reads only the manifest and compact summaries;
+observation fields are canonical; derived awaiting-free, inactive, and
+fragmentation values are not stored. Loading a run reads only the manifest and
+compact summaries.
 `point.raw_snapshot()` loads and caches the full snapshot lazily when the run
 was loaded with `cache_snapshots=True`, the `MemoryRun.load()` default. The
 CLI and `MemoryRunGroup.load()` use bounded-memory loading, retaining only
@@ -498,19 +540,21 @@ tcgd-memory compare-points rank0.tcgd-memory \
 
 tcgd-memory compare-points baseline.tcgd-memory candidate.tcgd-memory \
   --reference-point forward_end --candidate-point capture_end \
-  --pool-map 0,1=0,4 --output reports/end-gap
+  --pool-map 0:0,1=0:0,4 --output reports/end-gap
 
 tcgd-memory compare-phases baseline.tcgd-memory candidate.tcgd-memory \
   --baseline-start forward_start --baseline-end forward_end \
   --candidate-start capture_start --candidate-end capture_end \
-  --pool-map 0,1=0,4 --output reports/phase
+  --pool-map 0:0,1=0:0,4 --output reports/phase
 
-tcgd-memory summarize-run-group baseline \
+tcgd-memory group-summary baseline \
   --output reports/baseline-group
 
 tcgd-memory compare-run-group-phases baseline candidate \
   --baseline-start forward_start --baseline-end forward_end \
   --candidate-start capture_start --candidate-end capture_end \
+  --pool-map 0@0:0,1=0:0,4 \
+  --pool-map 1@0:0,1=0:0,4 \
   --output reports/group-phase
 ```
 
@@ -518,15 +562,14 @@ Omitting the candidate bundle from `compare-points` compares two ordered points
 in the reference run; `--pool-map` is valid only across independent runs.
 
 `timeline`, `compare-points`, `compare-phases`, and
-`compare-run-group-phases` accept the common attribution and presentation
-options: `--stacks`, `--events`, `--lifetimes`, `--on-missing`,
-`--stack-depth`, `--limit`, and `--only-changed`. `allocation-lifetimes`
-accepts the same options, groups cohorts by allocation stack, and enables
-allocator events by default; pass `--no-events` for snapshot-only inference.
-`summary` accepts one bundle and writes to standard output.
-`summarize-run-group` accepts one group directory plus `--output`, without
-attribution options. Cross-run event and lifetime requests are rejected because
-allocator addresses and histories have no cross-run identity.
+`compare-run-group-phases` accept `--stacks`, `--events`, `--lifetimes`,
+`--on-missing`, `--stack-depth`, `--limit`, and `--only-changed`.
+`allocation-lifetimes` instead accepts `--no-events`, `--on-missing`,
+`--stack-depth`, and `--limit`; event evidence is enabled by default.
+`summary` writes to standard output. All report commands print text and write
+files only when `--output` is supplied. Reusing a nonempty output directory
+requires `--overwrite`. Cross-run event and lifetime requests are rejected
+because allocator addresses and histories have no cross-run identity.
 
 Low-level snapshot parsers and attribution helpers are available under
 `torch_cudagraph_debug.memory_debug.advanced`. They are experimental and may

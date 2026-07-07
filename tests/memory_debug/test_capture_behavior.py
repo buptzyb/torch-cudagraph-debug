@@ -3,8 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from torch_cudagraph_debug.memory_debug import MemoryRecorder
-from torch_cudagraph_debug.memory_debug import recording
+from torch_cudagraph_debug.memory_debug import MemoryPoolKey, MemoryRecorder, recording
 
 from ._helpers import segment, snapshot
 
@@ -14,6 +13,7 @@ def test_mark_inside_capture_skips_synchronize(
 ) -> None:
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
 
     def fail_sync() -> None:
         raise AssertionError("mark() must not synchronize during capture")
@@ -38,7 +38,7 @@ def test_mark_inside_capture_skips_synchronize(
     point = MemoryRecorder().record_point("inside_capture")
 
     assert point.label == "inside_capture"
-    assert point.pool_stats[(0, 0)].active_bytes == 10
+    assert point.pool_stats[MemoryPoolKey(0, (0, 0))].active_bytes == 10
 
 
 def test_mark_outside_capture_synchronizes_by_default(
@@ -47,7 +47,10 @@ def test_mark_outside_capture_synchronizes_by_default(
     calls: list[str] = []
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda: calls.append("sync"))
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda, "synchronize", lambda device=None: calls.append("sync")
+    )
     monkeypatch.setattr(
         torch.cuda.memory,
         "_snapshot",
@@ -66,7 +69,9 @@ def test_device_provenance_is_deferred_until_after_real_snapshot(
 ) -> None:
     calls: list[str] = []
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device=None: None)
     monkeypatch.setattr(
         torch.cuda.memory,
         "_snapshot",
@@ -77,8 +82,8 @@ def test_device_provenance_is_deferred_until_after_real_snapshot(
     monkeypatch.setattr(
         recording,
         "initialized_device_provenance",
-        lambda: (
-            calls.append("device")
+        lambda device: (
+            calls.append(str(device))
             or {
                 "index": 0,
                 "name": "Test GPU",
@@ -94,5 +99,5 @@ def test_device_provenance_is_deferred_until_after_real_snapshot(
     recorder.record_point("point")
     run = recorder.finish()
 
-    assert calls == ["device"]
-    assert run.provenance["device"]["name"] == "Test GPU"
+    assert calls == ["cuda:0"]
+    assert run.provenance["devices"][0]["name"] == "Test GPU"

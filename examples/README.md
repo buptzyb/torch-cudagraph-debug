@@ -34,14 +34,15 @@ output details.
 | Order | User question | Example | Primary API |
 |---:|---|---|---|
 | 1 | Does a complete eager run match a CUDA Graph run? | [Eager vs CUDA Graph](tensor_debug/recorder/eager_vs_cuda_graph.py) | `TensorRecorder`, `compare_points()`, `compare_runs()` |
-| 2 | How are forward activations and backward gradients persisted together? | [Forward and backward](tensor_debug/recorder/forward_backward.py) | `observe()`, `watch_grad()`, `snapshot_run()` |
+| 2 | How are forward activations and backward gradients persisted together? | [Forward and backward](tensor_debug/recorder/forward_backward.py) | `observe()`, `watch_grad()`, `preview()` |
 | 3 | On which replay did drift first appear? | [Replay series](tensor_debug/recorder/replay_series.py) | summary/full payloads, `compare_point_series()` |
+| 4 | Do eager and CUDA Graph values agree on every rank? | [Distributed run groups](tensor_debug/recorder/distributed_run_groups.py) | `TensorRunGroup`, `compare_run_groups()` |
 
 ### CLI Workflow
 
 | User question | Example | Commands covered |
 |---|---|---|
-| How are persisted tensor runs inspected in automation? | [CLI workflows](tensor_debug/cli/workflows.sh) | all four `tcgd-tensor` commands |
+| How are persisted tensor runs inspected in automation? | [CLI workflows](tensor_debug/cli/workflows.sh) | every `tcgd-tensor` command |
 
 ## Memory Debug
 
@@ -71,7 +72,7 @@ allocator history in a long-running process.
 
 | User question | Example | Commands covered |
 |---|---|---|
-| How are memory bundles analyzed from shell automation? | [CLI workflows](memory_debug/cli/workflows.sh) | all seven `tcgd-memory` commands |
+| How are memory bundles analyzed from shell automation? | [CLI workflows](memory_debug/cli/workflows.sh) | every `tcgd-memory` command |
 
 ## Integrations
 

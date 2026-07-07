@@ -25,6 +25,8 @@ struct RecordActionConfig {
 };
 
 struct ExpectedTensorConfig {
+    std::string observation_name;
+    uint64_t invocation_index = 0;
     std::vector<uint8_t> expected_bytes;
     std::vector<int64_t> expected_shape;
     at::ScalarType expected_dtype = at::kFloat;
@@ -32,6 +34,7 @@ struct ExpectedTensorConfig {
 };
 
 struct CheckActionConfig {
+    bool keyed = false;
     bool enabled = true;
     std::vector<ExpectedTensorConfig> expected;
     double rtol = 1e-5;

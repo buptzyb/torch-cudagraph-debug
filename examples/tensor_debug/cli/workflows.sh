@@ -20,12 +20,18 @@ mkdir -p "${OUTPUT_ROOT}"
 MATCHING="${OUTPUT_ROOT}/matching"
 SERIES="${OUTPUT_ROOT}/series"
 REPORTS="${OUTPUT_ROOT}/reports"
+EAGER_GROUP="${OUTPUT_ROOT}/eager-group"
+GRAPH_GROUP="${OUTPUT_ROOT}/cuda-graph-group"
 
 "${PYTHON_BIN}" "${RECORDER_DIR}/eager_vs_cuda_graph.py" \
     --output-dir "${MATCHING}" --record-only
 "${PYTHON_BIN}" "${RECORDER_DIR}/replay_series.py" \
     --output-dir "${SERIES}" --record-only
 mkdir -p "${REPORTS}"
+mkdir -p "${EAGER_GROUP}" "${GRAPH_GROUP}"
+cp -a "${MATCHING}/eager.tcgd-tensor" "${EAGER_GROUP}/rank-00000.tcgd-tensor"
+cp -a "${MATCHING}/cuda-graph.tcgd-tensor" \
+    "${GRAPH_GROUP}/rank-00000.tcgd-tensor"
 
 "${TCGD_TENSOR_BIN}" summary \
     "${MATCHING}/eager.tcgd-tensor" > "${REPORTS}/summary.txt"
@@ -37,7 +43,12 @@ mkdir -p "${REPORTS}"
 "${TCGD_TENSOR_BIN}" compare-runs \
     "${MATCHING}/eager.tcgd-tensor" \
     "${MATCHING}/cuda-graph.tcgd-tensor" \
+    --point-map forward=forward \
     --output "${REPORTS}/compare-runs"
+"${TCGD_TENSOR_BIN}" group-summary "${EAGER_GROUP}" \
+    --output "${REPORTS}/group-summary"
+"${TCGD_TENSOR_BIN}" compare-run-groups "${EAGER_GROUP}" "${GRAPH_GROUP}" \
+    --output "${REPORTS}/compare-run-groups"
 
 if "${TCGD_TENSOR_BIN}" compare-point-series \
     "${SERIES}/eager-summary.tcgd-tensor" \
@@ -54,6 +65,6 @@ else
     fi
 fi
 
-test "$(find "${REPORTS}" -name report.json | wc -l)" -eq 3
+test "$(find "${REPORTS}" -name report.json | wc -l)" -eq 5
 printf 'reports: %s\n' "$(cd -- "${REPORTS}" && pwd)"
 

@@ -10,11 +10,9 @@ from types import MappingProxyType
 
 import torch
 
-
+from ._identity import TensorObservationKey, validate_observation_name
 from .recording import (
     TensorObservation,
-    TensorObservationKey,
-    _validate_observation_name,
     _validate_observation_sequence,
 )
 
@@ -59,6 +57,7 @@ class TensorProbeSnapshot:
 
     probe_id: str
     probe_name: str
+    snapshot_index: int
     replay_index: int
     timestamp: float
     observations: tuple[TensorObservation, ...]
@@ -68,6 +67,8 @@ class TensorProbeSnapshot:
             raise ValueError("probe_id must be non-empty")
         if not self.probe_name:
             raise ValueError("probe_name must be non-empty")
+        if type(self.snapshot_index) is not int or self.snapshot_index < 0:
+            raise ValueError("snapshot_index must be a non-negative integer")
         if type(self.replay_index) is not int or self.replay_index < 0:
             raise ValueError("replay_index must be a non-negative integer")
         if (
@@ -88,7 +89,7 @@ class TensorProbeSnapshot:
         invocation_index: int = 0,
     ) -> TensorObservation:
         resolved_name = (
-            self.probe_name if name is None else _validate_observation_name(name)
+            self.probe_name if name is None else validate_observation_name(name)
         )
         key = TensorObservationKey(resolved_name, invocation_index)
         try:
@@ -110,6 +111,7 @@ class TensorProbeSnapshot:
         return {
             "probe_id": self.probe_id,
             "probe_name": self.probe_name,
+            "snapshot_index": self.snapshot_index,
             "replay_index": self.replay_index,
             "timestamp": self.timestamp,
             "observation_count": len(self.observations),

@@ -144,7 +144,10 @@ def main() -> None:
 
             assert baseline.ranks == tuple(range(world_size))
             assert candidate.ranks == tuple(range(world_size))
-            assert all(row["identity_holds"] for row in phase.rank_decomposition)
+            assert all(
+                item.decomposition.components.identity_holds
+                for item in phase.rank_decomposition
+            )
             print(baseline_summary.to_text())
             print()
             print(phase.to_text(include_unchanged=False))

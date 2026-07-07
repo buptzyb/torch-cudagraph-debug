@@ -3,12 +3,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from ._run_helpers import make_probe_snapshot
-from ._run_helpers import make_tensor_run
 from torch_cudagraph_debug.tensor_debug import TensorProbeSnapshot
 from torch_cudagraph_debug.tensor_debug.postprocess import (
     export_snapshots_to_tensorboard,
 )
+
+from ._run_helpers import make_probe_snapshot, make_tensor_run
 
 
 class FakeWriter:
@@ -119,6 +119,7 @@ def test_distinct_observation_names_do_not_get_invocation_zero_suffix() -> None:
     snapshot = TensorProbeSnapshot(
         probe_id="probe",
         probe_name="model",
+        snapshot_index=0,
         replay_index=1,
         timestamp=0.0,
         observations=run["point"].observations,

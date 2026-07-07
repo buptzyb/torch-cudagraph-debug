@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -38,7 +38,19 @@ from torch_cudagraph_debug._validation import (
     strict_json_loads,
     validate_group_identity,
 )
+from torch_cudagraph_debug.types import (
+    FrozenJSONValue,
+    _freeze_json,
+    _thaw_json,
+)
 
+from ._collector import (
+    _EagerTensorCollector,
+    _TensorCollector,
+    synchronize_tensor_results,
+    validate_synchronize_target,
+)
+from ._identity import TensorObservationKey, validate_observation_name
 from .actions import NonContiguousPolicy, RecordAction, validate_non_contiguous_policy
 from .errors import (
     TensorBundleError,
@@ -46,14 +58,12 @@ from .errors import (
     TensorOwnershipError,
     TensorPayloadUnavailableError,
 )
-from ._collector import (
-    _EagerTensorCollector,
-    _TensorCollector,
-    synchronize_tensor_results,
-    validate_synchronize_target,
-)
+
+if TYPE_CHECKING:
+    from .comparison import TensorComparisonOptions, TensorPointComparison
 
 BUNDLE_SCHEMA = "torch-cudagraph-debug/tensor-run"
+BUNDLE_FORMAT_VERSION = 1
 ExecutionMode = Literal["eager", "cuda_graph"]
 PayloadKind = Literal["full", "summary"]
 SynchronizeTarget = bool | torch.cuda.Stream | torch.device
@@ -75,6 +85,7 @@ _NAME_DTYPES = {name: dtype for dtype, name in _DTYPE_NAMES.items()}
 _MANIFEST_FIELDS = frozenset(
     {
         "schema",
+        "format_version",
         "run_id",
         "name",
         "execution",
@@ -142,27 +153,6 @@ def validate_payload_kind(value: str) -> PayloadKind:
     if value not in {"full", "summary"}:
         raise ValueError('payload must be either "full" or "summary"')
     return value  # type: ignore[return-value]
-
-
-def _validate_observation_name(value: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError("observation name must be a string")
-    if not value:
-        raise ValueError("observation name must be non-empty")
-    return value
-
-
-@dataclass(frozen=True)
-class TensorObservationKey:
-    """Stable key for one tensor observation within a point."""
-
-    name: str
-    invocation_index: int
-
-    def __post_init__(self) -> None:
-        _validate_observation_name(self.name)
-        if type(self.invocation_index) is not int or self.invocation_index < 0:
-            raise ValueError("invocation_index must be a non-negative integer")
 
 
 @dataclass(frozen=True)
@@ -278,9 +268,13 @@ class TensorObservation:
     _cache_tensors: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "shape", tuple(self.shape))
+        object.__setattr__(self, "stride", tuple(self.stride))
+        if not isinstance(self.summary, TensorValueSummary):
+            raise TypeError("tensor observation summary must be TensorValueSummary")
         if type(self.order) is not int or self.order < 0:
             raise ValueError("observation order must be a non-negative integer")
-        _validate_observation_name(self.name)
+        validate_observation_name(self.name)
         if type(self.invocation_index) is not int or self.invocation_index < 0:
             raise ValueError("invocation_index must be a non-negative integer")
         if any(type(value) is not int or value < 0 for value in self.shape):
@@ -402,11 +396,12 @@ class TensorPoint:
     index: int
     label: str
     timestamp: float
-    metadata: Mapping[str, Any]
+    metadata: Mapping[str, FrozenJSONValue]
     replay_index: int | None
     observations: tuple[TensorObservation, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _freeze_json(dict(self.metadata)))
         if not self.run_id:
             raise ValueError("run_id must be non-empty")
         if type(self.index) is not int or self.index < 0:
@@ -448,7 +443,7 @@ class TensorPoint:
             "index": self.index,
             "label": self.label,
             "timestamp": self.timestamp,
-            "metadata": dict(self.metadata),
+            "metadata": _thaw_json(self.metadata),
             "replay_index": self.replay_index,
             "observation_count": len(self.observations),
         }
@@ -469,13 +464,21 @@ class TensorRun:
     points: tuple[TensorPoint, ...]
     group_id: str | None = None
     world_size: int | None = None
-    provenance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
-    run_metadata: Mapping[str, Any] = field(
+    provenance: Mapping[str, FrozenJSONValue] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    run_metadata: Mapping[str, FrozenJSONValue] = field(
         default_factory=lambda: MappingProxyType({})
     )
     bundle_dir: Path | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "provenance", _freeze_json(dict(self.provenance)))
+        object.__setattr__(
+            self,
+            "run_metadata",
+            _freeze_json(dict(self.run_metadata)),
+        )
         if not self.run_id or not self.name:
             raise ValueError("run_id and name must be non-empty")
         validate_execution_mode(self.execution)
@@ -525,8 +528,8 @@ class TensorRun:
             "finished_at": self.finished_at,
             "complete": self.complete,
             "default_payload": self.default_payload,
-            "provenance": dict(self.provenance),
-            "run_metadata": dict(self.run_metadata),
+            "provenance": _thaw_json(self.provenance),
+            "run_metadata": _thaw_json(self.run_metadata),
         }
 
     def point(self, ref: str | int | TensorPoint) -> TensorPoint:
@@ -563,8 +566,8 @@ class TensorRun:
         reference: str | int | TensorPoint,
         candidate: str | int | TensorPoint,
         *,
-        options: Any = None,
-    ) -> Any:
+        options: TensorComparisonOptions | None = None,
+    ) -> TensorPointComparison:
         from .comparison import compare_points
 
         return compare_points(
@@ -605,6 +608,11 @@ class TensorRun:
             "tensor bundle manifest",
             error_type=TensorBundleError,
         )
+        if manifest.get("format_version") != BUNDLE_FORMAT_VERSION:
+            raise TensorBundleError(
+                "unsupported tensor bundle format_version "
+                f"{manifest.get('format_version')!r}"
+            )
 
         run_id = require_nonempty_string(
             manifest["run_id"], "run_id", error_type=TensorBundleError
@@ -807,6 +815,7 @@ class TensorRecorder:
         device: DeviceLike | None = None,
         payload: PayloadKind = "full",
         non_contiguous: NonContiguousPolicy = "error",
+        strict_scope: bool = False,
         synchronize: SynchronizeTarget = True,
         rank: int | None = None,
         group_id: str | None = None,
@@ -820,6 +829,9 @@ class TensorRecorder:
         self.bundle_dir = Path(bundle_dir).resolve() if bundle_dir is not None else None
         self.default_payload = validate_payload_kind(payload)
         self.non_contiguous = validate_non_contiguous_policy(non_contiguous)
+        if type(strict_scope) is not bool:
+            raise TypeError("strict_scope must be a boolean")
+        self.strict_scope = strict_scope
         validate_synchronize_target(synchronize)
         self.synchronize = synchronize
         self.rank, self.world_size = resolve_distributed_identity(rank, world_size)
@@ -835,7 +847,7 @@ class TensorRecorder:
         )
         assert isinstance(metadata, dict)
         assert isinstance(provenance, dict)
-        self.run_metadata = MappingProxyType(metadata)
+        self.run_metadata = _freeze_json(metadata)
         self._provenance: dict[str, Any] = provenance
         self._run_id = uuid.uuid4().hex
         self._created_at = time.time()
@@ -876,15 +888,15 @@ class TensorRecorder:
 
     def observe(
         self,
-        name: str,
         tensor: torch.Tensor,
         *,
+        name: str,
         payload: PayloadKind | None = None,
     ) -> torch.Tensor:
         """Return tensor unchanged while recording one named observation."""
 
         self._ensure_open()
-        name = _validate_observation_name(name)
+        name = validate_observation_name(name)
         selected_payload = (
             self.default_payload if payload is None else validate_payload_kind(payload)
         )
@@ -893,6 +905,10 @@ class TensorRecorder:
 
         if self.execution == "eager":
             if self._active_point is None:
+                if self.strict_scope:
+                    raise TensorDebugError(
+                        "eager observe() requires an active record_point() context"
+                    )
                 return tensor
             source = self._validate_tensor(tensor)
             invocation_index = self._next_eager_invocation(name)
@@ -916,8 +932,13 @@ class TensorRecorder:
             return tensor
 
         with torch.cuda.device(tensor.device):
-            if not torch.cuda.is_current_stream_capturing():
-                return tensor
+            is_capturing = torch.cuda.is_current_stream_capturing()
+        if not is_capturing:
+            if self.strict_scope:
+                raise TensorDebugError(
+                    "cuda_graph observe() requires an active CUDA graph capture"
+                )
+            return tensor
         self._validate_tensor(tensor)
         assert self._collector is not None
         invocation_index = self._capture_invocation_counts.get(name, 0)
@@ -943,16 +964,16 @@ class TensorRecorder:
 
     def watch_grad(
         self,
-        name: str,
         tensor: torch.Tensor,
         *,
+        name: str,
         payload: PayloadKind | None = None,
         strict: bool = False,
     ) -> RemovableHandle | None:
         """Register an autograd hook that records a named gradient observation."""
 
         self._ensure_open()
-        name = _validate_observation_name(name)
+        name = validate_observation_name(name)
         if not tensor.requires_grad:
             if strict:
                 raise RuntimeError(
@@ -963,7 +984,7 @@ class TensorRecorder:
         def hook(grad: torch.Tensor | None) -> torch.Tensor | None:
             if grad is None:
                 return None
-            self.observe(name, grad, payload=payload)
+            self.observe(grad, name=name, payload=payload)
             return grad
 
         return tensor.register_hook(hook)
@@ -1017,7 +1038,9 @@ class TensorRecorder:
             if self._active_point is active:
                 self._active_point = None
 
-    def snapshot_run(self) -> TensorRun:
+    def preview(self) -> TensorRun:
+        """Return an immutable nonterminal view of collected points."""
+
         if self._result is not None:
             return self._result
         return self._build_run(complete=False)
@@ -1062,17 +1085,18 @@ class TensorRecorder:
     def close(
         self,
         *,
-        synchronize: SynchronizeTarget = True,
+        synchronize: SynchronizeTarget | None = None,
     ) -> None:
         """Release native resources after the captured graph can no longer replay."""
 
         if self._closed:
             return
-        validate_synchronize_target(synchronize)
+        selected = self.synchronize if synchronize is None else synchronize
+        validate_synchronize_target(selected)
         if self._active_point is not None:
             raise TensorDebugError("cannot close while a tensor point is active")
         if self._collector is not None:
-            self._collector.close(synchronize=synchronize)
+            self._collector.close(synchronize=selected)
             self._collector = None
         self._closed = True
 
@@ -1252,7 +1276,7 @@ class TensorRecorder:
         for expected_order, item in enumerate(pending):
             if item.order != expected_order:
                 raise TensorDebugError("tensor observation order must be contiguous")
-            key = (item.name, item.invocation_index)
+            key = TensorObservationKey(item.name, item.invocation_index)
             if key in seen:
                 raise TensorDebugError(
                     f"duplicate tensor observation {item.name!r}"
@@ -1342,6 +1366,7 @@ class TensorRecorder:
             return
         payload = {
             "schema": BUNDLE_SCHEMA,
+            "format_version": BUNDLE_FORMAT_VERSION,
             "run_id": self._run_id,
             "name": self.name,
             "execution": self.execution,
@@ -1353,7 +1378,7 @@ class TensorRecorder:
             "complete": complete,
             "default_payload": self.default_payload,
             "provenance": self._provenance,
-            "run_metadata": dict(self.run_metadata),
+            "run_metadata": _thaw_json(self.run_metadata),
             "points": [
                 _point_manifest(point, self.bundle_dir)
                 for point in (self._points if points is None else points)
@@ -1396,7 +1421,7 @@ class TensorRecorder:
             points=tuple(self._points),
             group_id=self.group_id,
             world_size=self.world_size,
-            provenance=MappingProxyType(dict(self._provenance)),
+            provenance=_freeze_json(dict(self._provenance)),
             run_metadata=self.run_metadata,
             bundle_dir=self.bundle_dir,
         )
@@ -1437,7 +1462,7 @@ def _point_manifest(point: TensorPoint, root: Path) -> dict[str, object]:
         "index": point.index,
         "label": point.label,
         "timestamp": point.timestamp,
-        "metadata": dict(point.metadata),
+        "metadata": _thaw_json(point.metadata),
         "replay_index": point.replay_index,
         "observations": observations,
     }

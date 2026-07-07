@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal, TypeAlias
+
+import numpy as np
+import torch
+
+from ._identity import TensorObservationKey
 
 NonContiguousPolicy = Literal["error", "copy"]
+TensorExpectedValue: TypeAlias = torch.Tensor | np.ndarray
+TensorExpected: TypeAlias = (
+    TensorExpectedValue
+    | Sequence[TensorExpectedValue]
+    | Mapping[TensorObservationKey, TensorExpectedValue]
+)
 
 
 def validate_non_contiguous_policy(policy: str) -> NonContiguousPolicy:
@@ -43,7 +54,7 @@ class PrintAction:
         if self.every <= 0:
             raise ValueError("every must be positive")
 
-    def _to_native(self) -> dict[str, Any]:
+    def _to_native(self) -> dict[str, object]:
         return {
             "kind": "print",
             "max_items": int(self.max_items),
@@ -63,7 +74,7 @@ class RecordAction:
         if type(self.enabled) is not bool:
             raise TypeError("enabled must be a boolean")
 
-    def _to_native(self) -> dict[str, Any]:
+    def _to_native(self) -> dict[str, object]:
         return {
             "kind": "record",
             "enabled": bool(self.enabled),
@@ -74,7 +85,7 @@ class RecordAction:
 class CheckAction:
     """Check replay snapshots with per-invocation CPU or NumPy ground truth."""
 
-    expected: Any
+    expected: TensorExpected
     rtol: float = 1e-5
     atol: float = 1e-8
     equal_nan: bool = False
@@ -98,39 +109,57 @@ class CheckAction:
         if self.atol < 0:
             raise ValueError("atol must be non-negative")
 
-    def _to_native(self) -> dict[str, Any]:
-        import numpy as np
-        import torch
+    def _to_native(self) -> dict[str, object]:
 
-        expected_items = self.expected
-        if isinstance(expected_items, (torch.Tensor, np.ndarray)):
-            expected_items = [expected_items]
-        elif isinstance(expected_items, (str, bytes)) or not isinstance(
-            expected_items, Sequence
-        ):
-            raise TypeError(
-                "CheckAction expected must be a CPU tensor, NumPy array, or a "
-                "sequence of them"
-            )
-        if len(expected_items) == 0:
-            raise ValueError("CheckAction expected sequence must be non-empty")
-
-        expected_tensors: list[torch.Tensor] = []
-        for index, expected in enumerate(expected_items):
+        def normalize(expected: object, label: str) -> torch.Tensor:
             if isinstance(expected, np.ndarray):
                 expected = torch.from_numpy(expected)
             if not isinstance(expected, torch.Tensor):
                 raise TypeError(
-                    f"CheckAction expected[{index}] must be a CPU torch.Tensor "
-                    "or NumPy array"
+                    f"CheckAction {label} must be a CPU torch.Tensor or NumPy array"
                 )
             if expected.device.type != "cpu":
-                raise ValueError(f"CheckAction expected[{index}] must be on CPU")
-            expected_tensors.append(expected.detach().contiguous())
+                raise ValueError(f"CheckAction {label} must be on CPU")
+            return expected.detach().contiguous()
+
+        native_expected: list[object]
+        if isinstance(self.expected, Mapping):
+            if not self.expected:
+                raise ValueError("CheckAction expected mapping must be non-empty")
+            native_expected = []
+            for key, expected in self.expected.items():
+                if not isinstance(key, TensorObservationKey):
+                    raise TypeError(
+                        "CheckAction expected mapping keys must be TensorObservationKey"
+                    )
+                native_expected.append(
+                    {
+                        "name": key.name,
+                        "invocation_index": key.invocation_index,
+                        "tensor": normalize(expected, key.label),
+                    }
+                )
+        else:
+            expected_items = self.expected
+            if isinstance(expected_items, (torch.Tensor, np.ndarray)):
+                expected_items = [expected_items]
+            elif isinstance(expected_items, (str, bytes)) or not isinstance(
+                expected_items, Sequence
+            ):
+                raise TypeError(
+                    "CheckAction expected must be a CPU tensor, NumPy array, "
+                    "a sequence, or a TensorObservationKey mapping"
+                )
+            if len(expected_items) == 0:
+                raise ValueError("CheckAction expected sequence must be non-empty")
+            native_expected = [
+                normalize(expected, f"expected[{index}]")
+                for index, expected in enumerate(expected_items)
+            ]
 
         return {
             "kind": "check",
-            "expected": expected_tensors,
+            "expected": native_expected,
             "rtol": float(self.rtol),
             "atol": float(self.atol),
             "equal_nan": bool(self.equal_nan),

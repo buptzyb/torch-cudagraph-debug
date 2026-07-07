@@ -17,13 +17,14 @@ from ._collector import (
     SynchronizeTarget,
     TensorAction,
     _TensorCollector,
+    validate_synchronize_target,
 )
+from ._identity import validate_observation_name
 from .actions import NonContiguousPolicy
 from .errors import TensorCheckError, TensorDebugError, TensorOwnershipError
 from .recording import (
     TensorObservation,
     _summarize_tensor,
-    _validate_observation_name,
 )
 from .snapshots import TensorCheckStatus, TensorProbeSnapshot
 
@@ -42,7 +43,10 @@ class TensorProbe:
         non_contiguous: NonContiguousPolicy = "error",
         when: ProbeWhen = "capture",
         device: DeviceLike | None = None,
-    ):
+        synchronize: SynchronizeTarget = True,
+    ) -> None:
+        validate_synchronize_target(synchronize)
+        self.synchronize = synchronize
         self.name = name
         self._probe_id = uuid.uuid4().hex
         self._closed = False
@@ -56,6 +60,7 @@ class TensorProbe:
         self.non_contiguous = self._collector.non_contiguous
         self.when = self._collector.when
         self._capture_invocation_counts: dict[str, int] = {}
+        self._next_snapshot_index = 0
 
     @property
     def replay_index(self) -> torch.Tensor | None:
@@ -71,7 +76,7 @@ class TensorProbe:
     ) -> torch.Tensor:
         """Return ``tensor`` unchanged while enqueueing one named observation."""
 
-        resolved_name = _validate_observation_name(self.name if name is None else name)
+        resolved_name = validate_observation_name(self.name if name is None else name)
         invocation_index = self._next_capture_invocation(
             tensor,
             resolved_name,
@@ -92,7 +97,7 @@ class TensorProbe:
         """Register an autograd hook that probes the tensor's backward gradient."""
 
         self._ensure_open()
-        resolved_name = _validate_observation_name(self.name if name is None else name)
+        resolved_name = validate_observation_name(self.name if name is None else name)
         if not tensor.requires_grad:
             if strict:
                 raise RuntimeError(
@@ -111,21 +116,17 @@ class TensorProbe:
     def snapshot(
         self,
         *,
-        synchronize: SynchronizeTarget = True,
+        synchronize: SynchronizeTarget | None = None,
     ) -> TensorProbeSnapshot:
-        """Return all recorded invocation values from the latest replay.
-
-        ``True`` synchronizes the probe device, a CUDA stream synchronizes only
-        that stream, a CUDA device explicitly synchronizes that device, and
-        ``False`` leaves ordering to the caller.
-        """
+        """Return all recorded invocation values from the latest query point."""
 
         self._ensure_open()
         if not self._collector.record_enabled:
             raise TensorDebugError(
                 "TensorProbe.snapshot() requires an enabled RecordAction"
             )
-        collected = self._collector.collect(synchronize=synchronize)
+        selected = self.synchronize if synchronize is None else synchronize
+        collected = self._collector.collect(synchronize=selected)
         if not collected:
             raise TensorDebugError("TensorProbe has no recorded invocation snapshot")
         replay_indices = {item.replay_index for item in collected}
@@ -143,7 +144,7 @@ class TensorProbe:
                     name=item.name,
                     invocation_index=item.invocation_index,
                     shape=item.shape,
-                    stride=tuple(tensor.stride()),
+                    stride=item.stride,
                     dtype=item.dtype,
                     source_device=item.source_device,
                     nbytes=len(raw),
@@ -154,13 +155,16 @@ class TensorProbe:
                     _cache_tensors=True,
                 )
             )
-        return TensorProbeSnapshot(
+        snapshot = TensorProbeSnapshot(
             probe_id=self._probe_id,
             probe_name=self.name,
+            snapshot_index=self._next_snapshot_index,
             replay_index=next(iter(replay_indices)),
             timestamp=time.time(),
             observations=tuple(observations),
         )
+        self._next_snapshot_index += 1
+        return snapshot
 
     def compare(
         self,
@@ -171,7 +175,6 @@ class TensorProbe:
     ) -> TensorSnapshotComparison:
         """Compare two chronologically ordered snapshots owned by this probe."""
 
-        self._ensure_open()
         for role, snapshot in (
             ("reference", reference),
             ("candidate", candidate),
@@ -180,7 +183,7 @@ class TensorProbe:
                 raise TensorOwnershipError(
                     f"{role} snapshot does not belong to TensorProbe({self.name!r})"
                 )
-        if candidate.replay_index <= reference.replay_index:
+        if candidate.snapshot_index <= reference.snapshot_index:
             raise ValueError("candidate snapshot must follow reference snapshot")
 
         from .comparison import compare_snapshots
@@ -190,12 +193,13 @@ class TensorProbe:
     def check_status(
         self,
         *,
-        synchronize: SynchronizeTarget = True,
+        synchronize: SynchronizeTarget | None = None,
     ) -> TensorCheckStatus:
         """Return the native CheckAction status after requested synchronization."""
 
         self._ensure_open()
-        native_check_status = self._collector.check_status(synchronize=synchronize)
+        selected = self.synchronize if synchronize is None else synchronize
+        native_check_status = self._collector.check_status(synchronize=selected)
         required = {
             "ok",
             "message",
@@ -243,9 +247,9 @@ class TensorProbe:
     def assert_check_ok(
         self,
         *,
-        synchronize: SynchronizeTarget = True,
+        synchronize: SynchronizeTarget | None = None,
     ) -> None:
-        """Synchronize once and raise if a callback reported a mismatch."""
+        """Synchronize as configured and raise for a callback mismatch."""
 
         check_status = self.check_status(synchronize=synchronize)
         if not check_status.ok:
@@ -254,16 +258,13 @@ class TensorProbe:
     def close(
         self,
         *,
-        synchronize: SynchronizeTarget = True,
+        synchronize: SynchronizeTarget | None = None,
     ) -> None:
-        """Synchronize as requested, then release native resources.
-
-        The caller must guarantee that no CUDA graph which captured this probe
-        can replay again.
-        """
+        """Synchronize as configured, then release native resources."""
 
         if not self._closed:
-            self._collector.close(synchronize=synchronize)
+            selected = self.synchronize if synchronize is None else synchronize
+            self._collector.close(synchronize=selected)
             self._closed = True
 
     def _next_capture_invocation(

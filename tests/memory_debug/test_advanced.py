@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 
 import pytest
+
+from torch_cudagraph_debug.memory_debug import MemoryPoolKey
 from torch_cudagraph_debug.memory_debug._pool_ranges import build_pool_range_index
 from torch_cudagraph_debug.memory_debug.advanced import (
     compare_allocation_stacks,
+    mutable_snapshot,
     normalize_trace_entries,
     pool_id_label,
     stack_key_from_frames,
@@ -14,7 +17,7 @@ from torch_cudagraph_debug.memory_debug.advanced import (
     summarize_snapshot,
 )
 
-from ._helpers import segment, snapshot
+from ._helpers import make_run, segment, snapshot
 
 
 def test_snapshot_summary_groups_every_observed_pool_and_stream() -> None:
@@ -62,7 +65,7 @@ def test_allocation_stacks_aggregate_streams_by_default() -> None:
         )
     )
 
-    summary = summarize_allocation_stacks(before, pool_id=(0, 3))
+    summary = summarize_allocation_stacks(before, pool=MemoryPoolKey(0, (0, 3)))
     deltas = compare_allocation_stacks(before, after)
 
     assert len(summary) == 1
@@ -279,3 +282,72 @@ def test_full_stack_identity_includes_fx_frame_metadata() -> None:
         )[0]["fx_node_name"]
         for row in event_rows
     } == {"left", "right"}
+
+
+def test_mutable_snapshot_returns_independent_editable_copy() -> None:
+    run = make_run(
+        [snapshot(segment(active=10))],
+        labels=("point",),
+    )
+    point = run["point"]
+
+    mutable = mutable_snapshot(point)
+    mutable["segments"][0]["total_size"] = 99
+
+    assert point.raw_snapshot()["segments"][0]["total_size"] == 10
+
+
+def test_summary_reports_expandable_segments_and_inactive_blocks() -> None:
+    expandable = segment(active=40, total=128, address=1000)
+    expandable["is_expandable"] = True
+    regular = segment(active=16, total=32, address=2000)
+
+    rows = summarize_snapshot(snapshot(expandable, regular))
+    stats = rows[next(iter(rows))]
+
+    assert stats.segment_count == 2
+    assert stats.block_count == 4
+    assert stats.inactive_block_count == 2
+    assert stats.expandable_segment_count == 1
+    assert stats.expandable_reserved_bytes == 128
+    assert stats.largest_inactive_block_bytes == 88
+
+
+def test_summary_separates_awaiting_free_from_inactive_memory() -> None:
+    value = segment(active=64, total=96)
+    value["allocated_size"] = 40
+    value["active_size"] = 64
+    value["requested_size"] = 52
+    value["blocks"] = [
+        {
+            "address": 1000,
+            "size": 40,
+            "requested_size": 32,
+            "state": "active_allocated",
+            "frames": [],
+        },
+        {
+            "address": 1040,
+            "size": 24,
+            "requested_size": 20,
+            "state": "active_awaiting_free",
+            "frames": [],
+        },
+        {
+            "address": 1064,
+            "size": 32,
+            "requested_size": 0,
+            "state": "inactive",
+            "frames": [],
+        },
+    ]
+
+    stats = next(iter(summarize_snapshot(snapshot(value)).values()))
+
+    assert stats.allocated_bytes == 40
+    assert stats.active_bytes == 64
+    assert stats.awaiting_free_bytes == 24
+    assert stats.inactive_bytes == 32
+    assert stats.requested_bytes == 52
+    assert stats.internal_fragmentation_bytes == 12
+    assert stats.to_dict()["awaiting_free_bytes"] == 24

@@ -12,6 +12,7 @@ and adapt only the points, tensors, or workload integration needed by the case.
 | Which replay first changed? | Probe or Recorder | `TensorProbe.compare()` or `compare_point_series()` | `examples/tensor_debug/probe/replay_comparison.py`, `examples/tensor_debug/recorder/replay_series.py` |
 | What gradient reached an activation or parameter? | Probe or Recorder | `watch_grad()` | `examples/tensor_debug/probe/gradients.py`, `examples/tensor_debug/recorder/forward_backward.py` |
 | Does a complete eager execution match CUDA Graph execution? | Recorder | `TensorRecorder`, `compare_points()`, `compare_runs()` | `examples/tensor_debug/recorder/eager_vs_cuda_graph.py` |
+| How do corresponding tensor ranks compare? | Recorder | `TensorRunGroup`, `compare_run_groups()` | `examples/tensor_debug/recorder/distributed_run_groups.py` |
 | How should persisted tensor bundles be inspected in automation? | CLI | `tcgd-tensor` | `examples/tensor_debug/cli/workflows.sh` |
 
 Use `RecordAction` as the default action. Add `PrintAction` or `CheckAction`
@@ -52,7 +53,7 @@ snapshot. Never require application code to pass private-pool handles.
 
 | Required result | Allocator history |
 |---|---|
-| Allocated, reserved, active, requested, pool, stream, fragmentation | Not required |
+| Allocated, reserved, active, requested, awaiting-free, inactive, pool, stream, fragmentation, expandable segments | Not required |
 | Live-allocation stack attribution | Required before allocations of interest |
 | Allocator event attribution | Required before events of interest |
 | Event-backed birth and release lifetimes | Required before the analyzed range |

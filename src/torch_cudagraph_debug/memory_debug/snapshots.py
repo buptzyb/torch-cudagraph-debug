@@ -7,18 +7,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
-from ._pool_identity import PoolId
-from .aggregation import summarize_allocator_scopes, summarize_pools
-from .allocator_snapshot import (
-    AllocatorSnapshotData,
-    MemoryObservationKey,
-    normalize_pool_id,
-    normalize_stream,
+from torch_cudagraph_debug.types import (
+    FrozenJSONValue,
+    JSONValue,
+    _freeze_json,
 )
+
+from ._pool_identity import MemoryObservationKey, MemoryPoolKey
+from .aggregation import summarize_allocator_scopes, summarize_pools
 from .recording import MemoryObservation
-from .stats import MemoryStats
+from .stats import AllocatorScope, MemoryStats
 
 
 @dataclass(frozen=True)
@@ -27,12 +27,12 @@ class MemoryProbeSnapshot:
 
     probe_id: str
     probe_name: str
-    index: int
+    snapshot_index: int
     timestamp: float
     boundary_marker: str
     observations: tuple[MemoryObservation, ...]
     warnings: tuple[str, ...] = ()
-    _raw_snapshot: AllocatorSnapshotData = field(
+    _raw_snapshot: JSONValue | FrozenJSONValue = field(
         default_factory=dict,
         repr=False,
         compare=False,
@@ -43,8 +43,8 @@ class MemoryProbeSnapshot:
             raise ValueError("probe_id must be non-empty")
         if not self.probe_name:
             raise ValueError("probe_name must be non-empty")
-        if type(self.index) is not int or self.index < 0:
-            raise ValueError("snapshot index must be a non-negative integer")
+        if type(self.snapshot_index) is not int or self.snapshot_index < 0:
+            raise ValueError("snapshot_index must be a non-negative integer")
         if (
             isinstance(self.timestamp, bool)
             or not isinstance(self.timestamp, (int, float))
@@ -62,6 +62,11 @@ class MemoryProbeSnapshot:
         keys = [item.key for item in self.observations]
         if len(set(keys)) != len(keys):
             raise ValueError("memory snapshot observation keys must be unique")
+        object.__setattr__(
+            self,
+            "_raw_snapshot",
+            _freeze_json(cast(JSONValue, self._raw_snapshot)),
+        )
 
     @cached_property
     def by_key(self) -> Mapping[MemoryObservationKey, MemoryObservation]:
@@ -74,31 +79,45 @@ class MemoryProbeSnapshot:
         )
 
     @cached_property
-    def pool_stats(self) -> Mapping[PoolId, MemoryStats]:
+    def pool_stats(self) -> Mapping[MemoryPoolKey, MemoryStats]:
         return MappingProxyType(summarize_pools(self.observation_stats))
 
     @cached_property
-    def allocator_scope_stats(self) -> Mapping[str, MemoryStats]:
+    def allocator_scope_stats(self) -> Mapping[AllocatorScope, MemoryStats]:
         return MappingProxyType(summarize_allocator_scopes(self.pool_stats))
 
-    def observation(self, pool_id: Any, stream: Any) -> MemoryObservation:
-        key = MemoryObservationKey(normalize_pool_id(pool_id), normalize_stream(stream))
+    def observation(
+        self, device_index: int, pool_id: Any, stream: Any
+    ) -> MemoryObservation:
+        key = MemoryObservationKey(device_index, pool_id, stream)
         try:
             return self.by_key[key]
         except KeyError as exc:
             raise KeyError(
-                f"memory observation pool={key.pool_id!r} stream={key.stream!r} "
-                f"does not exist at snapshot {self.index}"
+                f"memory observation {key.label} does not exist "
+                f"at snapshot {self.snapshot_index}"
             ) from exc
 
-    def raw_snapshot(self) -> AllocatorSnapshotData:
-        return self._raw_snapshot
+    @property
+    def allocator_settings(self) -> Mapping[str, FrozenJSONValue]:
+        raw = self.raw_snapshot()
+        if not isinstance(raw, Mapping):
+            return MappingProxyType({})
+        settings = raw.get("allocator_settings", MappingProxyType({}))
+        if not isinstance(settings, Mapping):
+            return MappingProxyType({})
+        return cast(Mapping[str, FrozenJSONValue], settings)
+
+    def raw_snapshot(self) -> FrozenJSONValue:
+        """Return a recursively immutable view of the allocator snapshot."""
+
+        return cast(FrozenJSONValue, self._raw_snapshot)
 
     def descriptor(self) -> dict[str, object]:
         return {
             "probe_id": self.probe_id,
             "probe_name": self.probe_name,
-            "index": self.index,
+            "snapshot_index": self.snapshot_index,
             "timestamp": self.timestamp,
             "boundary_marker": self.boundary_marker,
             "observation_count": len(self.observations),

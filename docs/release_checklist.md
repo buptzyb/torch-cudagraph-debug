@@ -31,10 +31,11 @@ running the gate. In particular, use the repository's Ruff version.
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m py_compile $(find src tests examples -name '*.py')
+python -m compileall -q src tests examples
 bash -n examples/tensor_debug/cli/workflows.sh
 bash -n examples/memory_debug/cli/workflows.sh
 python -m ruff check src tests examples
+python -m ruff check --select I src tests examples
 python -m ruff format --check src tests examples
 python -m pytest -q tests/test_terminology.py
 python -m pytest -q
@@ -58,15 +59,19 @@ TCGD_REPO_ROOT="$(pwd)"
 TCGD_RUN_ROOT="$(mktemp -d /tmp/tcgd-gpu-gate.XXXXXX)"
 
 python -m pip install --upgrade "setuptools>=77.0.3" wheel
-python -m build --sdist --no-isolation
+python -m build --sdist --wheel --no-isolation
 TCGD_SDIST="$(find dist -maxdepth 1 -name 'torch_cudagraph_debug-*.tar.gz' -print -quit)"
 python -m pip install --no-build-isolation --no-deps "${TCGD_SDIST}"
 cd "${TCGD_RUN_ROOT}"
-TCGD_TEST_INSTALLED=1 python -m pytest -q "${TCGD_REPO_ROOT}/tests"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 \
+  python -m pytest -s -q "${TCGD_REPO_ROOT}/tests"
 ```
 
 The `cd` ensures tests and examples import the installed package and compiled
 native extension rather than source-tree artifacts.
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` keeps globally installed plugins from changing
+collection or execution. `-s` avoids environment-specific file-descriptor capture;
+tests that need Python output capture use explicit in-memory fixtures.
 
 Tensor coverage must include:
 
@@ -96,7 +101,9 @@ Tensor coverage must include:
   payload digest verification;
 - point, run, and point-series comparison, first divergence, worst errors,
   strict and promoted dtypes, three-state summary results, reports, and the
-  `tcgd-tensor` CLI.
+  `tcgd-tensor` CLI;
+- multi-rank `TensorRunGroup` summaries and comparisons, point-label mappings,
+  completeness handling, and direct text/JSON/HTML/report output.
 
 Memory coverage must include:
 
@@ -108,6 +115,9 @@ Memory coverage must include:
 - start/during/end capture points;
 - replay-stable state;
 - same-probe and cross-probe standalone snapshot comparison;
+- device-aware identities for one, multiple, and all visible devices;
+- allocated, reserved, active, requested, awaiting-free, inactive,
+  fragmentation, segment, block, and expandable-segment metrics;
 - gzip JSON persistence and `MemoryRun.load()` round trip.
 
 Run every supported single-GPU example from the installed package:
@@ -161,12 +171,18 @@ On a node with at least two GPUs, rerun the complete installed-package suite wit
 zero skips, then cover rank-local run groups and the remaining CLI commands:
 
 ```bash
-TCGD_TEST_INSTALLED=1 TCGD_FAIL_ON_SKIP=1 python -m pytest -q "${TCGD_REPO_ROOT}/tests"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 \
+  TCGD_FAIL_ON_SKIP=1 python -m pytest -s -q "${TCGD_REPO_ROOT}/tests"
 
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   TCGD_TEST_INSTALLED=1 TCGD_FAIL_ON_SKIP=1 \
-  python -m pytest -q \
+  python -m pytest -s -q \
   "${TCGD_REPO_ROOT}/tests/memory_debug/test_gpu_smoke.py::test_graph_pool_capture_and_json_bundle_round_trip"
+
+python -m torch.distributed.run --standalone --nproc-per-node=2 \
+  "${TCGD_REPO_ROOT}/examples/tensor_debug/recorder/distributed_run_groups.py" \
+  --output-dir "${EXAMPLE_ROOT}/tensor-groups"
 
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
   "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/distributed_run_groups.py" \

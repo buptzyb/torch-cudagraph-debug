@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import math
 import os
-from collections.abc import Mapping
-from typing import Any, TypeVar
+from collections.abc import Mapping, Sequence
+from typing import Any, TypeVar, cast
+
+from .types import JSONValue
 
 ErrorT = TypeVar("ErrorT", bound=Exception)
 
@@ -99,7 +101,7 @@ def require_optional_nonempty_string(
     return require_nonempty_string(value, context, error_type=error_type)
 
 
-def json_value(value: Any, path: str, *, error_type: type[ErrorT]) -> Any:
+def json_value(value: Any, path: str, *, error_type: type[ErrorT]) -> JSONValue:
     """Return a JSON-compatible copy while preserving exact scalar types."""
 
     if value is None or isinstance(value, (str, bool, int)):
@@ -125,12 +127,12 @@ def json_value(value: Any, path: str, *, error_type: type[ErrorT]) -> Any:
 
 def require_json_mapping(
     value: Any, context: str, *, error_type: type[ErrorT]
-) -> dict[str, Any]:
+) -> dict[str, JSONValue]:
     if not isinstance(value, Mapping):
         raise error_type(f"{context} must be a JSON object")
     result = json_value(dict(value), f"$.{context}", error_type=error_type)
     assert isinstance(result, dict)
-    return result
+    return cast(dict[str, JSONValue], result)
 
 
 def resolve_distributed_identity(
@@ -164,6 +166,55 @@ def validate_group_identity(
         raise ValueError("world_size must be >= 1")
     if rank is not None and world_size is not None and rank >= world_size:
         raise ValueError("rank must be in [0, world_size)")
+
+
+def comparable_provenance(value: Mapping[str, Any]) -> dict[str, object]:
+    """Return rank-comparable runtime fields, excluding host and UUID identity."""
+
+    result: dict[str, object] = {}
+    producer = value.get("producer")
+    if isinstance(producer, Mapping):
+        result["producer"] = dict(producer)
+    runtime = value.get("runtime")
+    if isinstance(runtime, Mapping):
+        result["runtime"] = {
+            key: runtime.get(key)
+            for key in ("python", "platform", "torch", "cuda")
+            if key in runtime
+        }
+    device = value.get("device")
+    if isinstance(device, Mapping):
+        result["device"] = _comparable_device(device)
+    devices = value.get("devices")
+    if isinstance(devices, Sequence) and not isinstance(
+        devices, (str, bytes, bytearray)
+    ):
+        result["devices"] = [
+            _comparable_device(item) for item in devices if isinstance(item, Mapping)
+        ]
+    return result
+
+
+def json_signature(value: object) -> str:
+    """Return a canonical JSON signature for recursively frozen metadata."""
+
+    return json.dumps(_plain_json(value), sort_keys=True, separators=(",", ":"))
+
+
+def _comparable_device(value: Mapping[str, Any]) -> dict[str, object]:
+    return {
+        key: value.get(key)
+        for key in ("name", "capability", "total_memory_bytes")
+        if key in value
+    }
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(item) for item in value]
+    return value
 
 
 def _resolve_distributed_value(

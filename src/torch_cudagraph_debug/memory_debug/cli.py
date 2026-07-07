@@ -6,14 +6,18 @@ import argparse
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
 
-from .attribution import MemoryAttributionOptions, MemoryLifetimeOptions
-from .comparison import compare_phases, compare_points
-from .recording import MemoryRun
-from .errors import MemoryDebugError
-from .run_groups import MemoryRunGroup, compare_run_group_phases
+from ._pool_identity import MemoryPoolKey
 from .allocator_snapshot import format_bytes
+from .attribution import (
+    MemoryAttributionOptions,
+    MemoryDisplayOptions,
+    MemoryLifetimeOptions,
+)
+from .comparison import compare_phases, compare_points
+from .errors import MemoryDebugError
+from .recording import MemoryLifetimeSelection, MemoryRun
+from .run_groups import MemoryRunGroup, compare_run_group_phases
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--through",
         help="Stop tracing at this point instead of the final point",
     )
-    lifetime_analysis.add_argument("--output", type=Path, required=True)
+    _add_output_options(lifetime_analysis)
     lifetime_analysis.add_argument(
         "--no-events",
         action="store_false",
@@ -86,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="REFERENCE=CANDIDATE",
-        help="Explicit private-pool mapping, for example 0,1=0,2",
+        help="Explicit private-pool mapping, for example 0:0,1=0:0,2",
     )
     _add_attribution_options(compare)
 
@@ -105,16 +109,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="BASELINE=CANDIDATE",
-        help="Explicit private-pool mapping, for example 0,1=0,2",
+        help="Explicit private-pool mapping, for example 0:0,1=0:0,2",
     )
     _add_attribution_options(phases)
 
     group_summary = commands.add_parser(
-        "summarize-run-group",
+        "group-summary",
         help="Summarize compatible per-rank memory bundles without summing GPUs",
     )
     group_summary.add_argument("group_dir")
-    group_summary.add_argument("--output", type=Path, required=True)
+    _add_output_options(group_summary)
 
     group_phases = commands.add_parser(
         "compare-run-group-phases",
@@ -126,6 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
     group_phases.add_argument("--baseline-end", required=True)
     group_phases.add_argument("--candidate-start", required=True)
     group_phases.add_argument("--candidate-end", required=True)
+    group_phases.add_argument(
+        "--pool-map",
+        action="append",
+        default=[],
+        metavar="RANK@BASELINE=CANDIDATE",
+        help="Per-rank private-pool mapping, for example 0@0:0,1=0:0,2",
+    )
     _add_attribution_options(group_phases)
     return parser
 
@@ -143,17 +154,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _load_run(args.bundle).timeline(attribution=options)
         elif args.command == "allocation-lifetimes":
             run = _load_run(args.bundle)
+            if args.born_between is not None:
+                selection = MemoryLifetimeSelection.born_between(*args.born_between)
+            elif args.active_at is not None:
+                selection = MemoryLifetimeSelection.active_at(args.active_at)
+            else:
+                selection = MemoryLifetimeSelection.all()
             result = run.lifetimes(
-                args.active_at,
-                born_between=(
-                    tuple(args.born_between) if args.born_between is not None else None
-                ),
+                selection,
                 through=args.through,
                 options=MemoryLifetimeOptions(
                     events=args.events,
                     on_missing=args.on_missing,
-                    stack_depth=args.stack_depth,
-                    limit=args.limit,
+                    display=MemoryDisplayOptions(
+                        stack_depth=args.stack_depth,
+                        limit=args.limit,
+                    ),
                 ),
             )
         elif args.command == "compare-points":
@@ -186,7 +202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pool_mapping=_parse_pool_mappings(args.pool_map),
                 attribution=options,
             )
-        elif args.command == "summarize-run-group":
+        elif args.command == "group-summary":
             result = MemoryRunGroup.load(args.group_dir).summary()
         elif args.command == "compare-run-group-phases":
             options = _attribution_from_args(args)
@@ -199,23 +215,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 baseline_end=args.baseline_end,
                 candidate_start=args.candidate_start,
                 candidate_end=args.candidate_end,
+                pool_mappings=_parse_rank_pool_mappings(args.pool_map),
                 attribution=options,
             )
         else:
             raise ValueError(f"unknown command {args.command!r}")
 
         include_unchanged = not getattr(args, "only_changed", False)
-        if args.command in {"allocation-lifetimes", "summarize-run-group"}:
-            paths = result.write(args.output)
-            print(result.to_text())
-        else:
-            paths = result.write(
-                args.output,
-                include_unchanged=include_unchanged,
-            )
-            print(result.to_text(include_unchanged=include_unchanged))
-        for kind, path in paths.items():
-            print(f"{kind}: {path.resolve()}")
+        print(
+            result.to_text()
+            if args.command in {"allocation-lifetimes", "group-summary"}
+            else result.to_text(include_unchanged=include_unchanged)
+        )
+        if args.output is not None:
+            if args.command in {"allocation-lifetimes", "group-summary"}:
+                paths = result.write(args.output, overwrite=args.overwrite)
+            else:
+                paths = result.write(
+                    args.output,
+                    include_unchanged=include_unchanged,
+                    overwrite=args.overwrite,
+                )
+            for kind, path in paths.items():
+                print(f"{kind}: {path.resolve()}")
         return 0
     except (
         MemoryDebugError,
@@ -252,8 +274,17 @@ def _load_run(bundle: str) -> MemoryRun:
     return MemoryRun.load(bundle, cache_snapshots=False)
 
 
+def _add_output_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace report artifacts in an existing non-empty output directory",
+    )
+
+
 def _add_attribution_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--output", type=Path, required=True)
+    _add_output_options(parser)
     parser.add_argument("--stacks", action="store_true")
     parser.add_argument("--events", action="store_true")
     parser.add_argument("--lifetimes", action="store_true")
@@ -267,7 +298,7 @@ def _add_attribution_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--only-changed",
         action="store_true",
-        help="Omit unchanged allocator, pool, and pool/stream rows from text, HTML, and CSV",
+        help="Omit unchanged allocator, pool, and device/pool/stream rows from text, HTML, and CSV",
     )
 
 
@@ -277,44 +308,66 @@ def _attribution_from_args(args: argparse.Namespace) -> MemoryAttributionOptions
         events=args.events,
         lifetimes=args.lifetimes,
         on_missing=args.on_missing,
-        stack_depth=args.stack_depth,
-        limit=args.limit,
+        display=MemoryDisplayOptions(
+            stack_depth=args.stack_depth,
+            limit=args.limit,
+        ),
     )
 
 
 def _parse_pool_mappings(
     values: Sequence[str],
-) -> Mapping[tuple[Any, ...], tuple[Any, ...]]:
-    result: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+) -> Mapping[MemoryPoolKey, MemoryPoolKey]:
+    result: dict[MemoryPoolKey, MemoryPoolKey] = {}
     for value in values:
         if value.count("=") != 1:
             raise ValueError(
                 f"invalid pool mapping {value!r}; expected REFERENCE=CANDIDATE"
             )
         reference_text, candidate_text = value.split("=", 1)
-        reference = _parse_pool_id(reference_text)
-        candidate = _parse_pool_id(candidate_text)
+        reference = _parse_pool_key(reference_text)
+        candidate = _parse_pool_key(candidate_text)
         if reference in result:
             raise ValueError(f"pool {reference_text!r} is mapped more than once")
         result[reference] = candidate
     return result
 
 
-def _parse_pool_id(value: str) -> tuple[Any, ...]:
-    if not value:
-        raise ValueError("pool ID must be non-empty")
-    parts = value.split(",")
-    parsed = []
-    for part in parts:
-        text = part.strip()
-        if not text:
-            raise ValueError(f"invalid pool ID {value!r}")
+def _parse_rank_pool_mappings(
+    values: Sequence[str],
+) -> Mapping[int, Mapping[MemoryPoolKey, MemoryPoolKey]]:
+    result: dict[int, dict[MemoryPoolKey, MemoryPoolKey]] = {}
+    for value in values:
+        rank_text, separator, mapping_text = value.partition("@")
+        if not separator or not rank_text or not mapping_text:
+            raise ValueError(
+                f"invalid rank pool mapping {value!r}; "
+                "expected RANK@REFERENCE=CANDIDATE"
+            )
         try:
-            parsed.append(int(text))
-        except ValueError:
-            parsed.append(text)
-    return tuple(parsed)
+            rank = int(rank_text)
+        except ValueError as exc:
+            raise ValueError(f"invalid rank in pool mapping {value!r}") from exc
+        if rank < 0:
+            raise ValueError("pool mapping rank must be non-negative")
+        parsed = _parse_pool_mappings((mapping_text,))
+        rank_mappings = result.setdefault(rank, {})
+        for reference, candidate in parsed.items():
+            if reference in rank_mappings:
+                raise ValueError(
+                    f"pool {reference.label} is mapped more than once on rank {rank}"
+                )
+            rank_mappings[reference] = candidate
+    return result
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def _parse_pool_key(value: str) -> MemoryPoolKey:
+    if value.count(":") != 1:
+        raise ValueError(f"invalid pool key {value!r}; expected DEVICE:POOL0,POOL1")
+    device_text, pool_text = value.split(":", 1)
+    try:
+        device_index = int(device_text)
+        pool_parts = tuple(int(part) for part in pool_text.split(","))
+    except ValueError as exc:
+        raise ValueError(f"invalid pool key {value!r}") from exc
+    return MemoryPoolKey(device_index, pool_parts)

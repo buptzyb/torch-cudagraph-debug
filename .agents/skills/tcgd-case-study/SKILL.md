@@ -109,6 +109,8 @@ the same node with all other inputs fixed.
 - Use `TensorRecorder(execution="eager")` and
   `TensorRecorder(execution="cuda_graph")` for persisted eager-versus-graph
   work.
+- Use `TensorRunGroup` and `compare_run_groups()` when rank-local tensor bundles
+  must be compared without collapsing rank identity.
 - Query snapshots only after the relevant replay is ordered. Pass the replay
   stream to synchronization-aware query APIs when it is available.
 

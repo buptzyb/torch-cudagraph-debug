@@ -9,6 +9,7 @@ from torch_cudagraph_debug.memory_debug import (
     MemoryHistoryError,
     MemoryOwnershipError,
     MemoryPoint,
+    MemoryPoolKey,
     MemoryRecorder,
     compare_phases,
     compare_points,
@@ -37,7 +38,9 @@ def test_same_run_keeps_pool_totals_and_stream_deltas_separate() -> None:
     assert comparison.lifecycle_available is True
     assert comparison.pool_comparisons[0].delta.active_bytes == 0
     by_stream = {
-        item.reference_stream: item.delta.active_bytes
+        item.reference_key.stream
+        if item.reference_key is not None
+        else None: item.delta.active_bytes
         for item in comparison.observation_comparisons
     }
     assert by_stream == {0: 10, 7: -10}
@@ -104,7 +107,7 @@ def test_same_size_blocks_keep_distinct_address_lifecycle_identity() -> None:
 
     assert lifecycle is not None
     assert lifecycle.newly_active_bytes == 10
-    assert lifecycle.released_bytes == 10
+    assert lifecycle.became_inactive_bytes == 10
 
 
 def test_cross_run_matches_only_default_pool_without_mapping() -> None:
@@ -145,7 +148,8 @@ def test_cross_run_matches_only_default_pool_without_mapping() -> None:
     private = [
         item
         for item in comparison.pool_comparisons
-        if item.reference_pool_id == (0, 1) or item.candidate_pool_id == (0, 1)
+        if item.reference_key == MemoryPoolKey(0, (0, 1))
+        or item.candidate_key == MemoryPoolKey(0, (0, 1))
     ]
     assert {item.match for item in private} == {"reference_only", "candidate_only"}
     assert all(
@@ -211,7 +215,10 @@ def test_cross_run_private_pool_mapping_is_explicit_and_one_to_one() -> None:
     comparison = compare_points(
         before["point"],
         after["point"],
-        pool_mapping={(0, 1): (0, 8), (0, 2): (0, 9)},
+        pool_mapping={
+            MemoryPoolKey(0, (0, 1)): MemoryPoolKey(0, (0, 8)),
+            MemoryPoolKey(0, (0, 2)): MemoryPoolKey(0, (0, 9)),
+        },
     )
     assert all(item.match == "mapped" for item in comparison.pool_comparisons)
     assert [item.delta.active_bytes for item in comparison.pool_comparisons] == [5, 5]
@@ -220,13 +227,16 @@ def test_cross_run_private_pool_mapping_is_explicit_and_one_to_one() -> None:
         compare_points(
             before["point"],
             after["point"],
-            pool_mapping={(0, 1): (0, 8), (0, 2): (0, 8)},
+            pool_mapping={
+                MemoryPoolKey(0, (0, 1)): MemoryPoolKey(0, (0, 8)),
+                MemoryPoolKey(0, (0, 2)): MemoryPoolKey(0, (0, 8)),
+            },
         )
     with pytest.raises(ValueError, match="does not exist"):
         compare_points(
             before["point"],
             after["point"],
-            pool_mapping={(0, 7): (0, 8)},
+            pool_mapping={MemoryPoolKey(0, (0, 7)): MemoryPoolKey(0, (0, 8))},
         )
 
 
@@ -267,6 +277,15 @@ def test_missing_stack_history_warns_or_errors() -> None:
     assert any("coverage is incomplete" in item for item in warning.warnings)
     assert warning.reference_stack_coverage is not None
     assert warning.reference_stack_coverage.ratio == 0.0
+    assert warning.attribution_status.stacks.requested is True
+    assert warning.attribution_status.stacks.available is False
+    assert warning.attribution_status.stacks.complete is False
+    assert warning.attribution_status.events.requested is False
+    assert warning.to_dict()["attribution_status"]["stacks"] == {
+        "requested": True,
+        "available": False,
+        "complete": False,
+    }
 
     with pytest.raises(MemoryHistoryError, match="coverage is incomplete"):
         run.compare(
@@ -295,8 +314,9 @@ def test_missing_device_trace_is_reported_as_unavailable() -> None:
         attribution=MemoryAttributionOptions(events=True),
     )
 
-    assert comparison.events_available is False
-    assert comparison.events_complete is False
+    assert comparison.attribution_status.events.requested is True
+    assert comparison.attribution_status.events.available is False
+    assert comparison.attribution_status.events.complete is False
     assert any(
         "allocator event history is unavailable" in warning
         for warning in comparison.warnings
@@ -344,8 +364,8 @@ def test_event_history_uses_point_boundary_marker() -> None:
         attribution=MemoryAttributionOptions(events=True, on_missing="error"),
     )
 
-    assert comparison.events_available is True
-    assert comparison.events_complete is True
+    assert comparison.attribution_status.events.available is True
+    assert comparison.attribution_status.events.complete is True
     assert len(comparison.allocator_events) == 1
     assert comparison.allocator_events[0].pool_id == (0, 5)
     assert comparison.allocator_events[0].action == "alloc"
@@ -441,13 +461,15 @@ def test_phase_comparison_preserves_four_point_identity() -> None:
         attribution=MemoryAttributionOptions(stacks=True),
     )
     row = next(
-        item for item in phase.pool_decomposition if item["metric"] == "active_bytes"
+        item
+        for item in phase.pool_decomposition
+        if item.components.metric == "active_bytes"
     )
-    assert row["start_gap_bytes"] == 10
-    assert row["baseline_change_bytes"] == 20
-    assert row["candidate_change_bytes"] == 15
-    assert row["end_gap_bytes"] == 5
-    assert row["identity_holds"] is True
+    assert row.components.start_gap_bytes == 10
+    assert row.components.baseline_change_bytes == 20
+    assert row.components.candidate_change_bytes == 15
+    assert row.components.end_gap_bytes == 5
+    assert row.components.identity_holds is True
 
 
 def test_phase_total_identity_includes_unmatched_private_pools() -> None:
@@ -478,10 +500,9 @@ def test_phase_total_identity_includes_unmatched_private_pools() -> None:
     row = next(
         item
         for item in phase.allocator_scope_decomposition
-        if item["scope"] == "all" and item["metric"] == "active_bytes"
+        if item.scope == "all" and item.components.metric == "active_bytes"
     )
-
-    assert row == {
+    assert row.to_dict() == {
         "scope": "all",
         "metric": "active_bytes",
         "start_gap_bytes": 20,
@@ -524,8 +545,8 @@ def test_event_history_uses_trace_for_segment_device() -> None:
         attribution=MemoryAttributionOptions(events=True, on_missing="error"),
     )
 
-    assert comparison.events_available is True
-    assert comparison.events_complete is True
+    assert comparison.attribution_status.events.available is True
+    assert comparison.attribution_status.events.complete is True
     assert len(comparison.allocator_events) == 1
     assert comparison.allocator_events[0].pool_id == (0, 5)
     assert comparison.allocator_events[0].size_bytes == 64
@@ -557,8 +578,8 @@ def test_event_history_detects_overwritten_marker_on_segment_device() -> None:
         attribution=MemoryAttributionOptions(events=True),
     )
 
-    assert comparison.events_available is True
-    assert comparison.events_complete is False
+    assert comparison.attribution_status.events.available is True
+    assert comparison.attribution_status.events.complete is False
     assert len(comparison.allocator_events) == 1
     assert any("device 0" in warning for warning in comparison.warnings)
 
@@ -638,3 +659,65 @@ def test_phase_comparison_rejects_ranges_from_the_same_run() -> None:
             run.between("start", "end"),
             run.between("start", "end"),
         )
+
+
+def test_phase_pool_mapping_accepts_pools_present_at_only_one_endpoint() -> None:
+    baseline = make_run(
+        [
+            snapshot(segment(active=10)),
+            snapshot(
+                segment(active=10),
+                segment(active=20, pool=(0, 1), address=2000),
+            ),
+        ],
+        name="baseline",
+        labels=("start", "end"),
+    )
+    candidate = make_run(
+        [
+            snapshot(segment(active=10)),
+            snapshot(
+                segment(active=10),
+                segment(active=30, pool=(0, 8), address=3000),
+            ),
+        ],
+        name="candidate",
+        labels=("start", "end"),
+    )
+
+    phase = compare_phases(
+        baseline.between("start", "end"),
+        candidate.between("start", "end"),
+        pool_mapping={
+            MemoryPoolKey(0, (0, 1)): MemoryPoolKey(0, (0, 8)),
+        },
+    )
+
+    active = next(
+        item
+        for item in phase.pool_decomposition
+        if item.baseline_key == MemoryPoolKey(0, (0, 1))
+        and item.components.metric == "active_bytes"
+    )
+    assert active.components.start_gap_bytes == 0
+    assert active.components.baseline_change_bytes == 20
+    assert active.components.candidate_change_bytes == 30
+    assert active.components.end_gap_bytes == 10
+    assert active.components.identity_holds
+
+
+def test_snapshot_inferred_lifetimes_are_available_but_incomplete() -> None:
+    run = make_run(
+        [snapshot(segment(active=10)), snapshot(segment(active=20))],
+        labels=("before", "after"),
+    )
+
+    comparison = run.compare(
+        "before",
+        "after",
+        attribution=MemoryAttributionOptions(lifetimes=True, events=False),
+    )
+
+    assert comparison.attribution_status.lifetimes.requested is True
+    assert comparison.attribution_status.lifetimes.available is True
+    assert comparison.attribution_status.lifetimes.complete is False

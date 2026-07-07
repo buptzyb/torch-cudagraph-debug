@@ -25,8 +25,8 @@ def test_eager_recorder_preserves_repeated_named_invocations() -> None:
     x = torch.arange(4, dtype=torch.float32, device="cuda")
 
     with recorder.record_point("forward", synchronize=stream):
-        assert recorder.observe("hidden", x + 1) is not None
-        recorder.observe("hidden", x + 2, payload="summary")
+        assert recorder.observe(x + 1, name="hidden") is not None
+        recorder.observe(x + 2, name="hidden", payload="summary")
 
     run = recorder.finish()
     first = run["forward"].observation("hidden", 0)
@@ -45,16 +45,16 @@ def test_eager_and_cuda_graph_runs_compare_and_replays_form_a_series() -> None:
 
     eager_recorder = TensorRecorder(execution="eager", name="eager")
     with eager_recorder.record_point("forward", synchronize=stream):
-        eager_first = eager_recorder.observe("hidden", static_x + 1)
-        eager_recorder.observe("hidden", eager_first * 2)
+        eager_first = eager_recorder.observe(static_x + 1, name="hidden")
+        eager_recorder.observe(eager_first * 2, name="hidden")
     eager = eager_recorder.finish()
     eager_recorder.close()
 
     graph_recorder = TensorRecorder(execution="cuda_graph", name="cuda-graph")
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        graph_first = graph_recorder.observe("hidden", static_x + 1)
-        graph_recorder.observe("hidden", graph_first * 2)
+        graph_first = graph_recorder.observe(static_x + 1, name="hidden")
+        graph_recorder.observe(graph_first * 2, name="hidden")
 
     with graph_recorder.record_point("replay-1", synchronize=stream):
         graph.replay()
@@ -103,8 +103,8 @@ def test_cuda_graph_recorder_captures_activation_and_gradient() -> None:
     with torch.cuda.stream(capture_stream):
         model.zero_grad(set_to_none=True)
         with torch.cuda.graph(graph):
-            hidden = recorder.observe("activation", model(static_x))
-            recorder.watch_grad("activation.grad", hidden, strict=True)
+            hidden = recorder.observe(model(static_x), name="activation")
+            recorder.watch_grad(hidden, name="activation.grad", strict=True)
             hidden.sum().backward()
     replay_stream = torch.cuda.current_stream()
     replay_stream.wait_stream(capture_stream)

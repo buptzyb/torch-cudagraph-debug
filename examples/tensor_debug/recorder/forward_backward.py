@@ -60,24 +60,24 @@ def main() -> None:
         with torch.cuda.stream(capture_stream):
             model.zero_grad(set_to_none=True)
             with torch.cuda.graph(graph):
-                hidden = recorder.observe("activation", model(static_x))
+                hidden = recorder.observe(model(static_x), name="activation")
                 gradient_hook = recorder.watch_grad(
-                    "activation.grad",
                     hidden,
+                    name="activation.grad",
                     strict=True,
                 )
-                loss = recorder.observe("loss", hidden.square().mean())
+                loss = recorder.observe(hidden.square().mean(), name="loss")
                 loss.backward()
                 weight_grad = model.weight.grad
                 if weight_grad is None:
                     raise RuntimeError("model.weight.grad is unavailable")
-                recorder.observe("weight.grad", weight_grad)
+                recorder.observe(weight_grad, name="weight.grad")
         replay_stream.wait_stream(capture_stream)
 
         with recorder.record_point("train_step", synchronize=replay_stream):
             graph.replay()
 
-        partial = recorder.snapshot_run()
+        partial = recorder.preview()
         assert not partial.complete
         assert partial["train_step"].observation("activation.grad").shape == (2, 3)
         recorder.finish()

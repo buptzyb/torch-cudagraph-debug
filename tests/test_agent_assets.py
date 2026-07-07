@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
+import json
 import re
-import tomllib
+from pathlib import Path
 
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / ".agents" / "skills" / "tcgd-case-study"
@@ -11,6 +12,7 @@ SKILL = SKILL_ROOT / "SKILL.md"
 CLAUDE_SKILL = ROOT / ".claude" / "skills" / "tcgd-case-study"
 CODEX_AGENT = ROOT / ".codex" / "agents" / "tcgd-debugger.toml"
 CLAUDE_AGENT = ROOT / ".claude" / "agents" / "tcgd-debugger.md"
+PLUGIN_ROOT = ROOT / "plugins" / "tcgd"
 
 
 def _frontmatter(path: Path) -> dict[str, object]:
@@ -131,3 +133,25 @@ def test_agent_workflow_documentation_is_linked() -> None:
     assert "$tcgd-case-study" in guide
     assert "/tcgd-case-study" in guide
     assert "tcgd-debugger" in guide
+
+
+def test_plugin_wraps_canonical_assets_through_marketplace_links() -> None:
+    marketplace = json.loads(
+        (ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
+    )
+    assert marketplace["name"] == "torch-cudagraph-debug"
+    entries = {item["name"]: item for item in marketplace["plugins"]}
+    assert entries["tcgd"]["source"] == "./plugins/tcgd"
+
+    manifest = json.loads(
+        (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    assert manifest["name"] == "tcgd"
+    assert manifest["license"] == "Apache-2.0"
+
+    skill_link = PLUGIN_ROOT / "skills" / "tcgd-case-study"
+    agent_link = PLUGIN_ROOT / "agents" / "tcgd-debugger.md"
+    assert skill_link.is_symlink(), "plugin skill must link to the canonical skill"
+    assert skill_link.resolve() == SKILL_ROOT.resolve()
+    assert agent_link.is_symlink(), "plugin agent must link to the Claude agent"
+    assert agent_link.resolve() == CLAUDE_AGENT.resolve()

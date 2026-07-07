@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import pytest
 from dataclasses import replace
+
+import pytest
 import torch
 
 from torch_cudagraph_debug.tensor_debug import (
@@ -31,6 +32,7 @@ def test_probe_snapshot_aggregates_all_invocations() -> None:
     captured = TensorProbeSnapshot(
         probe_id="probe",
         probe_name="hidden",
+        snapshot_index=0,
         replay_index=3,
         timestamp=0.0,
         observations=run.points[0].observations,
@@ -73,6 +75,7 @@ def test_probe_snapshot_supports_named_observations() -> None:
         probe_id="probe",
         probe_name="collector",
         replay_index=1,
+        snapshot_index=0,
         timestamp=0.0,
         observations=run.points[0].observations,
     )
@@ -167,6 +170,7 @@ def test_snapshot_rejects_noncontiguous_invocation_indices() -> None:
             probe_id="probe",
             probe_name="mid",
             replay_index=1,
+            snapshot_index=0,
             timestamp=0.0,
             observations=(invalid,),
         )
@@ -186,6 +190,7 @@ def test_snapshot_rejects_noncontiguous_observation_order() -> None:
             probe_id="probe",
             probe_name="mid",
             replay_index=1,
+            snapshot_index=0,
             timestamp=0.0,
             observations=(invalid,),
         )
