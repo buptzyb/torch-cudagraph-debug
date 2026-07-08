@@ -100,13 +100,29 @@ class MemoryProbeSnapshot:
 
     @property
     def allocator_settings(self) -> Mapping[str, FrozenJSONValue]:
-        raw = self.raw_snapshot()
+        raw = self.allocator_state()
         if not isinstance(raw, Mapping):
             return MappingProxyType({})
         settings = raw.get("allocator_settings", MappingProxyType({}))
         if not isinstance(settings, Mapping):
             return MappingProxyType({})
         return cast(Mapping[str, FrozenJSONValue], settings)
+
+    @cached_property
+    def _state(self) -> Mapping[str, FrozenJSONValue]:
+        raw = self.raw_snapshot()
+        if not isinstance(raw, Mapping):
+            return MappingProxyType({})
+        state = {key: value for key, value in raw.items() if key != "device_traces"}
+        return cast(
+            Mapping[str, FrozenJSONValue],
+            _freeze_json(cast(JSONValue, state)),
+        )
+
+    def allocator_state(self) -> Mapping[str, FrozenJSONValue]:
+        """Return allocator state without cumulative device event traces."""
+
+        return self._state
 
     def raw_snapshot(self) -> FrozenJSONValue:
         """Return a recursively immutable view of the allocator snapshot."""

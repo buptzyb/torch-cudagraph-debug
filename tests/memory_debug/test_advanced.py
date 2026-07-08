@@ -294,7 +294,7 @@ def test_mutable_snapshot_returns_independent_editable_copy() -> None:
     mutable = mutable_snapshot(point)
     mutable["segments"][0]["total_size"] = 99
 
-    assert point.raw_snapshot()["segments"][0]["total_size"] == 10
+    assert point.allocator_state()["segments"][0]["total_size"] == 10
 
 
 def test_summary_reports_expandable_segments_and_inactive_blocks() -> None:

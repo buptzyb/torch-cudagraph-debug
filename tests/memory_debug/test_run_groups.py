@@ -66,12 +66,12 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
     assert group.complete is True
     assert group.point_labels == ("start", "end")
     assert not group.warnings
-    assert group[0]["end"]._snapshot_cache == {}
+    assert group[0]["end"]._state_cache == {}
     assert len(report.rank_points) == 12
     text = report.to_text()
     assert "not summed across ranks" in text
-    assert group[0]["end"].raw_snapshot()["segments"]
-    assert group[0]["end"]._snapshot_cache == {}
+    assert group[0]["end"].allocator_state()["segments"]
+    assert group[0]["end"]._state_cache == {}
     end_active = next(
         item
         for item in report.point_aggregates
@@ -111,8 +111,8 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
     assert "internal_fragmentation_bytes" not in html
 
     cached = MemoryRunGroup.load(root, cache_snapshots=True)
-    assert cached[0]["end"].raw_snapshot()["segments"]
-    assert cached[0]["end"]._snapshot_cache
+    assert cached[0]["end"].allocator_state()["segments"]
+    assert cached[0]["end"]._state_cache
 
 
 def test_group_validation_rejects_ambiguous_rank_identity_and_points() -> None:

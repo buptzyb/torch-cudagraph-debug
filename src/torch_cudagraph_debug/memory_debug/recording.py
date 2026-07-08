@@ -57,8 +57,15 @@ from ._pool_identity import (
     normalize_stream,
 )
 from .aggregation import summarize_allocator_scopes, summarize_pools
-from .allocator_snapshot import AllocatorSnapshotData
+from .allocator_snapshot import normalize_snapshot
 from .errors import MemoryBundleError, MemoryDebugError, MemoryOwnershipError
+from .events import (
+    HISTORY_WINDOW_STATUSES,
+    HistoryWindowStatus,
+    _DeviceEventEvidence,
+    _extract_point_event_evidence,
+    _PointEventEvidence,
+)
 from .stats import AllocatorScope, MemoryStats
 
 if TYPE_CHECKING:
@@ -96,7 +103,10 @@ _POINT_FIELDS = frozenset(
         "timestamp",
         "metadata",
         "boundary_marker",
-        "snapshot_file",
+        "boundary_recorded",
+        "state_file",
+        "event_file",
+        "history",
         "warnings",
         "observations",
     }
@@ -104,6 +114,11 @@ _POINT_FIELDS = frozenset(
 _OBSERVATION_FIELDS = frozenset(
     {"order", "device_index", "pool_id", "stream", *_MEMORY_STATS_FIELDS}
 )
+_HISTORY_FIELDS = frozenset(
+    {"device_index", "status", "warnings", "event_count", "trace_index_offset"}
+)
+_EVENT_FIELDS = frozenset({"start_index", "end_index", "devices"})
+_EVENT_DEVICE_FIELDS = frozenset({"device_index", "trace_index_offset", "entries"})
 
 
 @dataclass(frozen=True)
@@ -142,8 +157,17 @@ class MemoryObservation:
 
 
 @dataclass(frozen=True)
+class _DeviceHistoryStatus:
+    device_index: int
+    status: HistoryWindowStatus
+    warnings: tuple[str, ...]
+    event_count: int
+    trace_index_offset: int
+
+
+@dataclass(frozen=True)
 class MemoryPoint:
-    """One immutable labeled allocator snapshot owned by a run."""
+    """One immutable labeled allocator state owned by a run."""
 
     run_id: str
     index: int
@@ -153,8 +177,16 @@ class MemoryPoint:
     boundary_marker: str
     observations: tuple[MemoryObservation, ...]
     warnings: tuple[str, ...] = ()
-    _snapshot_path: Path | None = field(default=None, repr=False, compare=False)
-    _snapshot_cache: dict[str, FrozenJSONValue] = field(
+    _boundary_recorded: bool = field(default=True, repr=False, compare=False)
+    _history_statuses: tuple[_DeviceHistoryStatus, ...] = field(
+        default=(), repr=False, compare=False
+    )
+    _state_path: Path | None = field(default=None, repr=False, compare=False)
+    _event_path: Path | None = field(default=None, repr=False, compare=False)
+    _state_cache: dict[str, FrozenJSONValue] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+    _event_cache: dict[str, _PointEventEvidence] = field(
         default_factory=dict, repr=False, compare=False
     )
     _cache_snapshots: bool = field(default=True, repr=False, compare=False)
@@ -172,6 +204,8 @@ class MemoryPoint:
             raise ValueError("memory point timestamp must be finite")
         if not self.boundary_marker:
             raise ValueError("memory point boundary_marker must be non-empty")
+        if type(self._boundary_recorded) is not bool:
+            raise TypeError("memory point boundary status must be boolean")
         if [item.order for item in self.observations] != list(
             range(len(self.observations))
         ):
@@ -179,13 +213,18 @@ class MemoryPoint:
         keys = [item.key for item in self.observations]
         if len(keys) != len(set(keys)):
             raise ValueError("memory observations must have unique keys")
+        history_devices = [item.device_index for item in self._history_statuses]
+        if len(history_devices) != len(set(history_devices)):
+            raise ValueError("memory history statuses must have unique devices")
+        if self.index == 0 and self._history_statuses:
+            raise ValueError("the first memory point cannot own event history")
         object.__setattr__(
             self,
             "metadata",
             cast(Mapping[str, FrozenJSONValue], _freeze_json(self.metadata)),
         )
-        for key, value in tuple(self._snapshot_cache.items()):
-            self._snapshot_cache[key] = _freeze_json(
+        for key, value in tuple(self._state_cache.items()):
+            self._state_cache[key] = _freeze_json(
                 cast(JSONValue | FrozenJSONValue, value)
             )
 
@@ -220,44 +259,72 @@ class MemoryPoint:
 
     @property
     def allocator_settings(self) -> Mapping[str, FrozenJSONValue]:
-        raw = self.raw_snapshot()
-        if not isinstance(raw, Mapping):
-            return MappingProxyType({})
-        settings = raw.get("allocator_settings", MappingProxyType({}))
+        state = self.allocator_state()
+        settings = state.get("allocator_settings", MappingProxyType({}))
         if not isinstance(settings, Mapping):
             return MappingProxyType({})
         return cast(Mapping[str, FrozenJSONValue], settings)
 
-    def raw_snapshot(self) -> FrozenJSONValue:
-        """Load and return a recursively immutable allocator snapshot."""
+    def allocator_state(self) -> Mapping[str, FrozenJSONValue]:
+        """Load the recursively immutable allocator state at this point."""
 
-        cached = self._snapshot_cache.get("snapshot") if self._cache_snapshots else None
+        cached = self._state_cache.get("state") if self._cache_snapshots else None
+        if cached is not None:
+            return cast(Mapping[str, FrozenJSONValue], cached)
+        if self._state_path is None:
+            raise MemoryBundleError(f"point {self.label!r} has no state payload")
+        state = _read_gzip_json(
+            self._state_path,
+            context=f"state for point {self.label!r}",
+        )
+        if not isinstance(state, Mapping):
+            raise MemoryBundleError(
+                f"state for point {self.label!r} must be a JSON object"
+            )
+        if "device_traces" in state:
+            raise MemoryBundleError(
+                f"state for point {self.label!r} must not contain device_traces"
+            )
+        try:
+            normalize_snapshot(state)
+        except (TypeError, ValueError) as exc:
+            raise MemoryBundleError(
+                f"state for point {self.label!r} has invalid allocator schema: {exc}"
+            ) from exc
+        frozen = _freeze_json(cast(JSONValue, state))
+        if self._cache_snapshots:
+            self._state_cache["state"] = frozen
+        return cast(Mapping[str, FrozenJSONValue], frozen)
+
+    def _event_evidence(self) -> _PointEventEvidence | None:
+        if self.index == 0:
+            return None
+        cached = self._event_cache.get("event")
         if cached is not None:
             return cached
-        if self._snapshot_path is None:
-            raise MemoryBundleError(f"point {self.label!r} has no snapshot payload")
-        try:
-            with gzip.open(self._snapshot_path, "rt", encoding="utf-8") as handle:
-                text = handle.read()
-        # A truncated gzip member raises EOFError and a corrupted deflate
-        # stream raises zlib.error; neither is an OSError.
-        except (OSError, EOFError, zlib.error) as exc:
-            raise MemoryBundleError(
-                f"could not load snapshot for point {self.label!r}: {exc}"
-            ) from exc
-        snapshot = strict_json_loads(
-            text,
-            error_type=MemoryBundleError,
-            context=f"snapshot for point {self.label!r}",
+        if self._event_path is None:
+            raise MemoryBundleError(f"point {self.label!r} has no event payload")
+        payload = _read_gzip_json(
+            self._event_path,
+            context=f"event evidence for point {self.label!r}",
         )
-        if not isinstance(snapshot, (Mapping, list)):
-            raise MemoryBundleError(
-                f"snapshot for point {self.label!r} has an invalid root type"
-            )
-        frozen = _freeze_json(cast(JSONValue, snapshot))
+        evidence = _event_evidence_from_payload(payload, point=self)
         if self._cache_snapshots:
-            self._snapshot_cache["snapshot"] = frozen
-        return frozen
+            self._event_cache["event"] = evidence
+        return evidence
+
+    def _event_windows(self) -> tuple[Any, ...]:
+        evidence = self._event_evidence()
+        if evidence is None:
+            return ()
+        try:
+            return evidence.windows()
+        except (TypeError, ValueError) as exc:
+            if self._event_path is not None:
+                raise MemoryBundleError(
+                    f"event evidence for point {self.label!r} has invalid allocator schema: {exc}"
+                ) from exc
+            raise
 
     def descriptor(self) -> dict[str, object]:
         return {
@@ -564,12 +631,36 @@ class MemoryRun:
                     f"memory bundle has an empty or duplicate label {label!r}"
                 )
             labels.add(label)
-            snapshot_path = _safe_bundle_path(
-                root, raw["snapshot_file"], expected_index=expected_index
+            state_path = _safe_bundle_payload_path(
+                root,
+                raw["state_file"],
+                field="state_file",
+                expected=f"states/{expected_index:04d}.json.gz",
             )
-            if not snapshot_path.is_file():
+            if not state_path.is_file():
                 raise MemoryBundleError(
-                    f"snapshot file for point {label!r} does not exist"
+                    f"state file for point {label!r} does not exist"
+                )
+            if expected_index == 0:
+                if raw["event_file"] is not None or raw["history"] is not None:
+                    raise MemoryBundleError(
+                        "the first memory point must not have event evidence"
+                    )
+                event_path = None
+                history_statuses: tuple[_DeviceHistoryStatus, ...] = ()
+            else:
+                event_path = _safe_bundle_payload_path(
+                    root,
+                    raw["event_file"],
+                    field="event_file",
+                    expected=f"events/{expected_index - 1:04d}-{expected_index:04d}.json.gz",
+                )
+                if not event_path.is_file():
+                    raise MemoryBundleError(
+                        f"event file for point {label!r} does not exist"
+                    )
+                history_statuses = _history_statuses_from_manifest(
+                    raw["history"], point_label=label
                 )
             observations: list[MemoryObservation] = []
             keys: set[MemoryObservationKey] = set()
@@ -620,7 +711,14 @@ class MemoryRun:
                     boundary_marker=boundary_marker,
                     observations=tuple(observations),
                     warnings=tuple(warnings),
-                    _snapshot_path=snapshot_path,
+                    _boundary_recorded=require_bool(
+                        raw["boundary_recorded"],
+                        f"boundary_recorded for point {label!r}",
+                        error_type=MemoryBundleError,
+                    ),
+                    _history_statuses=history_statuses,
+                    _state_path=state_path,
+                    _event_path=event_path,
                     _cache_snapshots=cache_snapshots,
                 )
             except (TypeError, ValueError) as exc:
@@ -752,7 +850,8 @@ class MemoryRecorder:
                 raise FileExistsError(
                     f"memory bundle directory is not empty: {self.bundle_dir}"
                 )
-            (self.bundle_dir / "snapshots").mkdir(parents=True, exist_ok=True)
+            (self.bundle_dir / "states").mkdir(parents=True, exist_ok=True)
+            (self.bundle_dir / "events").mkdir(parents=True, exist_ok=True)
             self._write_manifest(complete=False)
 
     @classmethod
@@ -793,12 +892,41 @@ class MemoryRecorder:
         serializable_snapshot = json_value(
             snapshot, "$.snapshot", error_type=MemoryBundleError
         )
-        if not isinstance(serializable_snapshot, (dict, list)):
-            raise MemoryBundleError("allocator snapshot root must be an object or list")
+        if not isinstance(serializable_snapshot, dict):
+            raise MemoryBundleError("allocator snapshot root must be an object")
+        state_payload = dict(serializable_snapshot)
+        state_payload.pop("device_traces", None)
         serializable_metadata = json_value(
             dict(metadata or {}), "$.metadata", error_type=MemoryBundleError
         )
         assert isinstance(serializable_metadata, dict)
+
+        event_evidence: _PointEventEvidence | None = None
+        history_statuses: tuple[_DeviceHistoryStatus, ...] = ()
+        if self._points:
+            previous = self._points[-1]
+            event_evidence = _extract_point_event_evidence(
+                snapshot,
+                devices=capture.devices,
+                previous_boundary_recorded=previous._boundary_recorded,
+                current_boundary_recorded=capture.boundary_recorded,
+                start_marker=previous.boundary_marker,
+                end_marker=capture.boundary_marker,
+                start_label=previous.label,
+                end_label=label,
+                start_index=previous.index,
+                end_index=index,
+            )
+            history_statuses = tuple(
+                _DeviceHistoryStatus(
+                    device_index=device.device_index,
+                    status=device.status,
+                    warnings=device.warnings,
+                    event_count=device.event_count,
+                    trace_index_offset=device.trace_index_offset,
+                )
+                for device in event_evidence.devices
+            )
 
         observations = tuple(
             MemoryObservation(
@@ -810,12 +938,19 @@ class MemoryRecorder:
             )
             for order, (key, stats) in enumerate(capture.summaries)
         )
-        snapshot_path: Path | None = None
-        cache: dict[str, FrozenJSONValue] = {}
+        state_path: Path | None = None
+        event_path: Path | None = None
+        state_cache: dict[str, FrozenJSONValue] = {}
+        event_cache: dict[str, _PointEventEvidence] = {}
         if self.bundle_dir is not None:
-            snapshot_path = self._write_snapshot(index, serializable_snapshot)
+            state_path = self._write_state(index, state_payload)
+            if event_evidence is not None:
+                event_path = self._write_event(event_evidence)
         else:
-            cache["snapshot"] = _freeze_json(serializable_snapshot)
+            state_cache["state"] = _freeze_json(state_payload)
+            if event_evidence is not None:
+                event_cache["event"] = event_evidence
+        del snapshot, serializable_snapshot
 
         point = MemoryPoint(
             run_id=self._run_id,
@@ -828,8 +963,12 @@ class MemoryRecorder:
             boundary_marker=capture.boundary_marker,
             observations=observations,
             warnings=capture.warnings,
-            _snapshot_path=snapshot_path,
-            _snapshot_cache=cache,
+            _boundary_recorded=capture.boundary_recorded,
+            _history_statuses=history_statuses,
+            _state_path=state_path,
+            _event_path=event_path,
+            _state_cache=state_cache,
+            _event_cache=event_cache,
         )
         self._write_manifest(complete=False, points=(*self._points, point))
         self._points.append(point)
@@ -928,9 +1067,32 @@ class MemoryRecorder:
         finally:
             self._context_active = False
 
-    def _write_snapshot(self, index: int, snapshot: AllocatorSnapshotData) -> Path:
+    def _write_state(self, index: int, state: Mapping[str, Any]) -> Path:
         assert self.bundle_dir is not None
-        path = self.bundle_dir / "snapshots" / f"{index:04d}.json.gz"
+        path = self.bundle_dir / "states" / f"{index:04d}.json.gz"
+        self._write_gzip_payload(path, state, context=f"allocator state {index}")
+        return path
+
+    def _write_event(self, evidence: _PointEventEvidence) -> Path:
+        assert self.bundle_dir is not None
+        path = (
+            self.bundle_dir
+            / "events"
+            / f"{evidence.start_index:04d}-{evidence.end_index:04d}.json.gz"
+        )
+        self._write_gzip_payload(
+            path,
+            _event_evidence_payload(evidence),
+            context=(
+                f"allocator event evidence {evidence.start_index}-{evidence.end_index}"
+            ),
+        )
+        return path
+
+    @staticmethod
+    def _write_gzip_payload(
+        path: Path, payload: Mapping[str, Any], *, context: str
+    ) -> None:
         temporary = path.with_name(path.name + ".tmp")
         try:
             with gzip.open(
@@ -940,19 +1102,16 @@ class MemoryRecorder:
                 compresslevel=1,
             ) as handle:
                 json.dump(
-                    snapshot,
+                    payload,
                     handle,
                     separators=(",", ":"),
                     allow_nan=False,
                 )
             temporary.replace(path)
         except (OSError, TypeError, ValueError) as exc:
-            raise MemoryBundleError(
-                f"could not persist allocator snapshot {index}: {exc}"
-            ) from exc
+            raise MemoryBundleError(f"could not persist {context}: {exc}") from exc
         finally:
             temporary.unlink(missing_ok=True)
-        return path
 
     def _write_manifest(
         self,
@@ -1009,15 +1168,39 @@ class MemoryRecorder:
 
 
 def _point_manifest(point: MemoryPoint, root: Path) -> dict[str, object]:
-    if point._snapshot_path is None:
+    if point._state_path is None:
         raise MemoryBundleError(f"point {point.label!r} is not persisted")
+    if point.index > 0 and point._event_path is None:
+        raise MemoryBundleError(
+            f"point {point.label!r} has no persisted event evidence"
+        )
     return {
         "index": point.index,
         "label": point.label,
         "timestamp": point.timestamp,
         "metadata": _thaw_json(cast(FrozenJSONValue, point.metadata)),
         "boundary_marker": point.boundary_marker,
-        "snapshot_file": str(point._snapshot_path.relative_to(root)),
+        "boundary_recorded": point._boundary_recorded,
+        "state_file": str(point._state_path.relative_to(root)),
+        "event_file": (
+            str(point._event_path.relative_to(root))
+            if point._event_path is not None
+            else None
+        ),
+        "history": (
+            [
+                {
+                    "device_index": item.device_index,
+                    "status": item.status,
+                    "warnings": list(item.warnings),
+                    "event_count": item.event_count,
+                    "trace_index_offset": item.trace_index_offset,
+                }
+                for item in point._history_statuses
+            ]
+            if point.index > 0
+            else None
+        ),
         "warnings": list(point.warnings),
         "observations": [
             _observation_manifest(observation) for observation in point.observations
@@ -1076,20 +1259,198 @@ def _observation_from_manifest(
         ) from exc
 
 
-def _safe_bundle_path(root: Path, raw_path: Any, *, expected_index: int) -> Path:
+def _history_statuses_from_manifest(
+    raw_history: Any, *, point_label: str
+) -> tuple[_DeviceHistoryStatus, ...]:
+    if not isinstance(raw_history, list):
+        raise MemoryBundleError(
+            f"history for point {point_label!r} must be a JSON list"
+        )
+    statuses = []
+    previous_device = -1
+    for index, row in enumerate(raw_history):
+        if not isinstance(row, Mapping):
+            raise MemoryBundleError(
+                f"history entry {index} for point {point_label!r} must be an object"
+            )
+        require_exact_fields(
+            row,
+            _HISTORY_FIELDS,
+            f"history entry {index} for point {point_label!r}",
+            error_type=MemoryBundleError,
+        )
+        device_index = require_nonnegative_int(
+            row["device_index"],
+            f"history device_index for point {point_label!r}",
+            error_type=MemoryBundleError,
+        )
+        if device_index <= previous_device:
+            raise MemoryBundleError(
+                f"history devices for point {point_label!r} must be unique and ordered"
+            )
+        previous_device = device_index
+        status = row["status"]
+        if not isinstance(status, str) or status not in HISTORY_WINDOW_STATUSES:
+            raise MemoryBundleError(
+                f"invalid history status for point {point_label!r}: {status!r}"
+            )
+        raw_warnings = row["warnings"]
+        if not isinstance(raw_warnings, list) or not all(
+            isinstance(item, str) for item in raw_warnings
+        ):
+            raise MemoryBundleError(
+                f"history warnings for point {point_label!r} must be strings"
+            )
+        event_count = require_nonnegative_int(
+            row["event_count"],
+            f"history event_count for point {point_label!r}",
+            error_type=MemoryBundleError,
+        )
+        trace_index_offset = require_nonnegative_int(
+            row["trace_index_offset"],
+            f"history trace_index_offset for point {point_label!r}",
+            error_type=MemoryBundleError,
+        )
+        if status != "complete" and event_count:
+            raise MemoryBundleError(
+                f"incomplete history for point {point_label!r} cannot contain events"
+            )
+        statuses.append(
+            _DeviceHistoryStatus(
+                device_index=device_index,
+                status=cast(HistoryWindowStatus, status),
+                warnings=tuple(raw_warnings),
+                event_count=event_count,
+                trace_index_offset=trace_index_offset,
+            )
+        )
+    return tuple(statuses)
+
+
+def _event_evidence_payload(evidence: _PointEventEvidence) -> dict[str, object]:
+    return {
+        "start_index": evidence.start_index,
+        "end_index": evidence.end_index,
+        "devices": [
+            {
+                "device_index": device.device_index,
+                "trace_index_offset": device.trace_index_offset,
+                "entries": [dict(entry) for entry in device.entries],
+            }
+            for device in evidence.devices
+        ],
+    }
+
+
+def _event_evidence_from_payload(
+    payload: Any, *, point: MemoryPoint
+) -> _PointEventEvidence:
+    if not isinstance(payload, Mapping):
+        raise MemoryBundleError(
+            f"event evidence for point {point.label!r} must be a JSON object"
+        )
+    require_exact_fields(
+        payload,
+        _EVENT_FIELDS,
+        f"event evidence for point {point.label!r}",
+        error_type=MemoryBundleError,
+    )
+    start_index = require_nonnegative_int(
+        payload["start_index"], "event start_index", error_type=MemoryBundleError
+    )
+    end_index = require_nonnegative_int(
+        payload["end_index"], "event end_index", error_type=MemoryBundleError
+    )
+    if start_index != point.index - 1 or end_index != point.index:
+        raise MemoryBundleError(
+            f"event evidence indices do not match point {point.label!r}"
+        )
+    raw_devices = payload["devices"]
+    if not isinstance(raw_devices, list) or len(raw_devices) != len(
+        point._history_statuses
+    ):
+        raise MemoryBundleError(
+            f"event devices do not match history for point {point.label!r}"
+        )
+    devices = []
+    for index, (row, status) in enumerate(zip(raw_devices, point._history_statuses)):
+        if not isinstance(row, Mapping):
+            raise MemoryBundleError(
+                f"event device {index} for point {point.label!r} must be an object"
+            )
+        require_exact_fields(
+            row,
+            _EVENT_DEVICE_FIELDS,
+            f"event device {index} for point {point.label!r}",
+            error_type=MemoryBundleError,
+        )
+        device_index = require_nonnegative_int(
+            row["device_index"], "event device_index", error_type=MemoryBundleError
+        )
+        trace_index_offset = require_nonnegative_int(
+            row["trace_index_offset"],
+            "event trace_index_offset",
+            error_type=MemoryBundleError,
+        )
+        raw_entries = row["entries"]
+        if not isinstance(raw_entries, list) or not all(
+            isinstance(entry, Mapping) for entry in raw_entries
+        ):
+            raise MemoryBundleError(
+                f"event entries for point {point.label!r} must be objects"
+            )
+        if (
+            device_index != status.device_index
+            or trace_index_offset != status.trace_index_offset
+            or len(raw_entries) != status.event_count
+        ):
+            raise MemoryBundleError(
+                f"event payload does not match history for point {point.label!r}"
+            )
+        devices.append(
+            _DeviceEventEvidence(
+                device_index=device_index,
+                status=status.status,
+                warnings=status.warnings,
+                entries=tuple(dict(entry) for entry in raw_entries),
+                trace_index_offset=trace_index_offset,
+            )
+        )
+    return _PointEventEvidence(
+        start_index=start_index,
+        end_index=end_index,
+        devices=tuple(devices),
+    )
+
+
+def _read_gzip_json(path: Path, *, context: str) -> Any:
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, EOFError, zlib.error) as exc:
+        raise MemoryBundleError(f"could not load {context}: {exc}") from exc
+    return strict_json_loads(
+        text,
+        error_type=MemoryBundleError,
+        context=context,
+    )
+
+
+def _safe_bundle_payload_path(
+    root: Path, raw_path: Any, *, field: str, expected: str
+) -> Path:
     if not isinstance(raw_path, str) or not raw_path:
-        raise MemoryBundleError("memory point is missing snapshot_file")
+        raise MemoryBundleError(f"memory point is missing {field}")
     relative = Path(raw_path)
     if relative.is_absolute():
-        raise MemoryBundleError("snapshot_file must be relative to the bundle")
+        raise MemoryBundleError(f"{field} must be relative to the bundle")
     resolved = (root / relative).resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
         raise MemoryBundleError(
-            f"snapshot_file escapes the memory bundle: {raw_path!r}"
+            f"{field} escapes the memory bundle: {raw_path!r}"
         ) from exc
-    expected = f"snapshots/{expected_index:04d}.json.gz"
     if raw_path != expected:
-        raise MemoryBundleError(f"snapshot_file must be {expected!r}")
+        raise MemoryBundleError(f"{field} must be {expected!r}")
     return resolved

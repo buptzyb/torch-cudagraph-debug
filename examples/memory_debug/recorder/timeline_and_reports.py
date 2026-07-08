@@ -76,6 +76,10 @@ def main() -> None:
             "after_capture",
             "after_replay",
         )
+        # A recorded point exposes allocator state without cumulative event traces.
+        capture_state = loaded["after_capture"].allocator_state()
+        assert "device_traces" not in capture_state
+
         timeline = loaded.timeline(
             attribution=MemoryAttributionOptions(
                 stacks=True,
@@ -99,6 +103,7 @@ def main() -> None:
         assert graph_state.numel() == 12 * MIB
 
         print(timeline.to_text(include_unchanged=False))
+        print(f"after-capture segments: {len(capture_state['segments'])}")
         print(f"bundle: {bundle_dir}")
         print(f"HTML report: {paths['html']}")
     finally:

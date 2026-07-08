@@ -151,6 +151,40 @@ instead. Memory collection is device-aware: device index is part of pool and
 observation identity, and one Probe or Recorder may select one device, a device
 sequence, or all visible devices.
 
+## Memory State And Event Evidence
+
+A memory collection starts from one private PyTorch `_snapshot()` call, but the
+Recorder does not retain that cumulative payload as a Point:
+
+```mermaid
+flowchart LR
+    C["_MemoryCollector capture"] -->|split state| S["Allocator state<br/>without device_traces"]
+    C -->|slice interval| E["Raw event evidence<br/>previous Point to current Point"]
+    S -->|owned by| P["MemoryPoint"]
+    E -->|owned by ending point| P
+    P -->|supports| SA["State comparison and stacks"]
+    P -->|supports| EA["Events and lifetimes"]
+```
+
+Every `MemoryPoint` owns one allocator state. After the first point, it also
+owns the internal event evidence for the interval ending at that point. There is
+no public interval object: a same-run range reads the ending points whose event
+chunks it crosses. Probe snapshots retain their complete in-memory raw snapshot
+for low-level local inspection and derive `allocator_state()` from it.
+
+Persisted runs mirror this ownership with `states/NNNN.json.gz` and
+`events/NNNN-NNNN.json.gz`. State and event payloads have separate lazy caches.
+State-only comparisons therefore load only endpoint states; event and lifetime
+analysis loads only the event chunks crossed by the requested range. Event
+entries remain raw until attribution normalizes them, preserving allocator fields
+that this package does not yet recognize.
+
+Per-device event evidence has one internal status: `complete`, `disabled`,
+`boundary_unavailable`, `truncated`, or `invalid_boundary_order`. The status is
+recorded at collection time, while public analysis raises the corresponding
+typed error only when the caller requests evidence crossing that interval. A
+truncated interval does not invalidate its point-in-time allocator states.
+
 ## Architectural Boundaries
 
 1. Probe and Recorder are sibling public entry points over a private,

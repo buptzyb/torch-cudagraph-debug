@@ -1,23 +1,26 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 import torch_cudagraph_debug.memory_debug.allocator_snapshot as allocator_snapshot_module
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
     MemoryDebugError,
+    MemoryHistoryBoundaryError,
     MemoryHistoryDisabledError,
     MemoryHistoryTruncatedError,
     MemoryOwnershipError,
-    MemoryReconciliationError,
     MemoryPoint,
     MemoryPoolKey,
+    MemoryReconciliationError,
     MemoryRecorder,
     compare_phases,
     compare_points,
 )
 
-from ._helpers import event, make_run, segment, snapshot
+from ._helpers import event, make_history_run, make_run, segment, snapshot
 
 
 def test_same_run_keeps_pool_totals_and_stream_deltas_separate() -> None:
@@ -618,6 +621,79 @@ def test_event_history_uses_trace_for_segment_device() -> None:
     assert comparison.allocator_events[0].size_bytes == 64
 
 
+def test_event_only_range_loads_endpoint_states_and_all_event_chunks(
+    monkeypatch,
+) -> None:
+    run = make_history_run(
+        [
+            ([segment(active=0, address=1000)], []),
+            (
+                [segment(active=64, address=1000)],
+                [event("alloc", address=1000, size=64, pool=(0, 0))],
+            ),
+            (
+                [segment(active=128, address=1000)],
+                [event("alloc", address=2000, size=64, pool=(0, 0))],
+            ),
+        ],
+        labels=("start", "middle", "end"),
+    )
+    original = MemoryPoint.allocator_state
+    state_calls: list[int] = []
+
+    def tracked(point: MemoryPoint):
+        state_calls.append(point.index)
+        return original(point)
+
+    monkeypatch.setattr(MemoryPoint, "allocator_state", tracked)
+    comparison = run.compare(
+        "start",
+        "end",
+        attribution=MemoryAttributionOptions(events=True),
+    )
+
+    assert state_calls == [0, 2]
+    assert sum(item.count for item in comparison.allocator_events) == 2
+
+
+@pytest.mark.parametrize("missing_capture", [1, 2])
+def test_unrecorded_event_endpoint_raises_typed_error(
+    missing_capture: int,
+) -> None:
+    markers: list[str] = []
+
+    def provider(marker: str):
+        markers.append(marker)
+        trace = [
+            event("snapshot", marker=item)
+            for index, item in enumerate(markers, start=1)
+            if index != missing_capture
+        ]
+        return snapshot(segment(active=64), traces=[trace])
+
+    recorder = MemoryRecorder._from_snapshot_provider(provider)
+    capture = recorder._collector.capture
+    capture_count = 0
+
+    def without_endpoint_boundary(marker: str, **kwargs):
+        nonlocal capture_count
+        result = capture(marker, **kwargs)
+        capture_count += 1
+        return replace(result, boundary_recorded=capture_count != missing_capture)
+
+    recorder._collector.capture = without_endpoint_boundary
+    recorder.record_point("before")
+    recorder.record_point("after")
+    run = recorder.finish()
+
+    with pytest.raises(MemoryHistoryBoundaryError, match="could not be recorded"):
+        run.compare(
+            "before",
+            "after",
+            attribution=MemoryAttributionOptions(events=True),
+        )
+
+
 def test_event_history_overwritten_marker_raises_typed_error() -> None:
     markers: list[str] = []
 
@@ -639,6 +715,13 @@ def test_event_history_overwritten_marker_raises_typed_error() -> None:
     recorder.record_point("before")
     recorder.record_point("after")
     run = recorder.finish()
+
+    assert run.compare("before", "after").candidate is run["after"]
+    assert not any(
+        "event boundary" in warning
+        for point in run.points
+        for warning in point.warnings
+    )
 
     with pytest.raises(MemoryHistoryTruncatedError, match="truncated"):
         run.compare(
@@ -677,27 +760,29 @@ def test_event_history_boundary_order_raises_reconciliation_error() -> None:
         )
 
 
-def test_manifest_only_comparisons_do_not_load_raw_snapshots(monkeypatch) -> None:
+def test_manifest_only_comparisons_do_not_load_allocator_states(monkeypatch) -> None:
     reference = make_run([snapshot(segment(active=10))], name="reference")
     candidate = make_run([snapshot(segment(active=20))], name="candidate")
     run = make_run(
         [snapshot(segment(active=10)), snapshot(segment(active=20))],
         labels=("before", "after"),
     )
-    original = MemoryPoint.raw_snapshot
+    original = MemoryPoint.allocator_state
     calls: list[tuple[str, int]] = []
 
     def tracked(point: MemoryPoint):
         calls.append((point.run_id, point.index))
         return original(point)
 
-    monkeypatch.setattr(MemoryPoint, "raw_snapshot", tracked)
+    monkeypatch.setattr(MemoryPoint, "allocator_state", tracked)
     compare_points(reference.points[0], candidate.points[0])
     run.timeline()
     assert calls == []
 
 
-def test_attributed_timeline_and_phase_load_each_point_once(monkeypatch) -> None:
+def test_attributed_timeline_and_phase_load_each_allocator_state_once(
+    monkeypatch,
+) -> None:
     timeline_run = make_run(
         [
             snapshot(segment(active=10)),
@@ -716,14 +801,14 @@ def test_attributed_timeline_and_phase_load_each_point_once(monkeypatch) -> None
         name="candidate",
         labels=("start", "end"),
     )
-    original = MemoryPoint.raw_snapshot
+    original = MemoryPoint.allocator_state
     calls: list[tuple[str, int]] = []
 
     def tracked(point: MemoryPoint):
         calls.append((point.run_id, point.index))
         return original(point)
 
-    monkeypatch.setattr(MemoryPoint, "raw_snapshot", tracked)
+    monkeypatch.setattr(MemoryPoint, "allocator_state", tracked)
     timeline_run.timeline(attribution=MemoryAttributionOptions(stacks=True))
     assert calls == [(timeline_run.run_id, index) for index in range(3)]
 

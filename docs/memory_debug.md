@@ -184,6 +184,9 @@ Pass a CUDA stream to synchronize only the workload stream, a CUDA device to
 request device-wide synchronization explicitly, or `False` when the application
 owns the ordering. During CUDA stream capture, requested synchronization is
 skipped because it is capture-illegal, and the point records a warning.
+The point-in-time allocator state remains usable, but an event interval touching
+a point whose boundary marker could not be recorded is reported as
+`boundary_unavailable` when event or lifetime evidence is requested.
 
 `MemoryRecorder` only collects data. `finish()` returns an immutable
 `MemoryRun`; analysis belongs to the run and result objects:
@@ -243,13 +246,12 @@ comparison = run.compare("start", "end", attribution=options)
 
 Event and lifetime requests fail with typed errors instead of degrading:
 `MemoryHistoryDisabledError` when history was never recorded on an analyzed
-device, and `MemoryHistoryTruncatedError` when a boundary marker was overwritten
-in the bounded history ring buffer. Stack attribution returns exact framed rows
-plus an `<unattributed>` bucket when coverage is partial; it raises
+device, `MemoryHistoryBoundaryError` when the previous point could not record a
+metadata boundary, and `MemoryHistoryTruncatedError` when a recorded boundary was
+overwritten in the bounded history ring buffer. Stack attribution returns exact framed rows plus an `<unattributed>` bucket when coverage is partial; it raises
 `MemoryHistoryDisabledError` only when nonempty active state has zero frame
-coverage. When complete history still
-cannot be reconciled with the snapshots, `MemoryReconciliationError` is raised
-unconditionally — that combination indicates corrupted input or a bug in this
+coverage. Invalid boundary order or complete history that cannot be reconciled with the
+allocator states raises `MemoryReconciliationError` unconditionally — that combination indicates corrupted input or a bug in this
 package, never a legitimate state.
 
 Every successful comparison exposes `attribution_status`. `requested`
@@ -258,7 +260,9 @@ describe the evidence that backed it.
 
 A block's `frames` are the allocation call stack for memory still active in a
 snapshot. Entries under `device_traces` are historical allocator events, and
-their `frames` are event call stacks. These are separate data sources.
+their `frames` are event call stacks. These are separate data sources. Recorder bundles remove cumulative
+`device_traces` from point state and preserve only each adjacent interval's raw
+event mappings.
 
 The normalized raw action vocabulary is `alloc`, `free_requested`,
 `free_completed`, `segment_alloc`, `segment_free`, `segment_map`,
@@ -281,9 +285,11 @@ phase_range = run.between("before_capture", "after_capture")
 ```
 
 The default timeline is manifest-only: it computes absolute state and deltas
-without decompressing raw snapshots, and `timeline.point_comparisons` is empty.
-Passing `MemoryAttributionOptions(stacks=True)` or `events=True` streams one raw
-snapshot per point and attaches attributed adjacent comparisons.
+without decompressing allocator-state files, and
+`timeline.point_comparisons` is empty.
+Passing `MemoryAttributionOptions(stacks=True)` loads each required allocator
+state, and `events=True` additionally loads each ending point's event evidence.
+The timeline then attaches attributed adjacent comparisons.
 The first point has `delta=None`; each later point is compared with its immediate
 predecessor. Pools that disappear remain visible with zero state and a negative
 delta.
@@ -332,7 +338,7 @@ interval. `free_completed` means allocator-reusable; it does not mean the
 segment was returned to CUDA or that pool `reserved_bytes` decreased.
 
 Lifetime analysis requires complete allocator event history for the analyzed
-range and reconciles the event stream against every snapshot. When event
+range and reconciles the event stream against every allocator state. When event
 replay finds contradictions, the raised `MemoryReconciliationError` summarizes
 each reason and device with the total count and up to three example
 addresses. The report describes
@@ -457,7 +463,7 @@ programmatically. Reports preserve per-rank values and show min, max, spread,
 and the worst rank; GPU memory is deliberately not summed across ranks.
 `pool_mappings` is keyed by rank because private-pool identity is rank-local.
 Group loading defaults to `cache_snapshots=False`; use `True` only when repeated
-raw snapshot access is worth the additional host memory.
+allocator-state or event-payload access is worth the additional host memory.
 
 ## Reports And Bundles
 
@@ -507,13 +513,16 @@ allocated, reserved, active, requested, and optional cohort charts.
 `include_unchanged=False` filters zero-change rows from text, HTML, and CSV;
 JSON always retains the complete result.
 
-Bundles use the `torch-cudagraph-debug/memory-run` schema: one
-`manifest.json` plus one gzip JSON snapshot per point. Manifest, point, and
-observation fields are canonical; derived awaiting-free, inactive, and
-fragmentation values are not stored. Loading a run reads only the manifest and
-compact summaries.
-`point.raw_snapshot()` loads and caches the full snapshot lazily when the run
-was loaded with `cache_snapshots=True`, the `MemoryRun.load()` default. The
+Bundles use the `torch-cudagraph-debug/memory-run` schema: `manifest.json`, one
+`states/NNNN.json.gz` allocator-state file per point, and one
+`events/NNNN-NNNN.json.gz` event-evidence file per adjacent interval. Point zero
+has no event file. State files omit cumulative `device_traces`; event files keep
+the raw mappings for only their interval. Manifest, point, and observation fields
+are canonical; derived awaiting-free, inactive, and fragmentation values are not
+stored. Loading a run reads only the manifest and compact summaries.
+`point.allocator_state()` loads the immutable state lazily. Event and state
+payloads use separate caches when the run was loaded with
+`cache_snapshots=True`, the `MemoryRun.load()` default. The
 CLI and `MemoryRunGroup.load()` use bounded-memory loading, retaining only
 current comparison payloads and compact indexes. The format is JSON-only. Use
 one bundle per process/rank and one writer per bundle.
@@ -581,8 +590,10 @@ change in a minor release. Snapshot summaries use
 
 ## Operational Constraints
 
-- Full allocator event history is cumulative up to PyTorch's `max_entries`;
-  frequent memory points can produce large bundles.
+- PyTorch allocator history remains bounded by `max_entries` during collection.
+  If one point interval exceeds that ring, state remains usable but event and
+  lifetime queries crossing that interval raise `MemoryHistoryTruncatedError`;
+  increase `max_entries` or record real points more frequently.
 - Lifetime analysis is per process and rank and requires complete marker-bounded
   event history. `born_between` retains transient allocations that are active at
   neither endpoint snapshot.

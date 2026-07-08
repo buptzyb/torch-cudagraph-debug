@@ -77,7 +77,8 @@ Memory facade:
 - Functions: `compare_snapshots`, `compare_points`, `compare_phases`, and
   `compare_run_group_phases`.
 - Errors: `MemoryDebugError`, `MemoryHistoryError`,
-  `MemoryHistoryDisabledError`, `MemoryHistoryTruncatedError`,
+  `MemoryHistoryDisabledError`, `MemoryHistoryBoundaryError`,
+  `MemoryHistoryTruncatedError`,
   `MemoryReconciliationError`, `MemoryBundleError`, and
   `MemoryOwnershipError`.
 
@@ -708,6 +709,7 @@ snapshot.pool_stats -> Mapping[MemoryPoolKey, MemoryStats]
 snapshot.allocator_scope_stats -> Mapping[AllocatorScope, MemoryStats]
 snapshot.observation(device_index, pool_id, stream) -> MemoryObservation
 snapshot.allocator_settings -> Mapping[str, FrozenJSONValue]
+snapshot.allocator_state() -> Mapping[str, FrozenJSONValue]
 snapshot.raw_snapshot() -> FrozenJSONValue
 snapshot.descriptor() -> dict
 ```
@@ -717,7 +719,9 @@ pool and observation key, so identical pool IDs on different devices remain
 separate. Same-Probe comparison can use marker-delimited history; independent
 probes support state and stacks but reject events and lifetimes.
 
-Raw snapshots are recursively immutable. Use
+`allocator_state()` returns the point-in-time allocator envelope without cumulative
+`device_traces`; `raw_snapshot()` remains available on Probe snapshots for
+custom trace inspection. Both views are recursively immutable. Use
 `memory_debug.advanced.mutable_snapshot(snapshot)` for an editable copy.
 Probe snapshots are not persisted; use Recorder for named points and bundles.
 
@@ -744,8 +748,9 @@ accept pool handles or allocator-history configuration. Device selection follows
 initialized `torch.distributed`.
 
 When `bundle_dir` is set, the directory must be absent or empty. Construction
-creates an incomplete manifest. Every `record_point()` writes one gzip JSON
-snapshot and updates that manifest; `finish()` marks it complete. A nonempty
+creates an incomplete manifest. Every `record_point()` writes one allocator-state
+file and, after the first point, one event-evidence file for the preceding interval,
+then updates the manifest; `finish()` marks it complete. A nonempty
 target directory raises `FileExistsError`.
 
 `True` synchronizes every selected device, a CUDA stream synchronizes only
@@ -775,9 +780,11 @@ synchronizes according to the Recorder default or its per-call override. During
 current-stream capture it skips requested synchronization and snapshots
 immediately.
 
-The recorder temporarily sets a PyTorch allocator metadata marker around the
-snapshot when those private APIs are available. This marker delimits same-run
-event windows. Marker failures become point warnings.
+The recorder temporarily sets a PyTorch allocator metadata marker around each
+snapshot when those private APIs are available. Each ending point stores only the
+raw event entries between the previous boundary and itself. Marker failures and
+history gaps are recorded per device and become typed errors only when an analysis
+requests the affected event evidence.
 
 Snapshot and metadata values must be JSON-compatible: null, string, bool,
 finite number, list/tuple, or a mapping with string keys. Validation errors
@@ -806,7 +813,9 @@ snapshots without exposing a provider in the public constructor.
 ### MemoryPoint
 
 A point owns ordered device/pool/stream observations and one recursively
-immutable raw allocator snapshot.
+immutable allocator-state view. Event evidence from the previous point to this
+point is an internal, lazily loaded analysis input rather than a second public
+container.
 
 ```python
 @dataclass(frozen=True)
@@ -823,7 +832,7 @@ point.observation_stats -> Mapping[MemoryObservationKey, MemoryStats]
 point.pool_stats -> Mapping[MemoryPoolKey, MemoryStats]
 point.allocator_scope_stats -> Mapping[AllocatorScope, MemoryStats]
 point.allocator_settings -> Mapping[str, FrozenJSONValue]
-point.raw_snapshot() -> FrozenJSONValue
+point.allocator_state() -> Mapping[str, FrozenJSONValue]
 point.descriptor() -> dict
 ```
 
@@ -832,7 +841,7 @@ block count, inactive block count, largest inactive block, expandable segment
 count, and expandable reserved bytes. Three byte metrics are derived:
 `awaiting_free_bytes = active_bytes - allocated_bytes`,
 `inactive_bytes = reserved_bytes - active_bytes`, and
-`internal_fragmentation_bytes = active_bytes - requested_bytes`. Raw snapshots
+`internal_fragmentation_bytes = active_bytes - requested_bytes`. Allocator states
 and nested metadata are recursively frozen; `advanced.mutable_snapshot(point)`
 returns an editable deep copy.
 
@@ -912,9 +921,11 @@ partial frame coverage returns exact attributed rows plus an `<unattributed>`
 bucket, while zero coverage for nonempty active state raises
 `MemoryHistoryDisabledError`. Events and lifetime transitions require complete
 allocator event history. Missing event history raises
-`MemoryHistoryDisabledError`, and an overwritten boundary marker raises
-`MemoryHistoryTruncatedError`. Complete history that still cannot be reconciled
-with the snapshots raises `MemoryReconciliationError` unconditionally. Display
+`MemoryHistoryDisabledError`; an unavailable metadata boundary raises
+`MemoryHistoryBoundaryError`; and a previous boundary overwritten by the bounded
+history ring raises `MemoryHistoryTruncatedError`. Invalid boundary order or
+complete history that cannot be reconciled with allocator state raises
+`MemoryReconciliationError` unconditionally. Display
 limits
 affect only text and HTML, never structured result tuples, JSON, or CSV.
 
@@ -1008,7 +1019,7 @@ details are inferable from the recorded call stacks and allocation sizes.
 previous point; disappeared pools remain visible as zero state with a negative
 delta. Unchanged rows are retained by default.
 
-The default timeline is manifest-only and does not read raw snapshots;
+The default timeline is manifest-only and does not read allocator-state files;
 `timeline.point_comparisons` is empty. Requesting stack or event attribution
 streams each point once and stores attributed same-run point comparisons.
 
@@ -1029,7 +1040,7 @@ compare_points(
 ```
 
 The points must have different `run_id` values. Without `stacks=True`, the
-comparison uses compact manifest state and never reads raw snapshots. Cross-run
+comparison uses compact manifest state and never reads allocator-state files. Cross-run
 matching is conservative:
 
 1. Default `(0,0)` pools match automatically when present in both runs.
@@ -1108,10 +1119,9 @@ compare_run_group_phases(
 non-null unique ranks, one run name, one ordered point-label sequence, and no
 conflicting non-null group IDs or world sizes. Declared-but-missing ranks,
 missing identity fields, incomplete bundles, runtime provenance differences,
-and user metadata differences are warnings. The default does not retain
-decompressed raw snapshots across ranks or points; set
-`cache_snapshots=True` only for workloads that repeatedly inspect the same
-raw payloads.
+and user metadata differences are warnings. The default does not retain decompressed allocator-state or event payloads across
+ranks or points; set `cache_snapshots=True` only for workloads that repeatedly
+inspect the same payloads.
 
 `MemoryRunGroupSummary` emits per-rank point/scope states plus min, max, spread,
 and worst rank. `MemoryRunGroupPhaseComparison` pairs common ranks and
@@ -1212,18 +1222,32 @@ Group phase reports create `rank_decomposition.csv`,
 
 ### Bundle Format
 
-The bundle schema is `torch-cudagraph-debug/memory-run`. A bundle has one
-plain JSON manifest and `snapshots/NNNN.json.gz` files. Writes use a temporary
-file followed by atomic replacement. Snapshot paths are validated to remain
-inside the bundle.
+The bundle schema is `torch-cudagraph-debug/memory-run` with
+`format_version=1`:
+
+```text
+run.tcgd-memory/
+  manifest.json
+  states/0000.json.gz
+  events/0000-0001.json.gz
+```
+
+Every point owns one state file. Point zero has no event file; each later point
+owns the raw allocator events from the previous point through itself. State files
+preserve the `_snapshot()` envelope except `device_traces`; event entries preserve
+unknown allocator fields. Every payload and manifest write uses a temporary file
+followed by atomic replacement, and every path is validated to remain inside the
+bundle.
 
 Manifest, point, and observation objects have canonical required fields.
 Observation rows persist the ten base `MemoryStats` fields. `awaiting_free_bytes`,
 `inactive_bytes`, and `internal_fragmentation_bytes` are derived after loading.
 Missing or unknown fields are rejected.
 
-Loading reads only manifest summaries and never executes pickle. A bundle has
-one writer; distributed users create one bundle per rank.
+Loading reads only manifest summaries and never executes pickle. Allocator state
+and event evidence have separate lazy caches, so state-only analysis never reads
+event files. A bundle has one writer; distributed users create one bundle per
+rank.
 
 ### CLI
 
@@ -1390,9 +1414,10 @@ advanced.format_comparison(reference, candidate, delta)
 - `MemoryDebugError`: memory domain base.
 - `MemoryHistoryError`: requested history unavailable or incomplete.
 - `MemoryHistoryDisabledError`: history never recorded on an analyzed device.
+- `MemoryHistoryBoundaryError`: a point boundary could not be recorded.
 - `MemoryHistoryTruncatedError`: a boundary marker was overwritten in the
   history ring buffer.
-- `MemoryReconciliationError`: complete history contradicts the snapshots;
-  corrupted input or a torch-cudagraph-debug bug.
+- `MemoryReconciliationError`: boundary order is invalid or complete history
+  contradicts allocator state, indicating corrupted input or a package bug.
 - `MemoryBundleError`: malformed, unsupported, or unreadable bundle.
 - `MemoryOwnershipError`: point used with a run that does not own it.

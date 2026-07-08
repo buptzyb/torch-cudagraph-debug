@@ -59,7 +59,13 @@ def mutable_snapshot(
 ) -> JSONValue:
     """Return a deep mutable copy of a point, probe snapshot, or raw view."""
 
-    raw = source.raw_snapshot() if hasattr(source, "raw_snapshot") else source
+    raw = (
+        source.allocator_state()
+        if isinstance(source, MemoryPoint)
+        else source.raw_snapshot()
+        if isinstance(source, MemoryProbeSnapshot)
+        else source
+    )
     return _thaw_json(_freeze_json(cast(FrozenJSONValue, raw)))
 
 

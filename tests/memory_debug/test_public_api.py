@@ -77,6 +77,7 @@ def test_memory_facade_exports_public_result_types() -> None:
         "MemoryStatsDelta",
         "MemoryTimeline",
         "MemoryHistoryDisabledError",
+        "MemoryHistoryBoundaryError",
         "MemoryHistoryTruncatedError",
         "MemoryReconciliationError",
         "PhaseMetric",

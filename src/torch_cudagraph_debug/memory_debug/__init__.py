@@ -28,11 +28,12 @@ from .comparison_models import (
 from .errors import (
     MemoryBundleError,
     MemoryDebugError,
+    MemoryHistoryBoundaryError,
     MemoryHistoryDisabledError,
     MemoryHistoryError,
     MemoryHistoryTruncatedError,
-    MemoryReconciliationError,
     MemoryOwnershipError,
+    MemoryReconciliationError,
 )
 from .events import AllocatorEventSummary
 from .lifetimes import (
@@ -110,6 +111,7 @@ __all__ = [
     "MemoryDisplayOptions",
     "MemoryEvidenceStatus",
     "MemoryHistoryDisabledError",
+    "MemoryHistoryBoundaryError",
     "MemoryHistoryError",
     "MemoryHistoryTruncatedError",
     "MemoryReconciliationError",

@@ -249,6 +249,26 @@ def normalize_device_trace_entries(
     return tuple(entries)
 
 
+def normalize_raw_trace_entries(
+    entries: Sequence[object],
+    device_index: int,
+    *,
+    trace_index_offset: int = 0,
+) -> tuple[AllocatorTraceEntry, ...]:
+    """Normalize a preserved raw trace slice for one device."""
+
+    normalized = []
+    for offset, raw in enumerate(entries):
+        trace_index = trace_index_offset + offset
+        if not isinstance(raw, Mapping):
+            raise TypeError(
+                f"event entries for device {device_index} at index {offset} "
+                "must be a mapping"
+            )
+        normalized.append(_normalize_trace_entry(raw, device_index, trace_index))
+    return tuple(normalized)
+
+
 def _normalize_trace_entry(
     raw: Mapping[str, Any], device_index: int, trace_index: int
 ) -> AllocatorTraceEntry:

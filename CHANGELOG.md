@@ -27,7 +27,7 @@
   so steady-state churn read like a leak.
 - Timeline HTML charts group polylines by the pool key actually present in
   timeline rows; previously every pool collapsed into one unlabeled line.
-- A truncated or corrupted gzip snapshot payload raises `MemoryBundleError`
+- A truncated or corrupted gzip allocator-state or event payload raises `MemoryBundleError`
   instead of leaking a raw `EOFError` or `zlib.error` through the CLI.
 
 ### Changed
@@ -37,7 +37,8 @@
   removed; every reported transition is event-backed, and requests that
   predate the analysis range carry a `range_boundary` origin.
 - Missing or incomplete event and lifetime evidence now raises typed errors:
-  `MemoryHistoryDisabledError` (history never recorded) and
+  `MemoryHistoryDisabledError` (history never recorded),
+  `MemoryHistoryBoundaryError` (point boundary unavailable), and
   `MemoryHistoryTruncatedError` (marker overwritten in the ring buffer). Stack
   attribution retains exact partial results with explicit coverage and raises
   only when nonempty active state has zero frame coverage. The `on_missing`
@@ -81,10 +82,12 @@
 - Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
   summary and rank-paired phase analysis without summing memory across GPUs.
 - Canonical gzip JSON run bundles with atomic writes, exact manifest fields,
-  lazy snapshot loading, strict JSON validation, and path traversal protection.
+  point-owned `states/NNNN.json.gz` allocator state, adjacent
+  `events/NNNN-NNNN.json.gz` evidence, independent lazy caches, strict JSON
+  validation, and path traversal protection.
 - Manifest-only default timelines and unattributed cross-run comparisons;
-  attributed analyses stream each raw point once and retain bounded compact
-  indexes.
+  attributed analyses load only required allocator states and point-owned event
+  chunks while retaining bounded compact indexes.
 - Result-owned text, nested JSON, flattened CSV, and standalone HTML reports.
   `include_unchanged=False` consistently filters text, HTML, and CSV while
   JSON remains complete.

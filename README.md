@@ -4,7 +4,7 @@ Focused debugging tools for PyTorch CUDA Graphs:
 
 - `tensor_debug` inserts native tensor probes and builds persisted eager or
   CUDA Graph runs for offline differential analysis.
-- `memory_debug` records allocator snapshots and analyzes default and
+- `memory_debug` records allocator states and analyzes default and
   non-default pools, including CUDA Graph private pools.
 
 The package targets Linux, Python 3.10+, and CUDA-enabled PyTorch 2.6+.

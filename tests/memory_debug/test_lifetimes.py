@@ -11,11 +11,11 @@ from torch_cudagraph_debug.memory_debug import (
     MemoryDisplayOptions,
     MemoryHistoryDisabledError,
     MemoryHistoryTruncatedError,
-    MemoryReconciliationError,
     MemoryLifetimeOptions,
     MemoryLifetimeSelection,
     MemoryOwnershipError,
     MemoryPoint,
+    MemoryReconciliationError,
     MemoryRecorder,
     compare_points,
 )
@@ -1004,7 +1004,7 @@ def test_lifetime_point_validation_and_empty_run() -> None:
         empty.lifetimes()
 
 
-def test_lifetime_scan_loads_each_point_once(monkeypatch) -> None:
+def test_lifetime_scan_loads_each_allocator_state_once(monkeypatch) -> None:
     run = make_history_run(
         [
             ([segment(active=10)], []),
@@ -1013,19 +1013,21 @@ def test_lifetime_scan_loads_each_point_once(monkeypatch) -> None:
         ],
         labels=("a", "b", "c"),
     )
-    original = MemoryPoint.raw_snapshot
+    original = MemoryPoint.allocator_state
     calls: list[int] = []
 
     def tracked(point: MemoryPoint):
         calls.append(point.index)
         return original(point)
 
-    monkeypatch.setattr(MemoryPoint, "raw_snapshot", tracked)
+    monkeypatch.setattr(MemoryPoint, "allocator_state", tracked)
     run.lifetimes()
     assert calls == [0, 1, 2]
 
 
-def test_combined_timeline_attribution_loads_each_point_once(monkeypatch) -> None:
+def test_combined_timeline_attribution_loads_each_allocator_state_once(
+    monkeypatch,
+) -> None:
     run = make_history_run(
         [
             ([segment(active=10)], []),
@@ -1034,14 +1036,14 @@ def test_combined_timeline_attribution_loads_each_point_once(monkeypatch) -> Non
         ],
         labels=("before", "middle", "after"),
     )
-    original = MemoryPoint.raw_snapshot
+    original = MemoryPoint.allocator_state
     calls: list[int] = []
 
     def tracked(point: MemoryPoint):
         calls.append(point.index)
         return original(point)
 
-    monkeypatch.setattr(MemoryPoint, "raw_snapshot", tracked)
+    monkeypatch.setattr(MemoryPoint, "allocator_state", tracked)
     run.timeline(
         attribution=MemoryAttributionOptions(
             stacks=True,

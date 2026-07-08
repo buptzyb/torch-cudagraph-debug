@@ -32,6 +32,7 @@ from .allocator_snapshot import (
     trace_device_indices,
 )
 from .errors import (
+    MemoryHistoryBoundaryError,
     MemoryHistoryDisabledError,
     MemoryHistoryTruncatedError,
     MemoryReconciliationError,
@@ -402,7 +403,7 @@ def analyze_allocation_lifetimes(
     active_at: MemoryPoint | None,
     born_between: tuple[MemoryPoint, MemoryPoint] | None,
     options: MemoryLifetimeOptions,
-    _raw_snapshots: Sequence[Any] | None = None,
+    _allocator_states: Sequence[Any] | None = None,
 ) -> MemoryAllocationLifetimeAnalysis:
     """Build allocation cohorts for a range in one recorded run."""
 
@@ -416,7 +417,7 @@ def analyze_allocation_lifetimes(
         active_at=active_at,
         born_between=born_between,
         options=options,
-        raw_snapshots=_raw_snapshots,
+        raw_snapshots=_allocator_states,
     )
 
 
@@ -443,7 +444,11 @@ def analyze_probe_snapshot_lifetimes(
         active_at=None,
         born_between=None,
         options=options,
-        raw_snapshots=_raw_snapshots,
+        raw_snapshots=(
+            tuple(state.raw_snapshot() for state in (reference, candidate))
+            if _raw_snapshots is None
+            else _raw_snapshots
+        ),
     )
 
 
@@ -467,6 +472,7 @@ def _analyze_allocation_lifetimes(
     points = tuple(states)
     observations, histories = _scan_points(
         points,
+        source_kind=source_kind,
         events=True,
         raw_snapshots=raw_snapshots,
     )
@@ -555,6 +561,7 @@ def _state_index(state: Any) -> int:
 def _scan_points(
     points: Sequence[Any],
     *,
+    source_kind: Literal["run", "probe"],
     events: bool,
     raw_snapshots: Sequence[Any] | None,
 ) -> tuple[
@@ -571,7 +578,7 @@ def _scan_points(
     snapshots = (
         iter(raw_snapshots)
         if raw_snapshots is not None
-        else (point.raw_snapshot() for point in points)
+        else (point.allocator_state() for point in points)
     )
     for point, snapshot in zip(points, snapshots):
         segments = normalize_snapshot(snapshot)
@@ -584,34 +591,39 @@ def _scan_points(
             continue
 
         if events:
-            devices = sorted(
-                {
-                    int(segment["device"])
-                    for segment in (*previous_segments, *segments)
-                    if segment.get("device") is not None
-                }
-                | set(trace_device_indices(snapshot))
-            )
-            if devices:
-                windows = [
-                    extract_event_window_from_snapshot(
-                        snapshot,
-                        device_index=device,
-                        start_marker=previous.boundary_marker,
-                        end_marker=point.boundary_marker,
-                        start_label=f"{_state_label(previous)} on device {device}",
-                    )
-                    for device in devices
-                ]
+            if source_kind == "run":
+                windows = list(point._event_windows())
             else:
-                windows = [
-                    extract_event_window(
-                        normalize_trace_entries(snapshot),
-                        start_marker=previous.boundary_marker,
-                        end_marker=point.boundary_marker,
-                        start_label=_state_label(previous),
-                    )
-                ]
+                devices = sorted(
+                    {
+                        int(segment["device"])
+                        for segment in (*previous_segments, *segments)
+                        if segment.get("device") is not None
+                    }
+                    | set(trace_device_indices(snapshot))
+                )
+                if devices:
+                    windows = [
+                        extract_event_window_from_snapshot(
+                            snapshot,
+                            device_index=device,
+                            start_marker=previous.boundary_marker,
+                            end_marker=point.boundary_marker,
+                            start_label=(
+                                f"{_state_label(previous)} on device {device}"
+                            ),
+                        )
+                        for device in devices
+                    ]
+                else:
+                    windows = [
+                        extract_event_window(
+                            normalize_trace_entries(snapshot),
+                            start_marker=previous.boundary_marker,
+                            end_marker=point.boundary_marker,
+                            start_label=_state_label(previous),
+                        )
+                    ]
             entries = tuple(entry for window in windows for entry in window.entries)
             pool_ranges = build_pool_range_index(segments, previous_segments)
             available = bool(windows) and all(window.available for window in windows)
@@ -624,13 +636,16 @@ def _scan_points(
                     window.cause for window in windows if window.cause is not None
                 )
             )
+            if not windows:
+                warnings = ("allocator event history is unavailable",)
+                causes = ("disabled",)
         else:
             entries = ()
             pool_ranges = None
             available = False
             complete = False
             warnings = ()
-            causes = ("history_disabled",)
+            causes = ("disabled",)
 
         histories.append(
             _IntervalHistory(
@@ -994,21 +1009,31 @@ def _format_contradictions(
 
 def _raise_for_history_gaps(histories: Sequence[_IntervalHistory]) -> None:
     disabled: list[str] = []
+    boundary_unavailable: list[str] = []
     truncated: list[str] = []
     inconsistent: list[str] = []
     for history in histories:
         label = f"{_state_label(history.start)} -> {_state_label(history.end)}"
-        if "boundary_order" in history.causes:
+        if "invalid_boundary_order" in history.causes:
             inconsistent.append(label)
-        elif "history_disabled" in history.causes or not history.available:
+        elif "boundary_unavailable" in history.causes:
+            boundary_unavailable.append(label)
+        elif "disabled" in history.causes or not history.available:
             disabled.append(label)
-        elif history.causes or not history.complete:
+        elif "truncated" in history.causes or not history.complete:
             truncated.append(label)
     if inconsistent:
         raise MemoryReconciliationError(
             "allocator event boundary order is inconsistent for interval(s): "
             + ", ".join(dict.fromkeys(inconsistent))
             + "; the recorded markers or input snapshots are corrupted"
+        )
+    if boundary_unavailable:
+        raise MemoryHistoryBoundaryError(
+            "allocator event boundaries could not be recorded for interval(s): "
+            + ", ".join(dict.fromkeys(boundary_unavailable))
+            + "; record points outside CUDA graph capture or use a PyTorch build "
+            "with memory metadata support"
         )
     if disabled:
         raise MemoryHistoryDisabledError(

@@ -35,6 +35,7 @@ from .comparison_models import (
 )
 from .errors import (
     MemoryDebugError,
+    MemoryHistoryBoundaryError,
     MemoryHistoryDisabledError,
     MemoryHistoryTruncatedError,
     MemoryOwnershipError,
@@ -83,7 +84,13 @@ def _load_state(
     *,
     raw: AllocatorSnapshotData | None = None,
 ) -> _MemoryStateView:
-    snapshot = state.raw_snapshot() if raw is None else raw
+    snapshot = (
+        state.raw_snapshot()
+        if raw is None and isinstance(state, MemoryProbeSnapshot)
+        else state.allocator_state()
+        if raw is None
+        else raw
+    )
     segments = normalize_snapshot(snapshot)
     return _MemoryStateView(
         state=state,
@@ -250,10 +257,10 @@ def _compare_independent_states(
     stack_deltas: tuple[AllocationStackDelta, ...] = ()
     if options.stacks:
         reference_index = reference_stack_index or _build_allocation_stack_index(
-            normalize_snapshot(reference.raw_snapshot())
+            normalize_snapshot(reference.allocator_state())
         )
         candidate_index = candidate_stack_index or _build_allocation_stack_index(
-            normalize_snapshot(candidate.raw_snapshot())
+            normalize_snapshot(candidate.allocator_state())
         )
         reference_coverage = reference_index.coverage
         candidate_coverage = candidate_index.coverage
@@ -418,7 +425,7 @@ def _compare_same_run(
 ) -> MemoryPointComparison:
     states = (
         run.points[reference.index : candidate.index + 1]
-        if options.events or options.lifetimes
+        if options.lifetimes
         else (reference, candidate)
     )
     interval_views = _load_interval_views(states, options)
@@ -554,34 +561,60 @@ def _compare_same_identity_views(
         entries = []
         events_available = True
         event_causes: set[str] = set()
-        event_devices = _segment_device_indices(reference_segments, candidate_segments)
-        for reference_block, candidate_block in zip(interval_views, interval_views[1:]):
-            reference_state = reference_block.state
-            candidate_state = candidate_block.state
-            current_snapshot = candidate_block.raw
-            interval_devices = tuple(
-                sorted(set(event_devices) | set(trace_device_indices(current_snapshot)))
+        if lifetime_run is None:
+            event_devices = _segment_device_indices(
+                reference_segments, candidate_segments
             )
-            if interval_devices:
-                windows = tuple(
-                    extract_event_window_from_snapshot(
-                        current_snapshot,
-                        device_index=device,
-                        start_marker=reference_state.boundary_marker,
-                        end_marker=candidate_state.boundary_marker,
-                        start_label=f"{_state_label(reference_state)} on device {device}",
+            interval_windows = []
+            for reference_block, candidate_block in zip(
+                interval_views, interval_views[1:]
+            ):
+                reference_state = reference_block.state
+                candidate_state = candidate_block.state
+                current_snapshot = candidate_block.raw
+                interval_devices = tuple(
+                    sorted(
+                        set(event_devices) | set(trace_device_indices(current_snapshot))
                     )
-                    for device in interval_devices
                 )
-            else:
-                windows = (
-                    extract_event_window(
-                        normalize_trace_entries(current_snapshot),
-                        start_marker=reference_state.boundary_marker,
-                        end_marker=candidate_state.boundary_marker,
-                        start_label=_state_label(reference_state),
-                    ),
-                )
+                if interval_devices:
+                    windows = tuple(
+                        extract_event_window_from_snapshot(
+                            current_snapshot,
+                            device_index=device,
+                            start_marker=reference_state.boundary_marker,
+                            end_marker=candidate_state.boundary_marker,
+                            start_label=(
+                                f"{_state_label(reference_state)} on device {device}"
+                            ),
+                        )
+                        for device in interval_devices
+                    )
+                else:
+                    windows = (
+                        extract_event_window(
+                            normalize_trace_entries(current_snapshot),
+                            start_marker=reference_state.boundary_marker,
+                            end_marker=candidate_state.boundary_marker,
+                            start_label=_state_label(reference_state),
+                        ),
+                    )
+                interval_windows.append(windows)
+        else:
+            assert isinstance(reference, MemoryPoint)
+            assert isinstance(candidate, MemoryPoint)
+            interval_windows = [
+                point._event_windows()
+                for point in lifetime_run.points[
+                    reference.index + 1 : candidate.index + 1
+                ]
+            ]
+        for windows in interval_windows:
+            if not windows:
+                event_causes.add("disabled")
+                events_available = False
+                events_complete = False
+                warnings.append("allocator event history is unavailable")
             for window in windows:
                 entries.extend(window.entries)
                 events_available = events_available and window.available
@@ -589,18 +622,24 @@ def _compare_same_identity_views(
                 if window.cause is not None:
                     event_causes.add(window.cause)
                 warnings.extend(window.warnings)
-        if "boundary_order" in event_causes:
+        if "invalid_boundary_order" in event_causes:
             raise MemoryReconciliationError(
                 "allocator event boundary order is inconsistent for the compared "
                 "interval; the recorded markers or input snapshots are corrupted"
             )
-        if not events_available:
+        if "boundary_unavailable" in event_causes:
+            raise MemoryHistoryBoundaryError(
+                "an allocator event boundary could not be recorded for the compared "
+                "interval; record points outside CUDA graph capture or use a PyTorch "
+                "build with memory metadata support"
+            )
+        if "disabled" in event_causes or not events_available:
             raise MemoryHistoryDisabledError(
                 "allocator event history is unavailable for the compared "
                 "interval; enable torch.cuda.memory._record_memory_history() "
                 "before the allocations of interest"
             )
-        if not events_complete:
+        if "truncated" in event_causes or not events_complete:
             raise MemoryHistoryTruncatedError(
                 "allocator event history was truncated for the compared "
                 "interval; raise _record_memory_history(max_entries=...) or "
@@ -634,7 +673,7 @@ def _compare_same_identity_views(
                 active_at=None,
                 born_between=None,
                 options=lifetime_options,
-                _raw_snapshots=tuple(view.raw for view in interval_views),
+                _allocator_states=tuple(view.raw for view in interval_views),
             )
         warnings.extend(allocation_lifetimes.warnings)
 

@@ -223,7 +223,7 @@ def _build_timeline(
             active_at=None,
             born_between=None,
             options=options.lifetime_options(),
-            _raw_snapshots=tuple(view.raw for view in interval_views),
+            _allocator_states=tuple(view.raw for view in interval_views),
         )
     point_comparisons = (
         _build_point_comparisons(run, comparison_options, interval_views)

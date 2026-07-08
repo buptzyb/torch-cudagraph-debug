@@ -371,6 +371,6 @@ def test_graph_pool_capture_and_json_bundle_round_trip(
             == capture_comparison.pool_comparison_rows()
         )
         assert graph_buffers
-        assert after_replay.raw_snapshot()["segments"]
+        assert after_replay.allocator_state()["segments"]
     finally:
         _disable_history()

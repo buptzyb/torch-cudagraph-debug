@@ -21,17 +21,26 @@ from .allocator_snapshot import (
     AllocatorSnapshotData,
     AllocatorTraceEntry,
     normalize_device_trace_entries,
+    normalize_raw_trace_entries,
     pool_id_label,
     raw_device_trace,
     stream_label,
 )
 
-
 WindowCause = Literal[
-    "history_disabled",
-    "start_marker_missing",
-    "boundary_order",
+    "disabled",
+    "boundary_unavailable",
+    "truncated",
+    "invalid_boundary_order",
 ]
+HistoryWindowStatus = Literal[
+    "complete",
+    "disabled",
+    "boundary_unavailable",
+    "truncated",
+    "invalid_boundary_order",
+]
+HISTORY_WINDOW_STATUSES = frozenset(HistoryWindowStatus.__args__)
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,128 @@ class _WindowBounds:
     ordered: bool
     warnings: tuple[str, ...]
     cause: WindowCause | None = None
+
+
+@dataclass(frozen=True)
+class _DeviceEventEvidence:
+    device_index: int
+    status: HistoryWindowStatus
+    warnings: tuple[str, ...]
+    entries: tuple[Mapping[str, Any], ...]
+    trace_index_offset: int = 0
+
+    @property
+    def event_count(self) -> int:
+        return len(self.entries)
+
+    def window(self) -> EventWindow:
+        return EventWindow(
+            entries=(
+                normalize_raw_trace_entries(
+                    self.entries,
+                    self.device_index,
+                    trace_index_offset=self.trace_index_offset,
+                )
+                if self.status == "complete"
+                else ()
+            ),
+            available=self.status != "disabled",
+            complete=self.status == "complete",
+            warnings=self.warnings,
+            cause=None if self.status == "complete" else self.status,
+        )
+
+
+@dataclass(frozen=True)
+class _PointEventEvidence:
+    start_index: int
+    end_index: int
+    devices: tuple[_DeviceEventEvidence, ...]
+
+    def windows(self) -> tuple[EventWindow, ...]:
+        return tuple(device.window() for device in self.devices)
+
+
+def _extract_point_event_evidence(
+    snapshot: AllocatorSnapshotData,
+    *,
+    devices: Sequence[int],
+    previous_boundary_recorded: bool,
+    current_boundary_recorded: bool,
+    start_marker: str,
+    end_marker: str,
+    start_label: str,
+    end_label: str,
+    start_index: int,
+    end_index: int,
+) -> _PointEventEvidence:
+    """Extract raw allocator evidence owned by the ending point."""
+
+    evidence = []
+    for device_index in devices:
+        raw_entries = raw_device_trace(snapshot, device_index)
+        status: HistoryWindowStatus
+        warnings: tuple[str, ...]
+        selected: tuple[Mapping[str, Any], ...] = ()
+        trace_index_offset = 0
+        if not raw_entries:
+            status = "disabled"
+            warnings = ("allocator event history is unavailable",)
+        elif not previous_boundary_recorded:
+            status = "boundary_unavailable"
+            warnings = (
+                f"event boundary for record {start_label!r} was not recorded; "
+                "the interval is excluded from event analysis",
+            )
+        elif not current_boundary_recorded:
+            status = "boundary_unavailable"
+            warnings = (
+                f"event boundary for record {end_label!r} was not recorded; "
+                "the interval is excluded from event analysis",
+            )
+        else:
+            start = _last_raw_marker_index(raw_entries, start_marker)
+            end = _last_raw_marker_index(raw_entries, end_marker)
+            if start is None:
+                status = "truncated"
+                warnings = (
+                    f"event boundary for record {start_label!r} was not found in "
+                    "the device trace; the history ring buffer has overwritten it "
+                    "and the interval is excluded from event analysis",
+                )
+            elif end is not None and end < start:
+                status = "invalid_boundary_order"
+                warnings = ("allocator event boundary order is inconsistent",)
+            else:
+                upper = len(raw_entries) if end is None else end
+                trace_index_offset = start + 1
+                selected_rows = []
+                for trace_index, entry in enumerate(
+                    raw_entries[start + 1 : upper], start=start + 1
+                ):
+                    if not isinstance(entry, Mapping):
+                        raise TypeError(
+                            f"device_traces[{device_index}][{trace_index}] must be "
+                            "a mapping"
+                        )
+                    selected_rows.append(dict(entry))
+                selected = tuple(selected_rows)
+                status = "complete"
+                warnings = ()
+        evidence.append(
+            _DeviceEventEvidence(
+                device_index=device_index,
+                status=status,
+                warnings=warnings,
+                entries=selected,
+                trace_index_offset=trace_index_offset,
+            )
+        )
+    return _PointEventEvidence(
+        start_index=start_index,
+        end_index=end_index,
+        devices=tuple(evidence),
+    )
 
 
 @dataclass(frozen=True)
@@ -181,7 +312,7 @@ def _unavailable_window() -> EventWindow:
         available=False,
         complete=False,
         warnings=("allocator event history is unavailable",),
-        cause="history_disabled",
+        cause="disabled",
     )
 
 
@@ -209,7 +340,7 @@ def _window_bounds(
             complete=False,
             ordered=False,
             warnings=tuple(warnings),
-            cause="start_marker_missing",
+            cause="truncated",
         )
     if end is None:
         end = length
@@ -221,7 +352,7 @@ def _window_bounds(
             complete=False,
             ordered=False,
             warnings=tuple(warnings),
-            cause="boundary_order",
+            cause="invalid_boundary_order",
         )
     return _WindowBounds(
         start=start,

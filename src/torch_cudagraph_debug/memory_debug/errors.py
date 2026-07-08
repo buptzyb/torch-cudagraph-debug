@@ -19,6 +19,10 @@ class MemoryHistoryDisabledError(MemoryHistoryError):
     """
 
 
+class MemoryHistoryBoundaryError(MemoryHistoryError):
+    """A point boundary could not be recorded for allocator event analysis."""
+
+
 class MemoryHistoryTruncatedError(MemoryHistoryError):
     """A recorded boundary marker was overwritten in the history ring buffer.
 

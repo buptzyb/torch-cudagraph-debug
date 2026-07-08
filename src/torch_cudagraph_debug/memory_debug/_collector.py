@@ -27,6 +27,7 @@ SnapshotProvider = Callable[[str], AllocatorSnapshotData]
 class _CollectedMemorySnapshot:
     timestamp: float
     boundary_marker: str
+    boundary_recorded: bool
     devices: tuple[int, ...]
     raw_snapshot: AllocatorSnapshotData
     summaries: tuple[tuple[MemoryObservationKey, MemoryStats], ...]
@@ -83,10 +84,13 @@ class _MemoryCollector:
             raw = self._snapshot_provider(boundary_marker)
             envelope = _snapshot_envelope(raw)
             devices = self._resolve_devices(envelope)
+            boundary_recorded = True
         else:
             devices = self._resolve_devices(None)
             self._synchronize(selected_sync, devices, warnings)
-            raw = self._capture_torch_snapshot(boundary_marker, warnings)
+            raw, boundary_recorded = self._capture_torch_snapshot(
+                boundary_marker, warnings
+            )
             envelope = _snapshot_envelope(raw)
 
         snapshot = _filter_snapshot_devices(envelope, devices)
@@ -94,6 +98,7 @@ class _MemoryCollector:
         return _CollectedMemorySnapshot(
             timestamp=time.time(),
             boundary_marker=boundary_marker,
+            boundary_recorded=boundary_recorded,
             devices=devices,
             raw_snapshot=snapshot,
             summaries=tuple(summarize_segments(segments).items()),
@@ -172,7 +177,7 @@ class _MemoryCollector:
     def _capture_torch_snapshot(
         boundary_marker: str,
         warnings: list[str],
-    ) -> AllocatorSnapshotData:
+    ) -> tuple[AllocatorSnapshotData, bool]:
         memory = torch.cuda.memory
         get_metadata = getattr(memory, "_get_memory_metadata", None)
         set_metadata = getattr(memory, "_set_memory_metadata", None)
@@ -194,7 +199,7 @@ class _MemoryCollector:
                 "event boundaries cannot be marked"
             )
         try:
-            return memory._snapshot()
+            return memory._snapshot(), marker_set
         finally:
             if marker_set and callable(set_metadata):
                 try:

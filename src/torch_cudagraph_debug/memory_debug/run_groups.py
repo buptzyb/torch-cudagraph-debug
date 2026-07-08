@@ -263,7 +263,7 @@ class MemoryRunGroup:
         *,
         cache_snapshots: bool = False,
     ) -> "MemoryRunGroup":
-        """Load direct bundles without retaining raw snapshots by default."""
+        """Load direct bundles without retaining allocator payloads by default."""
 
         group_root = Path(root).resolve()
         if not group_root.is_dir():
