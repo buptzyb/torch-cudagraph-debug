@@ -1013,7 +1013,11 @@ def test_always_mode_rejects_eager_calls_after_capture() -> None:
 
     with pytest.raises(RuntimeError, match="eager calls after capture"):
         probe(value)
-    probe.close(synchronize=False)
+    # Captured probes reject unsynchronized close; a replay could still be
+    # writing into staging.
+    with pytest.raises(RuntimeError, match="without\\s+synchronization"):
+        probe.close(synchronize=False)
+    probe.close()
 
 
 def test_capture_callback_payload_count_is_fixed_per_invocation() -> None:
@@ -1040,7 +1044,7 @@ def test_capture_callback_payload_count_is_fixed_per_invocation() -> None:
     counts = debug_resource_counts(probe)
     assert counts["captured_payloads"] == 2
     assert counts["eager_callbacks_in_flight"] == 0
-    probe.close(synchronize=False)
+    probe.close()
 
 
 def test_close_without_synchronization_rejects_pending_eager_callback() -> None:
@@ -1083,5 +1087,82 @@ def test_close_is_rejected_during_capture() -> None:
         with pytest.raises(RuntimeError, match="during CUDA graph capture"):
             probe.close(synchronize=False)
 
-    torch.cuda.synchronize()
+    # The collector cannot observe external synchronization; captured probes
+    # always require a synchronizing close.
+    with pytest.raises(RuntimeError, match="without\\s+synchronization"):
+        probe.close(synchronize=False)
+    probe.close()
+
+
+def test_close_without_synchronization_rejects_pending_record_only_copy() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    value = torch.arange(4, device="cuda", dtype=torch.float32)
+    probe = TensorProbe(
+        "pending-record-copy",
+        actions=[RecordAction()],
+        when="always",
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        torch.cuda._sleep(1_000_000_000)
+        probe(value)
+
+    # Record-only copies have no callback accounting; the eager work event
+    # must still block an unsynchronized close while the D2H copy runs.
+    with pytest.raises(RuntimeError, match="eager device work is pending"):
+        probe.close(synchronize=False)
+    stream.synchronize()
     probe.close(synchronize=False)
+
+
+def test_unsynchronized_queries_defer_staging_reclaim() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    first = torch.arange(4, device="cuda", dtype=torch.float32)
+    second = torch.arange(8, device="cuda", dtype=torch.float32)
+    probe = TensorProbe(
+        "deferred-reclaim",
+        actions=[PrintAction(every=1_000_000, summary=False)],
+        when="always",
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        torch.cuda._sleep(1_000_000_000)
+        probe(first)
+        probe(second)
+
+    assert debug_resource_counts(probe)["retired_staging"] == 1
+    probe.check_status(synchronize=False)
+    # The retired buffer is still a pending copy destination; reclaim must
+    # wait for the eager work to finish instead of freeing it.
+    assert debug_resource_counts(probe)["retired_staging"] == 1
+    probe.check_status(synchronize=stream)
+    assert debug_resource_counts(probe)["retired_staging"] == 0
+    probe.close(synchronize=stream)
+
+
+def test_failed_captured_enqueue_preserves_order_and_replay_counter() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    value = torch.arange(8, device="cuda", dtype=torch.float32)
+    non_contiguous = value.reshape(2, 4).t()
+    probe = TensorProbe("failed-first-enqueue", actions=[RecordAction()])
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        with pytest.raises(RuntimeError, match="contiguous"):
+            probe(non_contiguous)
+        probe(value + 1)
+
+    graph.replay()
+    graph.replay()
+    torch.cuda.synchronize()
+    # The rejected first call must not consume order 0: the successful call
+    # owns the replay-counter capture, so replays are counted.
+    snapshot = probe.snapshot()
+    assert snapshot.replay_index == 2
+    assert len(snapshot.observations) == 1
+    probe.close()

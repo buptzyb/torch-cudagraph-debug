@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+import torch_cudagraph_debug
 from torch_cudagraph_debug.memory_debug.cli import build_parser, main
 
 from ._helpers import event, make_history_run, make_run, segment, snapshot
+
+
+def test_module_invocation_prints_usage() -> None:
+    package_root = Path(torch_cudagraph_debug.__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-m", "torch_cudagraph_debug.memory_debug.cli", "--help"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(package_root)},
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "usage: tcgd-memory" in result.stdout
 
 
 def _bundles(tmp_path: Path) -> tuple[Path, Path]:

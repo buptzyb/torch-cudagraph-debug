@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -189,6 +190,32 @@ def test_timeline_html_contains_charts_and_zero_delta_rows(
         rows = list(csv.DictReader(handle))
     steady = next(item for item in rows if item["point_label"] == "steady")
     assert steady["delta_allocated_bytes"] == "0"
+
+
+def test_timeline_charts_ignore_include_unchanged_filter(tmp_path: Path) -> None:
+    run = make_run(
+        [
+            snapshot(segment(active=1024)),
+            snapshot(segment(active=4096)),
+            snapshot(segment(active=4096)),
+            snapshot(segment(active=8192)),
+        ],
+        labels=("a", "b", "c", "d"),
+    )
+    timeline = run.timeline()
+    full = tmp_path / "full"
+    filtered = tmp_path / "filtered"
+    timeline.write(full)
+    timeline.write(filtered, include_unchanged=False)
+
+    def polylines(output: Path) -> list[str]:
+        html = (output / "report.html").read_text(encoding="utf-8")
+        return re.findall(r'<polyline[^>]*points="([^"]+)"', html)
+
+    # Charts must always draw the true per-point series; the row filter is
+    # a table concern and must not bend or drop chart lines.
+    assert polylines(filtered) == polylines(full)
+    assert all(line.count(" ") == 3 for line in polylines(filtered))
 
 
 def test_timeline_svg_draws_one_labeled_line_per_pool(tmp_path: Path) -> None:

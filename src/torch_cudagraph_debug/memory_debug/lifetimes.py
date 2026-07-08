@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from ._pool_ranges import PoolRangeIndex, build_pool_range_index
@@ -1145,6 +1145,19 @@ def _refine_instance_from_block(
     instance.address = block.address
     instance.size_bytes = block.size_bytes
     instance.requested_bytes = block.requested_bytes
+    # Transition rows recorded before refinement carry the event-requested
+    # size; re-stamp them so every row of an observed instance reports the
+    # same allocator-rounded basis as the cohort byte totals. Transient
+    # instances are never refined and stay on the requested basis throughout.
+    if instance.birth is not None and instance.birth.size_bytes != block.size_bytes:
+        instance.birth = replace(instance.birth, size_bytes=block.size_bytes)
+    if (
+        instance.free_request is not None
+        and instance.free_request.size_bytes != block.size_bytes
+    ):
+        instance.free_request = replace(
+            instance.free_request, size_bytes=block.size_bytes
+        )
 
 
 def _event_pool_id(

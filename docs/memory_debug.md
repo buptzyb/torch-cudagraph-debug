@@ -597,6 +597,17 @@ change in a minor release. Snapshot summaries use
 - Lifetime analysis is per process and rank and requires complete marker-bounded
   event history. `born_between` retains transient allocations that are active at
   neither endpoint snapshot.
+- Boundary markers use the process-global allocator metadata
+  (`torch.cuda.memory._set_memory_metadata`). Run at most one collector at a
+  time and do not call `_set_memory_metadata` from the application while a
+  Probe or Recorder is active: interleaved markers misclassify event windows
+  and can leave a stale marker in the global metadata.
+- Marker placement is not atomic with the snapshot. Allocator events issued by
+  other threads in the instant between taking a snapshot and restoring the
+  metadata can fall outside both adjacent event windows; net-visible effects
+  then surface as `MemoryReconciliationError`, and balanced transient churn
+  from that instant is not attributable. Quiesce concurrent allocation around
+  `record_point` when event or lifetime analysis matters.
 
 ## Further Reading
 

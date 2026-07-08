@@ -167,15 +167,25 @@ class TensorRunGroup:
             by_rank[run.rank] = run
         names = {run.name for run in materialized}
         executions = {run.execution for run in materialized}
-        point_sequences = {
-            tuple(point.label for point in run.points) for run in materialized
-        }
         if len(names) != 1:
             raise TensorBundleError("tensor run group names differ across ranks")
         if len(executions) != 1:
             raise TensorBundleError("tensor execution modes differ across ranks")
-        if len(point_sequences) != 1:
-            raise TensorBundleError("tensor point label sequences differ across ranks")
+        # The canonical point-label sequence is the longest across ranks. An
+        # incomplete rank whose labels are a strict prefix of it (a crashed
+        # rank) is accepted and handled by the incomplete-bundle path below.
+        point_labels = max(
+            (tuple(point.label for point in run.points) for run in materialized),
+            key=len,
+        )
+        for run in materialized:
+            labels = tuple(point.label for point in run.points)
+            if labels == point_labels:
+                continue
+            if run.complete or labels != point_labels[: len(labels)]:
+                raise TensorBundleError(
+                    "tensor point label sequences differ across ranks"
+                )
         warnings: list[str] = []
         group_ids = {run.group_id for run in materialized if run.group_id is not None}
         if len(group_ids) > 1:
@@ -247,7 +257,7 @@ class TensorRunGroup:
             name=first.name,
             execution=first.execution,
             runs=MappingProxyType(dict(sorted(by_rank.items()))),
-            point_labels=tuple(point.label for point in first.points),
+            point_labels=point_labels,
             group_id=group_id,
             world_size=world_size,
             warnings=tuple(dict.fromkeys(warnings)),

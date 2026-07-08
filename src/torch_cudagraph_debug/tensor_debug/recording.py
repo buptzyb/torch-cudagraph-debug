@@ -1583,7 +1583,8 @@ def _summarize_tensor(tensor: torch.Tensor) -> TensorValueSummary:
     zero_count = 0
     minimum: float | None = None
     maximum: float | None = None
-    total = 0.0
+    running_mean = 0.0
+    running_m2 = 0.0
     total_squares = 0.0
 
     for start in range(0, numel, _SUMMARY_CHUNK_ELEMENTS):
@@ -1597,7 +1598,6 @@ def _summarize_tensor(tensor: torch.Tensor) -> TensorValueSummary:
             finite = chunk[finite_mask]
         else:
             finite = chunk
-        finite_count += finite.numel()
         if finite.numel() == 0:
             continue
         values = finite.to(torch.float64)
@@ -1605,14 +1605,29 @@ def _summarize_tensor(tensor: torch.Tensor) -> TensorValueSummary:
         chunk_max = float(values.max().item())
         minimum = chunk_min if minimum is None else min(minimum, chunk_min)
         maximum = chunk_max if maximum is None else max(maximum, chunk_max)
-        total += float(values.sum().item())
         total_squares += float((values * values).sum().item())
+        # Chunked Welford merge: the one-pass sum-of-squares formula
+        # catastrophically cancels when the mean dominates the spread.
+        chunk_count = values.numel()
+        chunk_mean = float(values.mean().item())
+        chunk_m2 = float(((values - chunk_mean) ** 2).sum().item())
+        if finite_count == 0:
+            running_mean = chunk_mean
+            running_m2 = chunk_m2
+        else:
+            delta = chunk_mean - running_mean
+            merged_count = finite_count + chunk_count
+            running_mean += delta * (chunk_count / merged_count)
+            running_m2 += (
+                chunk_m2 + delta * delta * (finite_count / merged_count) * chunk_count
+            )
+        finite_count += chunk_count
 
     if finite_count:
-        mean = total / finite_count if math.isfinite(total) else None
-        if mean is not None and math.isfinite(total_squares):
-            variance = max(total_squares / finite_count - mean * mean, 0.0)
-            std = math.sqrt(variance) if math.isfinite(variance) else None
+        mean = running_mean if math.isfinite(running_mean) else None
+        if mean is not None and math.isfinite(running_m2):
+            variance = max(running_m2 / finite_count, 0.0)
+            std = math.sqrt(variance)
         else:
             std = None
         l2_norm = (

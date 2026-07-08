@@ -1427,7 +1427,7 @@ def _read_gzip_json(path: Path, *, context: str) -> Any:
     try:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             text = handle.read()
-    except (OSError, EOFError, zlib.error) as exc:
+    except (OSError, EOFError, zlib.error, UnicodeDecodeError) as exc:
         raise MemoryBundleError(f"could not load {context}: {exc}") from exc
     return strict_json_loads(
         text,

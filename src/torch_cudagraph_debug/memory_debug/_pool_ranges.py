@@ -42,16 +42,34 @@ class _PoolRangeLayer:
 
 @dataclass(frozen=True)
 class PoolRangeIndex:
-    """Address-to-pool index preserving segment-set preference."""
+    """Address-to-pool index over one snapshot layer per segment set."""
 
     layers: tuple[_PoolRangeLayer, ...]
 
-    def find(self, device: int | None, address: int) -> tuple[Any, ...] | None:
+    def resolve(
+        self, device: int | None, address: int
+    ) -> tuple[tuple[Any, ...] | None, bool]:
+        """Return ``(pool_id, ambiguous)`` for one address.
+
+        An address whose owning segment changed pools between the indexed
+        snapshots matches multiple layers with different pools; such an
+        address is ambiguous and must not be attributed to either pool.
+        """
+
+        found: tuple[Any, ...] | None = None
         for layer in self.layers:
             pool_id = layer.find(device, address)
-            if pool_id is not None:
-                return pool_id
-        return None
+            if pool_id is None:
+                continue
+            if found is None:
+                found = pool_id
+            elif pool_id != found:
+                return None, True
+        return found, False
+
+    def find(self, device: int | None, address: int) -> tuple[Any, ...] | None:
+        pool_id, ambiguous = self.resolve(device, address)
+        return None if ambiguous else pool_id
 
 
 def build_pool_range_index(

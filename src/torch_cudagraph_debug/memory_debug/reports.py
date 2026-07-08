@@ -1097,6 +1097,9 @@ class MemoryTimeline:
             stack_depth=stack_depth,
         )
         pool_entries = self.pool_rows(include_unchanged=include_unchanged)
+        # Charts must plot the true per-point series; the include_unchanged
+        # filter is a table concern and would bend or drop chart lines.
+        chart_entries = self.pool_rows(include_unchanged=True)
         allocation_stack_rows = [
             {
                 "reference": _state_label(item.reference),
@@ -1138,13 +1141,13 @@ class MemoryTimeline:
                 "No memory points",
             ),
             "<h2>Allocated Memory</h2>",
-            _timeline_svg(pool_entries, "state_allocated_bytes"),
+            _timeline_svg(chart_entries, "state_allocated_bytes"),
             "<h2>Reserved Memory</h2>",
-            _timeline_svg(pool_entries, "state_reserved_bytes"),
+            _timeline_svg(chart_entries, "state_reserved_bytes"),
             "<h2>Active Memory</h2>",
-            _timeline_svg(pool_entries, "state_active_bytes"),
+            _timeline_svg(chart_entries, "state_active_bytes"),
             "<h2>Requested Memory</h2>",
-            _timeline_svg(pool_entries, "state_requested_bytes"),
+            _timeline_svg(chart_entries, "state_requested_bytes"),
             "<h2>Pool Timeline</h2>",
             _render_table(pool_entries, "No memory points"),
             "<h2>Pool/Stream Timeline</h2>",

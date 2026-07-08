@@ -148,6 +148,67 @@ def test_coalesced_freed_blocks_count_as_became_inactive() -> None:
     assert lifecycle.became_inactive_bytes == 14
 
 
+def test_address_less_blocks_count_with_multiplicity() -> None:
+    def address_less(total: int, count: int, size: int) -> dict[str, object]:
+        value = segment(active=total, total=total, address=1000)
+        value["address"] = None
+        value["blocks"] = [
+            {
+                "address": None,
+                "size": size,
+                "requested_size": size,
+                "state": "active_allocated",
+                "frames": [],
+            }
+            for _ in range(count)
+        ]
+        return value
+
+    run = make_run(
+        [
+            snapshot(segment(active=0, total=200)),
+            snapshot(address_less(total=200, count=2, size=100)),
+        ],
+        labels=("before", "after"),
+    )
+    lifecycle = run.compare("before", "after").pool_comparisons[0].lifecycle
+
+    assert lifecycle is not None
+    # Two distinct 100-byte blocks without addresses must count twice,
+    # not collapse onto one identity key.
+    assert lifecycle.newly_active_bytes == 200
+
+
+def test_cross_era_address_reuse_yields_ambiguous_event_attribution() -> None:
+    run = make_history_run(
+        [
+            ([segment(active=100, address=1000, pool=(0, 2))], []),
+            (
+                [segment(active=300, address=1000)],
+                [
+                    event("free_requested", address=1000, size=100, time_us=2),
+                    event("free_completed", address=1000, size=100, time_us=3),
+                    event("alloc", address=1200, size=300, time_us=4),
+                ],
+            ),
+        ],
+        labels=("before", "after"),
+    )
+    comparison = run.compare(
+        "before", "after", attribution=MemoryAttributionOptions(events=True)
+    )
+
+    by_action = {item.action: item for item in comparison.allocator_events}
+    # Address 1000 belongs to different pools in the two snapshots; events
+    # there cannot be attributed to either pool with confidence.
+    assert by_action["free_requested"].pool_id is None
+    assert by_action["free_requested"].attribution_confidence == "ambiguous"
+    assert by_action["free_completed"].attribution_confidence == "ambiguous"
+    # Address 1200 is covered only by the candidate default-pool segment.
+    assert by_action["alloc"].pool_id == (0, 0)
+    assert by_action["alloc"].attribution_confidence == "matched"
+
+
 def test_cross_run_matches_only_default_pool_without_mapping() -> None:
     before = make_run(
         [

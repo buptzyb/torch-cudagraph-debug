@@ -185,6 +185,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def(
             "_reclaim_retired_staging",
             &torch_cudagraph_debug::tensor_debug::ProbeContext::reclaim_retired_staging)
+        .def(
+            "has_captured_work",
+            &torch_cudagraph_debug::tensor_debug::ProbeContext::has_captured_work)
         .def("close", &torch_cudagraph_debug::tensor_debug::ProbeContext::close);
 
     m.def(

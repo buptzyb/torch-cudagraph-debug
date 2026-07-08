@@ -755,6 +755,19 @@ def compare_runs(
             raise KeyError(
                 f"candidate point labels do not exist: {sorted(missing_candidate)!r}"
             )
+        # Explicit mapping entries take precedence; reference labels they do
+        # not cover auto-align by identical label as if no mapping were given.
+        claimed_candidates = set(mapping.values())
+        for point in reference.points:
+            label = point.label
+            if label in mapping or label not in candidate_by_label:
+                continue
+            if label in claimed_candidates:
+                raise ValueError(
+                    f"candidate point label {label!r} is already claimed by "
+                    "point_mapping; the merged mapping must stay one-to-one"
+                )
+            mapping[label] = label
 
     point_comparisons = tuple(
         compare_points(
@@ -843,23 +856,49 @@ def _compare_observations(
         )
 
     if not dtype_changed and reference.sha256 == candidate.sha256:
-        reference._verify_payload()
-        candidate._verify_payload()
-        return TensorObservationComparison(
-            name=reference.name,
-            invocation_index=reference.invocation_index,
-            status="match",
-            kind="match",
-            reason="tensor values are identical",
-            reference=reference,
-            candidate=candidate,
-            mismatch_count=0,
-            total_count=reference.summary.numel,
-            mismatch_fraction=0.0,
-            max_abs_error=0.0,
-            max_relative_error=0.0,
-            mean_abs_error=0.0,
+        # Bit-identical NaNs must not fast-path to a match when the
+        # elementwise allclose policy would count them as mismatches.
+        nan_mismatch_possible = (
+            options.mode == "allclose"
+            and not options.equal_nan
+            and reference.summary.nan_count > 0
         )
+        if not nan_mismatch_possible:
+            reference._verify_payload()
+            candidate._verify_payload()
+            return TensorObservationComparison(
+                name=reference.name,
+                invocation_index=reference.invocation_index,
+                status="match",
+                kind="match",
+                reason="tensor values are identical",
+                reference=reference,
+                candidate=candidate,
+                mismatch_count=0,
+                total_count=reference.summary.numel,
+                mismatch_fraction=0.0,
+                max_abs_error=0.0,
+                max_relative_error=0.0,
+                mean_abs_error=0.0,
+            )
+        if not reference.has_payload or not candidate.has_payload:
+            nan_count = reference.summary.nan_count
+            numel = reference.summary.numel
+            return TensorObservationComparison(
+                name=reference.name,
+                invocation_index=reference.invocation_index,
+                status="mismatch",
+                kind="value",
+                reason=(
+                    "bit-identical tensors contain NaN values that fail "
+                    "allclose comparison with equal_nan=False"
+                ),
+                reference=reference,
+                candidate=candidate,
+                mismatch_count=nan_count,
+                total_count=numel,
+                mismatch_fraction=nan_count / numel,
+            )
 
     if options.mode == "exact" and not dtype_changed:
         if not reference.has_payload or not candidate.has_payload:
@@ -941,6 +980,12 @@ def _compare_full_payloads(
                 reference_bytes.reshape(-1, item_size)
                 != candidate_bytes.reshape(-1, item_size)
             ).any(dim=1)
+            if options.equal_nan and reference_chunk.is_floating_point():
+                # Exempt both-NaN positions from the bitwise comparison while
+                # non-NaN positions keep the full bit distinction, including
+                # signed zeros and NaN payload bits against non-NaN values.
+                both_nan = torch.isnan(reference_chunk) & torch.isnan(candidate_chunk)
+                mismatch = mismatch & ~both_nan
         else:
             candidate_values = candidate_chunk.to(compare_dtype)
             reference_values = reference_chunk.to(compare_dtype)

@@ -155,6 +155,7 @@ class _TensorCollector:
         self.non_contiguous = validate_non_contiguous_policy(non_contiguous)
         self.when = validate_probe_when(when)
         self._closed = False
+        self._eager_name: str | None = None
         self._source_strides: dict[tuple[str, int], tuple[int, ...]] = {}
         self._actions = tuple(actions)
         self._enabled_actions = tuple(
@@ -209,8 +210,24 @@ class _TensorCollector:
         self._ensure_open()
         if self._handle is None:
             return tensor
+        assert self._device is not None
+        if self.when == "always" and not _is_capturing_on_device(self._device):
+            # Eager observations share one native slot; a second distinct
+            # name would silently overwrite the first, so reject it.
+            if self._eager_name is not None and self._eager_name != name:
+                raise RuntimeError(
+                    f"eager tensor probe {self.name!r} already records "
+                    f"observation {self._eager_name!r}; eager mode keeps one "
+                    "observation name per probe"
+                )
+            result = self._handle.enqueue(tensor, name, invocation_index)
+            self._eager_name = name
+        else:
+            result = self._handle.enqueue(tensor, name, invocation_index)
+        # Record stride bookkeeping only for enqueues the native layer
+        # accepted; a rejected call must not leave a stale entry behind.
         self._source_strides[(name, invocation_index)] = tuple(tensor.stride())
-        return self._handle.enqueue(tensor, name, invocation_index)
+        return result
 
     def collect(
         self,
@@ -224,10 +241,22 @@ class _TensorCollector:
         if self._replay_index is None:
             raise RuntimeError("enabled tensor collector is missing its replay counter")
         self.synchronize(synchronize)
-        self._handle._reclaim_retired_staging()
-        current_replay_index = (
-            None if self.callback_enabled else int(self._replay_index.item())
-        )
+        assert self._device is not None
+        capturing = _is_capturing_on_device(self._device)
+        # Freeing retired pinned staging is a CUDA call that would invalidate
+        # an active capture; defer it to the next out-of-capture query.
+        if not capturing:
+            self._handle._reclaim_retired_staging()
+        current_replay_index = None
+        if not self.callback_enabled:
+            if capturing:
+                # Reading the replay counter is a blocking device read that
+                # would invalidate an active capture.
+                raise RuntimeError(
+                    "cannot collect record-only tensor results during CUDA "
+                    "graph capture; query after capture ends"
+                )
+            current_replay_index = int(self._replay_index.item())
         output = []
         for index, item in enumerate(self._handle.observations(current_replay_index)):
             if not isinstance(item, Mapping):
@@ -316,7 +345,9 @@ class _TensorCollector:
             }
         if self.callback_enabled:
             self.synchronize(synchronize)
-            self._handle._reclaim_retired_staging()
+            assert self._device is not None
+            if not _is_capturing_on_device(self._device):
+                self._handle._reclaim_retired_staging()
         return self._handle.check_status()
 
     def synchronize(self, synchronize: SynchronizeTarget) -> None:
@@ -337,6 +368,18 @@ class _TensorCollector:
             if _is_capturing_on_device(self._device):
                 raise RuntimeError(
                     "cannot close tensor collector during CUDA graph capture"
+                )
+            if (
+                isinstance(synchronize, bool)
+                and not synchronize
+                and getattr(self._handle, "has_captured_work", lambda: False)()
+            ):
+                # A captured graph can replay concurrently; closing without
+                # synchronization would free staging its replay still writes.
+                raise RuntimeError(
+                    f"cannot close tensor collector {self.name!r} without "
+                    "synchronization after CUDA graph capture; pass "
+                    "synchronize=True or a stream/device target"
                 )
             self.synchronize(synchronize)
             self._handle.close()

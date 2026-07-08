@@ -185,7 +185,8 @@ min, max, mean, standard deviation, and L2 norm.
   comparison.
 - `summary` omits raw bytes. It reduces bundle size but does not reduce the
   current D2H cost because digest and statistics are computed on the CPU.
-- Equal digests prove an exact match.
+- Equal digests prove a bitwise match. Under allclose with `equal_nan=False`,
+  bit-identical NaN positions are still reported as mismatches.
 - Different summary digests prove a bitwise change. They cannot determine
   whether the change is within a nonzero tolerance, so allclose reports
   `inconclusive`.
@@ -217,7 +218,9 @@ Source stride is part of tensor metadata. The default
 `layout_policy="ignore"` only when different layouts are intentional.
 
 `compare_runs(reference, candidate)` aligns points by label and reports missing
-points. Pass `point_mapping` when semantically equivalent point labels differ.
+points. Pass `point_mapping` when semantically equivalent point labels differ;
+unmapped labels align by identical label, and only labels covered by neither
+the mapping nor auto-alignment are reported as one-sided.
 `compare_point_series(reference_point, candidate_run)` compares one reference
 against every candidate point in order and is intended for replay drift, stale
 static inputs, and state-update bugs.
@@ -268,7 +271,8 @@ comparison.write("group-report")
 
 `group.missing_ranks` and `group.complete` make rank coverage explicit. Missing
 ranks, unknown world size, or incomplete bundles make an otherwise matching
-group comparison `inconclusive`. Use `point_mapping` when point labels differ.
+group comparison `inconclusive`. Use `point_mapping` when point labels differ;
+unmapped labels align by identical label.
 Group summaries and comparisons can be rendered directly with `to_text()`,
 `to_dict()`, and `to_html()` or persisted with `write()`. Use
 `comparison.assert_ok()` when mismatch or inconclusive status should fail an
@@ -312,9 +316,12 @@ ordering.
 
 `close()` inherits the object's configured synchronization policy when omitted.
 Pass the replay stream to avoid waiting on unrelated streams, or pass `False`
-only after prior synchronization has completed all probe work. An
-unsynchronized close reports pending eager callbacks instead of freeing their
-payloads.
+only for a never-captured probe whose prior synchronization has completed all
+probe work. An unsynchronized close reports pending eager callbacks and
+pending eager copies instead of freeing their staging, and is always rejected
+once the probe has been captured by a CUDA graph. Eager (`when="always"`)
+probes record one observation name for their whole lifetime; a second distinct
+name is rejected instead of silently overwriting the first.
 
 ## Replay And Invocation Indices
 

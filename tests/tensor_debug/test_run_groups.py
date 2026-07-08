@@ -169,6 +169,119 @@ def test_tensor_run_group_validates_rank_identity_and_completeness() -> None:
         )
 
 
+def _prefix_group_runs(*, name: str, group_id: str):
+    rank0 = make_tensor_run(
+        [
+            ("a", [("output", torch.tensor([0.0]), "full")]),
+            ("b", [("output", torch.tensor([1.0]), "full")]),
+        ],
+        name=name,
+        rank=0,
+        group_id=group_id,
+        world_size=2,
+    )
+    rank1 = replace(
+        make_tensor_run(
+            [("a", [("output", torch.tensor([0.0]), "full")])],
+            name=name,
+            rank=1,
+            group_id=group_id,
+            world_size=2,
+        ),
+        complete=False,
+    )
+    return rank0, rank1
+
+
+def test_tensor_run_group_accepts_incomplete_rank_with_prefix_labels() -> None:
+    reference = TensorRunGroup.from_runs(
+        _prefix_group_runs(name="eager", group_id="eager-job")
+    )
+    candidate = TensorRunGroup.from_runs(
+        _prefix_group_runs(name="cuda-graph", group_id="graph-job")
+    )
+
+    assert reference.point_labels == ("a", "b")
+    assert reference.complete is False
+    assert any(
+        "tensor bundles are incomplete for ranks 1" in item
+        for item in reference.warnings
+    )
+
+    comparison = compare_run_groups(reference, candidate)
+    assert comparison.status == "inconclusive"
+    assert [item.status for item in comparison.rank_comparisons] == [
+        "match",
+        "match",
+    ]
+
+
+def test_tensor_run_group_load_accepts_incomplete_prefix_rank_bundle(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "group"
+    make_tensor_run(
+        [
+            ("a", [("output", torch.tensor([0.0]), "full")]),
+            ("b", [("output", torch.tensor([1.0]), "full")]),
+        ],
+        bundle_dir=root / "rank-00000.tcgd-tensor",
+        rank=0,
+        group_id="job",
+        world_size=2,
+    )
+    make_tensor_run(
+        [("a", [("output", torch.tensor([0.0]), "full")])],
+        bundle_dir=root / "rank-00001.tcgd-tensor",
+        rank=1,
+        group_id="job",
+        world_size=2,
+    )
+    manifest_path = root / "rank-00001.tcgd-tensor" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["complete"] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    group = TensorRunGroup.load(root)
+    assert group.point_labels == ("a", "b")
+    assert group.complete is False
+    assert any(
+        "tensor bundles are incomplete for ranks 1" in item for item in group.warnings
+    )
+
+
+def test_tensor_run_group_still_rejects_non_prefix_point_sequences() -> None:
+    rank0 = make_tensor_run(
+        [
+            ("a", [("output", torch.tensor([0.0]), "full")]),
+            ("b", [("output", torch.tensor([1.0]), "full")]),
+        ],
+        rank=0,
+        group_id="job",
+        world_size=2,
+    )
+    complete_prefix = make_tensor_run(
+        [("a", [("output", torch.tensor([0.0]), "full")])],
+        rank=1,
+        group_id="job",
+        world_size=2,
+    )
+    with pytest.raises(TensorBundleError, match="point label sequences differ"):
+        TensorRunGroup.from_runs((rank0, complete_prefix))
+
+    incomplete_non_prefix = replace(
+        make_tensor_run(
+            [("b", [("output", torch.tensor([1.0]), "full")])],
+            rank=1,
+            group_id="job",
+            world_size=2,
+        ),
+        complete=False,
+    )
+    with pytest.raises(TensorBundleError, match="point label sequences differ"):
+        TensorRunGroup.from_runs((rank0, incomplete_non_prefix))
+
+
 def test_tensor_run_group_report_requires_explicit_overwrite(
     tmp_path: Path,
 ) -> None:

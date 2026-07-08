@@ -1087,3 +1087,139 @@ def test_lifetimes_reconcile_event_births_with_rounded_blocks() -> None:
     assert cohort.free_completions == ()
     assert cohort.owner_active_at_end_count == 1
     assert cohort.owner_active_at_end_bytes == 512
+
+
+def test_transient_in_cross_era_address_range_reports_unknown_pool() -> None:
+    """A transient in a range that changed pools must not inherit either pool."""
+
+    markers: list[str] = []
+
+    def provider(marker: str):
+        markers.append(marker)
+        if len(markers) == 1:
+            return snapshot(
+                segment(active=100, address=1000, pool=(0, 2), frame="old.py"),
+                traces=[[event("snapshot", marker=marker)]],
+            )
+        return snapshot(
+            segment(active=100, address=1000, frame="new.py"),
+            traces=[
+                [
+                    event("snapshot", marker=markers[0]),
+                    event(
+                        "free_requested",
+                        address=1000,
+                        size=100,
+                        frame="old.py",
+                        time_us=2,
+                    ),
+                    event(
+                        "free_completed",
+                        address=1000,
+                        size=100,
+                        frame="old.py",
+                        time_us=3,
+                    ),
+                    event(
+                        "alloc",
+                        address=1000,
+                        size=50,
+                        frame="transient.py",
+                        time_us=4,
+                    ),
+                    event(
+                        "free_requested",
+                        address=1000,
+                        size=50,
+                        frame="transient.py",
+                        time_us=5,
+                    ),
+                    event(
+                        "free_completed",
+                        address=1000,
+                        size=50,
+                        frame="transient.py",
+                        time_us=6,
+                    ),
+                    event("alloc", address=1000, size=100, frame="new.py", time_us=7),
+                    event("snapshot", marker=marker),
+                ]
+            ],
+        )
+
+    recorder = MemoryRecorder._from_snapshot_provider(provider)
+    recorder.record_point("before")
+    recorder.record_point("after")
+    report = recorder.finish().lifetimes()
+
+    transient = next(
+        cohort for cohort in report.cohorts if "transient.py" in cohort.stack_key
+    )
+    assert transient.pool_id == ("unknown",)
+    # The surviving instance is refined from its snapshot block, which is
+    # ground truth for the new era.
+    survivor = next(
+        cohort for cohort in report.cohorts if "new.py" in cohort.stack_key
+    )
+    assert survivor.pool_id == (0, 0)
+
+
+def test_refined_instances_use_one_size_basis_across_all_rows() -> None:
+    """Transition rows and cohort totals must agree on the rounded size."""
+
+    markers: list[str] = []
+
+    def provider(marker: str):
+        markers.append(marker)
+        if len(markers) == 1:
+            return snapshot(traces=[[event("snapshot", marker=marker)]])
+        if len(markers) == 2:
+            return snapshot(
+                segment(active=512, address=4096, requested=400, frame="alloc.py"),
+                traces=[
+                    [
+                        event("snapshot", marker=markers[0]),
+                        event("alloc", address=4096, size=400, frame="alloc.py"),
+                        event("snapshot", marker=marker),
+                    ]
+                ],
+            )
+        return snapshot(
+            traces=[
+                [
+                    event("snapshot", marker=markers[0]),
+                    event("alloc", address=4096, size=400, frame="alloc.py"),
+                    event("snapshot", marker=markers[1]),
+                    event(
+                        "free_requested",
+                        address=4096,
+                        size=400,
+                        frame="free.py",
+                        time_us=2,
+                    ),
+                    event(
+                        "free_completed",
+                        address=4096,
+                        size=400,
+                        frame="free.py",
+                        time_us=3,
+                    ),
+                    event("snapshot", marker=marker),
+                ]
+            ]
+        )
+
+    recorder = MemoryRecorder._from_snapshot_provider(provider)
+    recorder.record_point("before")
+    recorder.record_point("mid")
+    recorder.record_point("after")
+    report = recorder.finish().lifetimes()
+
+    assert len(report.cohorts) == 1
+    cohort = report.cohorts[0]
+    assert cohort.born_bytes == 512
+    assert sum(item.size_bytes for item in cohort.births) == cohort.born_bytes
+    assert sum(item.size_bytes for item in cohort.free_requests) == 512
+    assert cohort.free_requested_bytes == 512
+    assert sum(item.size_bytes for item in cohort.free_completions) == 512
+    assert cohort.free_completed_bytes == 512

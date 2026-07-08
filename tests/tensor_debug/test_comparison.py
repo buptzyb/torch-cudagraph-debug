@@ -118,6 +118,99 @@ def test_exact_comparison_detects_signed_zero_bits() -> None:
     assert report.first_issue.mismatch_count == 1
 
 
+def test_bit_identical_nans_do_not_fast_path_to_match_without_equal_nan() -> None:
+    value = torch.tensor([float("nan"), 1.0])
+    reference = make_tensor_run([("point", [("x", value, "full")])])
+    candidate = make_tensor_run([("point", [("x", value.clone(), "full")])])
+    assert (
+        reference["point"].observation("x").sha256
+        == candidate["point"].observation("x").sha256
+    )
+
+    report = compare_points(reference["point"], candidate["point"])
+    assert report.status == "mismatch"
+    assert report.first_issue is not None
+    assert report.first_issue.mismatch_count == 1
+    assert report.first_issue.first_mismatch_index == (0,)
+
+    lenient = compare_points(
+        reference["point"],
+        candidate["point"],
+        options=TensorComparisonOptions(equal_nan=True),
+    )
+    assert lenient.status == "match"
+
+
+def test_exact_equal_nan_exempts_both_nan_positions_bitwise() -> None:
+    reference_value = torch.tensor([float("nan"), 1.0], dtype=torch.float32)
+    candidate_value = torch.tensor([0x7FC00001, 0], dtype=torch.int32).view(
+        torch.float32
+    )
+    candidate_value[1] = 1.0
+    assert torch.isnan(candidate_value[0])
+    assert int(reference_value.view(torch.int32)[0]) != int(
+        candidate_value.view(torch.int32)[0]
+    )
+    reference = make_tensor_run([("point", [("x", reference_value, "full")])])
+    candidate = make_tensor_run([("point", [("x", candidate_value, "full")])])
+
+    strict = compare_points(
+        reference["point"],
+        candidate["point"],
+        options=TensorComparisonOptions(mode="exact"),
+    )
+    assert strict.status == "mismatch"
+
+    lenient = compare_points(
+        reference["point"],
+        candidate["point"],
+        options=TensorComparisonOptions(mode="exact", equal_nan=True),
+    )
+    assert lenient.status == "match"
+
+
+def test_exact_equal_nan_still_detects_signed_zero_bits() -> None:
+    reference = make_tensor_run([("point", [("x", torch.tensor([-0.0]), "full")])])
+    candidate = make_tensor_run([("point", [("x", torch.tensor([0.0]), "full")])])
+
+    report = compare_points(
+        reference["point"],
+        candidate["point"],
+        options=TensorComparisonOptions(mode="exact", equal_nan=True),
+    )
+    assert report.status == "mismatch"
+    assert report.first_issue is not None
+    assert report.first_issue.mismatch_count == 1
+
+
+def test_exact_promote_honors_equal_nan_across_dtypes() -> None:
+    reference = make_tensor_run(
+        [
+            (
+                "point",
+                [("x", torch.tensor([float("nan"), 1.0], dtype=torch.float64), "full")],
+            )
+        ]
+    )
+    candidate = make_tensor_run(
+        [
+            (
+                "point",
+                [("x", torch.tensor([float("nan"), 1.0], dtype=torch.float32), "full")],
+            )
+        ]
+    )
+
+    report = compare_points(
+        reference["point"],
+        candidate["point"],
+        options=TensorComparisonOptions(
+            mode="exact", dtype_policy="promote", equal_nan=True
+        ),
+    )
+    assert report.status == "match"
+
+
 def test_missing_observations_and_reordered_keys_are_reported() -> None:
     reference = make_tensor_run(
         [
@@ -193,6 +286,72 @@ def test_run_and_series_comparison_compose_point_comparisons() -> None:
     compact_series = series.to_text(include_unchanged=False)
     assert "    [mismatch]" in compact_series
     assert "    [match]" not in compact_series
+
+
+def test_point_mapping_merges_with_identical_label_auto_alignment() -> None:
+    reference = make_tensor_run(
+        [
+            ("a", [("x", torch.tensor([1.0]), "full")]),
+            ("b", [("x", torch.tensor([2.0]), "full")]),
+        ],
+        name="reference",
+    )
+    candidate = make_tensor_run(
+        [
+            ("a", [("x", torch.tensor([1.0]), "full")]),
+            ("b", [("x", torch.tensor([2.0]), "full")]),
+        ],
+        name="candidate",
+    )
+
+    report = compare_runs(reference, candidate, point_mapping={"a": "a"})
+    assert report.status == "match"
+    assert report.reference_only_points == ()
+    assert report.candidate_only_points == ()
+    assert len(report.point_comparisons) == 2
+
+
+def test_point_mapping_pairs_explicit_entries_and_auto_aligned_labels() -> None:
+    reference = make_tensor_run(
+        [
+            ("a", [("x", torch.tensor([1.0]), "full")]),
+            ("c", [("x", torch.tensor([2.0]), "full")]),
+        ],
+        name="reference",
+    )
+    candidate = make_tensor_run(
+        [
+            ("b", [("x", torch.tensor([1.0]), "full")]),
+            ("c", [("x", torch.tensor([2.0]), "full")]),
+        ],
+        name="candidate",
+    )
+
+    report = compare_runs(reference, candidate, point_mapping={"a": "b"})
+    assert report.status == "match"
+    assert report.reference_only_points == ()
+    assert report.candidate_only_points == ()
+    assert {
+        (item.reference.label, item.candidate.label)
+        for item in report.point_comparisons
+    } == {("a", "b"), ("c", "c")}
+
+
+def test_point_mapping_rejects_candidate_label_claimed_twice() -> None:
+    reference = make_tensor_run(
+        [
+            ("a", [("x", torch.tensor([1.0]), "full")]),
+            ("b", [("x", torch.tensor([2.0]), "full")]),
+        ],
+        name="reference",
+    )
+    candidate = make_tensor_run(
+        [("b", [("x", torch.tensor([1.0]), "full")])],
+        name="candidate",
+    )
+
+    with pytest.raises(ValueError, match="one-to-one"):
+        compare_runs(reference, candidate, point_mapping={"a": "b"})
 
 
 def test_series_rejects_an_empty_candidate_run() -> None:

@@ -14,6 +14,7 @@ from torch_cudagraph_debug.tensor_debug import (
     TensorRecorder,
     TensorRun,
 )
+from torch_cudagraph_debug.tensor_debug.recording import _SUMMARY_CHUNK_ELEMENTS
 
 from ._run_helpers import make_tensor_run
 
@@ -188,6 +189,31 @@ def test_recorder_watch_grad_validates_observation_name_at_registration() -> Non
     recorder.close()
 
 
+def test_summary_std_is_stable_for_large_mean_offsets(tmp_path: Path) -> None:
+    bundle = tmp_path / "large-offset.tcgd-tensor"
+    value = torch.full((100_000,), 1e12, dtype=torch.float64)
+    value += torch.arange(100_000, dtype=torch.float64) % 2
+    make_tensor_run(
+        [("point", [("x", value, "summary")])],
+        bundle_dir=bundle,
+    )
+
+    summary = TensorRun.load(bundle)["point"].observation("x").summary
+    assert summary.mean == pytest.approx(value.mean().item())
+    assert summary.std == pytest.approx(value.std().item(), rel=1e-3)
+
+
+def test_summary_std_is_stable_across_chunk_boundaries() -> None:
+    numel = _SUMMARY_CHUNK_ELEMENTS + 3
+    value = torch.full((numel,), 1e12, dtype=torch.float64)
+    value += torch.arange(numel, dtype=torch.float64) % 2
+    run = make_tensor_run([("point", [("x", value, "summary")])])
+
+    summary = run["point"].observation("x").summary
+    assert summary.mean == pytest.approx(value.mean().item())
+    assert summary.std == pytest.approx(value.std().item(), rel=1e-3)
+
+
 def test_extreme_finite_values_keep_manifest_json_valid(tmp_path: Path) -> None:
     bundle = tmp_path / "extreme.tcgd-tensor"
     value = torch.tensor([torch.finfo(torch.float64).max], dtype=torch.float64)
@@ -199,7 +225,7 @@ def test_extreme_finite_values_keep_manifest_json_valid(tmp_path: Path) -> None:
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     summary = manifest["points"][0]["observations"][0]["summary"]
     assert summary["mean"] == torch.finfo(torch.float64).max
-    assert summary["std"] is None
+    assert summary["std"] == 0.0
     assert summary["l2_norm"] is None
 
 

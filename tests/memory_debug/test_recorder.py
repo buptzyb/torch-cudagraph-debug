@@ -245,13 +245,51 @@ def test_schema_drift_missing_fields_warn_once_per_field() -> None:
     assert (
         "2 segment(s) missing 'segment_pool_id' (treated as the default pool)" in joined
     )
-    assert "2 segment(s) missing 'requested_size' (treated as 0)" in joined
-    assert "2 block(s) missing 'requested_size' (treated as 0)" in joined
+    assert "2 segment(s) missing 'requested_size' (treated as the active size)" in joined
+    assert "2 block(s) missing 'requested_size' (treated as the block size)" in joined
+    # The requested-size fallbacks must keep the summaries consistent.
+    observation = run.points[0].observations[0]
+    assert observation.stats.requested_bytes == 200
 
 
 def test_complete_snapshot_produces_no_schema_warnings() -> None:
     run = make_run([snapshot(segment(active=10))], labels=("point",))
     assert run.points[0].warnings == ()
+
+
+def test_missing_structural_size_fields_are_rejected() -> None:
+    incomplete = {
+        "address": 1000,
+        "device": 0,
+        "stream": 0,
+        "segment_pool_id": [0, 0],
+        "segment_type": "large",
+        "total_size": 4096,
+        "allocated_size": 1024,
+        # missing: active_size — no coherent substitute exists
+        "requested_size": 1024,
+        "blocks": [],
+    }
+    raw = {
+        "segments": [incomplete],
+        "device_traces": [],
+        "external_annotations": [],
+        "allocator_settings": {},
+    }
+    recorder = MemoryRecorder._from_snapshot_provider(lambda marker: raw)
+    with pytest.raises(TypeError, match=r"active_size is required"):
+        recorder.record_point("point")
+
+    sized_block_missing = dict(incomplete)
+    sized_block_missing["active_size"] = 1024
+    sized_block_missing["blocks"] = [
+        {"address": 1000, "state": "active_allocated", "frames": []}
+    ]
+    recorder = MemoryRecorder._from_snapshot_provider(
+        lambda marker: {**raw, "segments": [sized_block_missing]}
+    )
+    with pytest.raises(TypeError, match=r"blocks\[0\]\.size is required"):
+        recorder.record_point("point")
 
 
 def test_truncated_state_payload_raises_bundle_error(tmp_path: Path) -> None:
@@ -264,6 +302,22 @@ def test_truncated_state_payload_raises_bundle_error(tmp_path: Path) -> None:
     payload = bundle / "states" / "0000.json.gz"
     data = payload.read_bytes()
     payload.write_bytes(data[: len(data) // 2])
+
+    run = MemoryRun.load(bundle, cache_snapshots=False)
+    with pytest.raises(MemoryBundleError, match="could not load state"):
+        run.points[0].allocator_state()
+
+
+def test_non_utf8_state_payload_raises_bundle_error(tmp_path: Path) -> None:
+    bundle = tmp_path / "non-utf8.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=10))],
+        bundle_dir=bundle,
+        labels=("point",),
+    )
+    payload = bundle / "states" / "0000.json.gz"
+    with gzip.open(payload, "wb") as handle:
+        handle.write(b"\xff\xfe{}")
 
     run = MemoryRun.load(bundle, cache_snapshots=False)
     with pytest.raises(MemoryBundleError, match="could not load state"):

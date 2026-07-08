@@ -27,6 +27,105 @@ def _default_to_not_capturing(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _install_fake_native(
+    monkeypatch: pytest.MonkeyPatch, handle: object
+) -> None:
+    class FakeNative:
+        @staticmethod
+        def create_tensor_debug_probe(
+            name: str,
+            actions: list[dict[str, object]],
+            replay_index: torch.Tensor,
+            non_contiguous: str,
+            mode: str,
+        ) -> object:
+            return handle
+
+    monkeypatch.setattr(collector_module._native, "require_native", lambda: FakeNative)
+    monkeypatch.setattr(
+        collector_module,
+        "_create_replay_index",
+        lambda device: torch.zeros((), dtype=torch.int64),
+    )
+
+
+def test_failed_enqueue_does_not_consume_invocation_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingHandle:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+            self.fail_next = True
+
+        def enqueue(
+            self, tensor: torch.Tensor, name: str, invocation_index: int
+        ) -> torch.Tensor:
+            self.calls.append((name, invocation_index))
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("tensor for observation x must be contiguous")
+            return tensor
+
+        def _reclaim_retired_staging(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    handle = FailingHandle()
+    _install_fake_native(monkeypatch, handle)
+    probe = TensorProbe("x", [RecordAction()])
+    monkeypatch.setattr(
+        probe,
+        "_classify_invocation",
+        lambda tensor, name: (probe._capture_invocation_counts.get(name, 0), True),
+    )
+    tensor = torch.tensor([1.0])
+
+    with pytest.raises(RuntimeError, match="contiguous"):
+        probe(tensor, name="x")
+    assert probe(tensor, name="x") is tensor
+    # The rejected call must not burn invocation index 0; the retry reuses it.
+    assert handle.calls == [("x", 0), ("x", 0)]
+    assert probe._capture_invocation_counts == {"x": 1}
+
+
+def test_record_only_collect_is_rejected_during_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordHandle:
+        def __init__(self) -> None:
+            self.reclaims = 0
+
+        def enqueue(
+            self, tensor: torch.Tensor, name: str, invocation_index: int
+        ) -> torch.Tensor:
+            return tensor
+
+        def observations(self, replay_index: int | None) -> list[dict[str, object]]:
+            return []
+
+        def _reclaim_retired_staging(self) -> None:
+            self.reclaims += 1
+
+        def close(self) -> None:
+            pass
+
+    handle = RecordHandle()
+    _install_fake_native(monkeypatch, handle)
+    probe = TensorProbe("x", [RecordAction()])
+    monkeypatch.setattr(
+        collector_module.torch.cuda,
+        "is_current_stream_capturing",
+        lambda: True,
+    )
+
+    with pytest.raises(RuntimeError, match="during CUDA\\s+graph capture"):
+        probe.snapshot(synchronize=False)
+    # Freeing retired staging is also a CUDA call; it must be deferred too.
+    assert handle.reclaims == 0
+
+
 def test_require_native_reports_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_native, "_EXTENSION", None)
     monkeypatch.setattr(
@@ -119,14 +218,17 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     tensor = torch.tensor([3.0])
 
-    assert probe(tensor) is tensor
+    assert probe(tensor, name="activation") is tensor
     assert handle.input is not None
     recorded_tensor, recorded_name, recorded_invocation = handle.input
     assert recorded_tensor is tensor
-    assert (recorded_name, recorded_invocation) == ("mid", 0)
+    assert (recorded_name, recorded_invocation) == ("activation", 0)
 
+    # Eager observations share one native slot; a second distinct name
+    # would silently overwrite the first and is rejected instead.
+    with pytest.raises(RuntimeError, match="one observation name per probe"):
+        probe(tensor)
     assert probe(tensor, name="activation") is tensor
-    assert handle.input[1:] == ("activation", 0)
     snapshot = probe.snapshot(synchronize=False)
     assert snapshot.probe_name == "mid"
     assert snapshot.replay_index == 7

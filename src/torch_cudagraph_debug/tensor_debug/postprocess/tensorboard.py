@@ -39,6 +39,11 @@ def export_snapshots_to_tensorboard(
     The caller owns synchronization, writer lifecycle, snapshot clearing, and any raw tensor
     persistence. This helper intentionally does not import TensorBoard; it accepts any object
     with ``add_scalar`` and ``add_histogram`` methods.
+
+    Scalars come from the persisted float64 ``observation.summary``; undefined
+    summary statistics are skipped. Histograms require a full payload and pass
+    the writer a detached copy, so summary-only observations export scalars and
+    skip the histogram.
     """
 
     if type(write_scalars) is not bool or type(write_histograms) is not bool:
@@ -61,26 +66,26 @@ def export_snapshots_to_tensorboard(
             if numel == 0:
                 continue
 
-            values = observation._materialize_tensor().to(dtype=torch.float32)
-            flat = values.reshape(-1)
-
             if write_scalars:
-                writer.add_scalar(f"{base_tag}/mean", flat.mean().item(), global_step)
-                writer.add_scalar(
-                    f"{base_tag}/std",
-                    flat.std(unbiased=False).item(),
-                    global_step,
+                summary = observation.summary
+                scalars = (
+                    ("mean", summary.mean),
+                    ("std", summary.std),
+                    ("min", summary.minimum),
+                    ("max", summary.maximum),
+                    ("l2_norm", summary.l2_norm),
                 )
-                writer.add_scalar(f"{base_tag}/min", flat.min().item(), global_step)
-                writer.add_scalar(f"{base_tag}/max", flat.max().item(), global_step)
-                writer.add_scalar(
-                    f"{base_tag}/l2_norm",
-                    torch.linalg.vector_norm(flat).item(),
-                    global_step,
-                )
+                for suffix, value in scalars:
+                    if value is not None:
+                        writer.add_scalar(f"{base_tag}/{suffix}", value, global_step)
 
-            if write_histograms:
-                writer.add_histogram(f"{base_tag}/hist", values, global_step)
+            if write_histograms and observation.has_payload:
+                values = observation._materialize_tensor().detach().clone()
+                writer.add_histogram(
+                    f"{base_tag}/hist",
+                    values.to(dtype=torch.float32),
+                    global_step,
+                )
 
 
 def _resolve_step(snapshot: TensorProbeSnapshot, step: StepSelector | None) -> int:

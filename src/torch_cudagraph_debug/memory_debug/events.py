@@ -464,7 +464,9 @@ def _attribute_pool(
 ) -> tuple[PoolId | None, str]:
     if addr is None:
         return None, "unknown"
-    pool_id = ranges.find(device_index, addr)
+    pool_id, ambiguous = ranges.resolve(device_index, addr)
     if pool_id is not None:
         return pool_id, "matched"
+    if ambiguous:
+        return None, "ambiguous"
     return None, "unknown"

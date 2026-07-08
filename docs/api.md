@@ -256,10 +256,13 @@ returns `None`; with `strict=True`, it raises `RuntimeError`.
 
 `close()` first performs the requested synchronization, reclaims retired host
 staging, and releases native resources. An unsynchronized close fails while an
-eager host callback is still pending. Do not close a probe while a graph that
-captured it may still replay. `TensorProbe` is also a context manager whose exit
-uses the correctness-first default close; use that form only when every replay
-occurs inside the context.
+eager host callback or eager device copy is still pending, and is always
+rejected for a probe that has been captured by a CUDA graph (the collector
+cannot observe external synchronization, and a replay may still write into
+probe staging). Do not close a probe while a graph that captured it may still
+replay. `TensorProbe` is also a context manager whose exit uses the
+correctness-first default close; use that form only when every replay occurs
+inside the context.
 
 ### Actions
 
@@ -505,11 +508,22 @@ Missing keys, shape changes, strict dtype changes, and source-stride changes
 under the default `layout_policy="strict"` are mismatches. Use
 `layout_policy="ignore"` only when layout differences are intentional.
 
+`compare_runs()` aligns points by identical label. Pass `point_mapping` when
+semantically equivalent point labels differ; explicit entries take precedence
+and unmapped labels still align by identical label. A candidate label may be
+claimed only once across the merged mapping, and only labels covered by
+neither the mapping nor auto-alignment are reported as one-sided points.
+
 Allclose uses the reference tensor in
 `atol + rtol * abs(reference)`. Integer and bool values compare exactly.
 `dtype_policy="promote"` explicitly converts both values with
 `torch.promote_types()`. Exact comparison uses raw value bytes when dtypes
-match.
+match; with `equal_nan=True`, positions where both sides are NaN are exempted
+while every other position keeps the bitwise distinction, including signed
+zeros and NaN payload bits. Across differing dtypes under
+`dtype_policy="promote"`, exact comparison uses value equality on the promoted
+values with `equal_nan` honored, so bit distinctions that promotion erases
+(such as signed zeros and NaN payload bits) are not detected there.
 
 `TensorObservationComparison` contains status, reason, both observation
 descriptors, mismatch count and fraction, max absolute and relative error, mean
@@ -528,9 +542,11 @@ When overwriting, known tcgd report artifacts from the previous write are
 removed; unrelated files in the directory are preserved.
 
 
-Summary comparison uses three states. Equal digests match. Different digests
-are a mismatch in exact mode, but are inconclusive in allclose mode when either
-full payload is unavailable.
+Summary comparison uses three states. Equal digests match, except under
+allclose with `equal_nan=False` when the summary reports NaNs: bit-identical
+NaN positions still fail allclose and are reported as mismatches. Different
+digests are a mismatch in exact mode, but are inconclusive in allclose mode
+when either full payload is unavailable.
 
 ### Tensor Run Groups
 
@@ -551,7 +567,10 @@ compare_run_groups(
 ```
 
 A group loads direct child bundles and requires unique non-null ranks, one run
-name, one execution mode, and one point-label sequence. Conflicting non-null
+name, one execution mode, and one point-label sequence. An incomplete rank
+whose labels are a strict prefix of the longest rank sequence (a crashed rank)
+is accepted with the incomplete-bundle warning; a complete rank with fewer
+points or any non-prefix sequence is an error. Conflicting non-null
 group IDs or world sizes are errors; missing identity, missing declared ranks,
 incomplete bundles, provenance differences, and metadata differences are
 warnings. `TensorRankPointSummary` describes rank/point payload inventory, and

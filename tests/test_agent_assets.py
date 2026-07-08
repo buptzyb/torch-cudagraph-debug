@@ -4,7 +4,10 @@ import json
 import re
 from pathlib import Path
 
-import tomllib
+import pytest
+
+# tomllib is stdlib only on Python >= 3.11; the package floor is 3.10.
+tomllib = pytest.importorskip("tomllib")
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / ".agents" / "skills" / "tcgd-case-study"

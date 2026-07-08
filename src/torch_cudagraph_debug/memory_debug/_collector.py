@@ -125,11 +125,14 @@ class _MemoryCollector:
             devices = (torch.cuda.current_device(),)
         else:
             devices = ()
+        # Snapshot-derived selections (default and "all") must not bind an
+        # empty device set: a first capture taken before any allocation would
+        # otherwise pin every later capture to zero devices.
         if (
             not devices
             and snapshot is not None
             and self._snapshot_provider is not None
-            and self._requested_devices is None
+            and self._requested_devices in (None, "all")
         ):
             return ()
         self._resolved_devices = devices

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -65,16 +65,16 @@ class AllocatorTraceEntry:
 _SEGMENT_DRIFT_FIELDS = (
     ("device", "device 0"),
     ("segment_pool_id", "the default pool"),
-    ("total_size", "0"),
-    ("allocated_size", "0"),
-    ("active_size", "0"),
-    ("requested_size", "0"),
+    ("requested_size", "the active size"),
 )
 _BLOCK_DRIFT_FIELDS = (
-    ("size", "0"),
-    ("requested_size", "0"),
+    ("requested_size", "the block size"),
     ("state", "'unknown'"),
 )
+# Structural sizes have no coherent substitute: defaulting them to zero
+# breaks the allocated <= active <= reserved invariants downstream, so
+# their absence is treated as corrupted input rather than schema drift.
+_SEGMENT_REQUIRED_SIZE_FIELDS = ("total_size", "allocated_size", "active_size")
 
 
 def normalize_snapshot(
@@ -108,6 +108,9 @@ def normalize_snapshot(
     normalized = []
     for segment_index, segment in enumerate(segments):
         context = f"segment[{segment_index}]"
+        for name in _SEGMENT_REQUIRED_SIZE_FIELDS:
+            if name not in segment:
+                raise TypeError(f"{context}.{name} is required")
         count_missing(segment, "segment", _SEGMENT_DRIFT_FIELDS)
         device = normalize_device_index(_int_field(segment, "device", context))
         pool_id = normalize_pool_id(segment.get("segment_pool_id", DEFAULT_POOL_ID))
@@ -119,6 +122,8 @@ def normalize_snapshot(
             _mapping_sequence_field(segment, "blocks", context)
         ):
             block_context = f"{context}.blocks[{block_index}]"
+            if "size" not in block:
+                raise TypeError(f"{block_context}.size is required")
             count_missing(block, "block", _BLOCK_DRIFT_FIELDS)
             current_address = _optional_int_field(block, "address", block_context)
             if current_address is None and block_address is not None:
@@ -129,7 +134,7 @@ def normalize_snapshot(
                     "address": current_address,
                     "size": size,
                     "requested_size": _int_field(
-                        block, "requested_size", block_context
+                        block, "requested_size", block_context, size
                     ),
                     "state": _string_field(block, "state", block_context, "unknown"),
                     "frames": _frames_field(block, block_context),
@@ -149,7 +154,12 @@ def normalize_snapshot(
                 "total_size": _int_field(segment, "total_size", context),
                 "allocated_size": _int_field(segment, "allocated_size", context),
                 "active_size": _int_field(segment, "active_size", context),
-                "requested_size": _int_field(segment, "requested_size", context),
+                "requested_size": _int_field(
+                    segment,
+                    "requested_size",
+                    context,
+                    _int_field(segment, "active_size", context),
+                ),
                 "is_expandable": _bool_field(segment, "is_expandable", False),
                 "blocks": tuple(blocks),
                 "frames": _frames_field(segment, context),
@@ -324,40 +334,29 @@ def compare_observation_lifecycle(
     counters: defaultdict[MemoryObservationKey, list[int]] = defaultdict(
         lambda: [0, 0, 0, 0]
     )
-    reference_segment_keys = {_segment_key(segment) for segment in reference_segments}
-    candidate_segment_keys = {_segment_key(segment) for segment in candidate_segments}
-    for key in candidate_segment_keys - reference_segment_keys:
-        counters[key[0]][0] += key[2]
-    for key in reference_segment_keys - candidate_segment_keys:
-        counters[key[0]][1] += key[2]
+    # Identity keys form multisets: entries sharing one key (notably
+    # address-less segments or blocks) compare by multiplicity, so matched
+    # pairs cancel and every excess instance counts once. A block whose
+    # (address, size) key left the active multiset (turned inactive in
+    # place, coalesced, re-split, or in a freed segment) stopped being
+    # active; the newly-active side is the exact mirror.
+    reference_segment_keys = Counter(
+        _segment_key(segment) for segment in reference_segments
+    )
+    candidate_segment_keys = Counter(
+        _segment_key(segment) for segment in candidate_segments
+    )
+    for key, count in (candidate_segment_keys - reference_segment_keys).items():
+        counters[key[0]][0] += key[2] * count
+    for key, count in (reference_segment_keys - candidate_segment_keys).items():
+        counters[key[0]][1] += key[2] * count
 
-    reference_blocks = _block_map(reference_segments)
-    candidate_blocks = _block_map(candidate_segments)
-    for block_key, block in candidate_blocks.items():
-        if str(block.get("state")) not in ACTIVE_STATES:
-            continue
-        reference_block = reference_blocks.get(block_key)
-        reference_state = (
-            str(reference_block.get("state", "missing"))
-            if reference_block
-            else "missing"
-        )
-        if reference_state not in ACTIVE_STATES:
-            counters[block_key[0]][2] += _int(block.get("size"))
-    for block_key, block in reference_blocks.items():
-        if str(block.get("state")) not in ACTIVE_STATES:
-            continue
-        candidate_block = candidate_blocks.get(block_key)
-        candidate_state = (
-            str(candidate_block.get("state", "missing"))
-            if candidate_block
-            else "missing"
-        )
-        # Mirror of the newly-active rule: a block whose (address, size) key
-        # is gone (coalesced, re-split, or in a freed segment) stopped being
-        # active just as surely as one that turned inactive in place.
-        if candidate_state not in ACTIVE_STATES:
-            counters[block_key[0]][3] += _int(block.get("size"))
+    reference_active = _active_block_keys(reference_segments)
+    candidate_active = _active_block_keys(candidate_segments)
+    for key, count in (candidate_active - reference_active).items():
+        counters[key[0]][2] += key[2] * count
+    for key, count in (reference_active - candidate_active).items():
+        counters[key[0]][3] += key[2] * count
 
     return {
         key: MemoryLifecycleDelta(
@@ -473,10 +472,10 @@ def _segment_key(
     )
 
 
-def _block_map(
+def _active_block_keys(
     segments: Sequence[Mapping[str, Any]],
-) -> dict[tuple[MemoryObservationKey, int | None, int], Mapping[str, Any]]:
-    result = {}
+) -> Counter[tuple[MemoryObservationKey, int | None, int]]:
+    result: Counter[tuple[MemoryObservationKey, int | None, int]] = Counter()
     for segment in segments:
         key = MemoryObservationKey(
             normalize_device_index(_int(segment.get("device"))),
@@ -484,12 +483,15 @@ def _block_map(
             normalize_stream(segment.get("stream")),
         )
         for block in segment.get("blocks", []) or []:
-            block_key = (
-                key,
-                _optional_int(block.get("address")),
-                _int(block.get("size")),
-            )
-            result[block_key] = block
+            if str(block.get("state")) not in ACTIVE_STATES:
+                continue
+            result[
+                (
+                    key,
+                    _optional_int(block.get("address")),
+                    _int(block.get("size")),
+                )
+            ] += 1
     return result
 
 

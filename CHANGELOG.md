@@ -4,6 +4,29 @@
 
 ### Fixed
 
+- Structural segment and block sizes (`total_size`, `allocated_size`,
+  `active_size`, block `size`) are required: absent fields raise instead of
+  defaulting to invariant-breaking zeros. Absent `requested_size` falls back
+  to the active/block size with an aggregated warning, so fragmentation is
+  no longer fabricated as 100%.
+- `devices="all"` with a snapshot provider no longer binds an empty device
+  set when the first snapshot precedes any allocation; device resolution is
+  retried like the default selection.
+- Lifecycle deltas compare segment and active-block identities as
+  multisets, so address-less entries count with multiplicity instead of
+  collapsing onto one key and undercounting.
+- Allocator events at addresses whose segment changed pools between the
+  compared snapshots are attributed with confidence `ambiguous` (event
+  tables) or an `unknown` cohort pool (lifetime transients) instead of
+  being silently binned into the newer pool as `matched`. Surviving
+  instances still take their pool from the matching snapshot block.
+- Cohort transition rows are re-stamped with the allocator-rounded block
+  size at reconciliation, so `births`/`free_requests` rows agree with
+  `born_*`/`free_*` byte totals; transients keep the requested basis
+  throughout.
+- Timeline HTML charts always plot the full per-point series;
+  `include_unchanged=False` no longer bends polylines across filtered
+  points or hides single-change series.
 - Allocation lifetime reconciliation now matches event-born instances to
   their allocator-rounded snapshot blocks by address with request/rounded
   size compatibility. Previously any allocation whose request size was not
@@ -27,8 +50,72 @@
   so steady-state churn read like a leak.
 - Timeline HTML charts group polylines by the pool key actually present in
   timeline rows; previously every pool collapsed into one unlabeled line.
-- A truncated or corrupted gzip allocator-state or event payload raises `MemoryBundleError`
-  instead of leaking a raw `EOFError` or `zlib.error` through the CLI.
+- A truncated or corrupted gzip allocator-state or event payload raises
+  `MemoryBundleError` instead of leaking a raw `EOFError`, `zlib.error`, or
+  `UnicodeDecodeError` through the CLI.
+- Reject malformed manifests, non-finite JSON, invalid scalar coercions,
+  inconsistent ownership, invalid allocator frame fields, and partial recorder
+  writes instead of accepting ambiguous persisted state. Missing per-device
+  trace slots remain unavailable history rather than malformed data.
+- Verify content-addressed tensor payloads even when two observations advertise
+  the same digest, and return defensive tensor copies from public observations.
+- Render all four core allocator metrics consistently for device/pool/stream rows and
+  timeline charts, preserve stream-only stack attribution when pool aggregates
+  cancel, clean stale optional report artifacts, and return absolute report paths.
+- Report HTML now states shown and total counts for every limited attribution
+  table instead of truncating silently. Invalid display limits and stack depths
+  are rejected before rendering or creating report output directories.
+- Preserve allocation identity by device, address, and generation so distinct
+  same-sized blocks are not merged during lifetime analysis.
+- Aggregate lifetime replay reconciliation warnings by reason and device while
+  preserving total event counts and up to three example addresses, instead of
+  emitting one warning per allocator event.
+- Reclaim eager callback payloads, non-contiguous eager source temporaries, and
+  replaced pinned staging instead of retaining them for the full Probe
+  lifetime. Unsynchronized close now reports pending eager callbacks.
+- Preserve exceptional TensorRecorder and MemoryRecorder sessions as terminal,
+  loadable `complete=False` runs instead of marking partial data complete.
+- The `tcgd-memory` CLI can be invoked with `python -m
+  torch_cudagraph_debug.memory_debug.cli`; previously module invocation was a
+  silent no-op.
+- The test suite runs on the declared Python 3.10 floor (agent-asset tests
+  skip where `tomllib` is unavailable instead of aborting collection).
+- Persisted tensor summaries compute `std` with a chunked Welford merge. The
+  one-pass sum-of-squares formula catastrophically cancelled when the mean
+  dominated the spread (mean 1e12 with unit spread reported std ~11585).
+- TensorBoard export reads scalars from the persisted float64 observation
+  summary instead of recomputing them from a float32 cast (which overflowed
+  large values to inf and lost int64 precision), hands writers a detached
+  histogram copy so writer-side mutation cannot corrupt cached observations,
+  and exports scalars for summary-only observations instead of raising
+  mid-export.
+- Equal-digest comparisons no longer fast-path bit-identical NaNs to a match
+  under allclose with `equal_nan=False`; same-dtype exact comparison with
+  `equal_nan=True` exempts both-NaN positions from the bitwise check while
+  preserving signed-zero and NaN-payload distinctions everywhere else.
+- `compare_runs` merges an explicit `point_mapping` with identical-label
+  auto-alignment: explicit entries take precedence, unmapped labels align by
+  identical label, and a candidate label claimed twice across the merged
+  mapping raises `ValueError`. Previously any mapping disabled auto-alignment
+  and forced unmapped identical labels into a mismatch.
+- Tensor run groups accept an incomplete rank whose point labels are a strict
+  prefix of the longest rank sequence (a crashed rank) with the existing
+  incomplete-bundle warning instead of raising; a complete rank with fewer
+  points or any non-prefix sequence still raises.
+- A tensor probe enqueue that fails validation no longer consumes its
+  invocation and slot order: keyed checks stay satisfiable on retry,
+  positional checks bind the intended expected entry, and a failed first
+  captured call no longer loses the replay-counter capture.
+- Eager (`when="always"`) probes reject a second distinct observation name
+  instead of silently overwriting the single native slot both names share.
+- Record-only `snapshot(synchronize=False)` during CUDA graph capture is
+  rejected instead of issuing a blocking counter read that invalidates the
+  capture; retired-staging reclaim is likewise deferred during capture and
+  while eager work is pending.
+- Unsynchronized `close()` is rejected while eager device copies are pending
+  (record-only probes previously freed staging a running D2H copy still
+  targeted) and always rejected once the probe was captured by a CUDA graph,
+  since an asynchronous replay may still write into probe staging.
 
 ### Changed
 
@@ -51,6 +138,23 @@
   `snapshot_inferred_*` counters with merged `born_*`, `free_requested_*`,
   and `free_completed_*` totals; transition `confidence` was replaced by
   `origin` (`event` or `range_boundary`).
+- Allocation-stack and allocator-event attribution now always use complete
+  normalized stack identity and retain every structured row. `stack_depth` and
+  `limit` affect text and HTML presentation only across comparisons, timelines,
+  phase reports, and run-group phase reports. Advanced structured helpers no
+  longer accept lossy depth or row-limit parameters.
+- Allocation-stack, allocator-event, and lifetime models now expose complete
+  structured frames. JSON stores frame arrays, CSV stores canonical
+  `stack_frames_json`, and text/HTML render optional FX metadata without
+  changing the location-only `stack_key` convenience value.
+- `TensorProbe.close()` and `TensorRecorder.close()` now accept the same
+  bool/stream/device synchronization target as tensor result queries. Closing
+  an enabled probe is rejected during CUDA Graph capture.
+- Eager `when="always"` probes lock one CUDA stream, allow eager work before
+  capture, and reject eager work after capture establishes graph ownership.
+- Direct allocation-lifetime analysis uses `MemoryLifetimeOptions`; embedded
+  comparison and timeline attribution continues to use
+  `MemoryAttributionOptions`.
 
 ### Added
 
@@ -132,51 +236,6 @@
   Codex and Claude Code, with one shared tool-first investigation workflow.
 - Private-pool inactive-memory guidance and a runnable Probe example that
   distinguishes retained CUDA Graph capacity from active tensor memory.
-
-### Changed
-
-- Allocation-stack and allocator-event attribution now always use complete
-  normalized stack identity and retain every structured row. `stack_depth` and
-  `limit` affect text and HTML presentation only across comparisons, timelines,
-  phase reports, and run-group phase reports. Advanced structured helpers no
-  longer accept lossy depth or row-limit parameters.
-- Allocation-stack, allocator-event, and lifetime models now expose complete
-  structured frames. JSON stores frame arrays, CSV stores canonical
-  `stack_frames_json`, and text/HTML render optional FX metadata without
-  changing the location-only `stack_key` convenience value.
-- `TensorProbe.close()` and `TensorRecorder.close()` now accept the same
-  bool/stream/device synchronization target as tensor result queries. Closing
-  an enabled probe is rejected during CUDA Graph capture.
-- Eager `when="always"` probes lock one CUDA stream, allow eager work before
-  capture, and reject eager work after capture establishes graph ownership.
-- Direct allocation-lifetime analysis uses `MemoryLifetimeOptions`; embedded
-  comparison and timeline attribution continues to use
-  `MemoryAttributionOptions`.
-
-### Fixed
-
-- Reject malformed manifests, non-finite JSON, invalid scalar coercions,
-  inconsistent ownership, invalid allocator frame fields, and partial recorder
-  writes instead of accepting ambiguous persisted state. Missing per-device
-  trace slots remain unavailable history rather than malformed data.
-- Verify content-addressed tensor payloads even when two observations advertise
-  the same digest, and return defensive tensor copies from public observations.
-- Render all four core allocator metrics consistently for device/pool/stream rows and
-  timeline charts, preserve stream-only stack attribution when pool aggregates
-  cancel, clean stale optional report artifacts, and return absolute report paths.
-- Report HTML now states shown and total counts for every limited attribution
-  table instead of truncating silently. Invalid display limits and stack depths
-  are rejected before rendering or creating report output directories.
-- Preserve allocation identity by device, address, and generation so distinct
-  same-sized blocks are not merged during lifetime analysis.
-- Aggregate lifetime replay reconciliation warnings by reason and device while
-  preserving total event counts and up to three example addresses, instead of
-  emitting one warning per allocator event.
-- Reclaim eager callback payloads, non-contiguous eager source temporaries, and
-  replaced pinned staging instead of retaining them for the full Probe
-  lifetime. Unsynchronized close now reports pending eager callbacks.
-- Preserve exceptional TensorRecorder and MemoryRecorder sessions as terminal,
-  loadable `complete=False` runs instead of marking partial data complete.
 
 ## v0.1.0 - 2026-05-12
 

@@ -205,3 +205,19 @@ def test_default_probe_delays_device_binding_after_empty_provider_snapshot() -> 
     assert first.observations == ()
     assert probe.devices == (1,)
     assert set(second.pool_stats) == {MemoryPoolKey(1, (0, 0))}
+
+
+def test_all_devices_probe_delays_binding_after_empty_provider_snapshot() -> None:
+    device1 = segment(active=20, address=2000)
+    device1["device"] = 1
+    values = iter((snapshot(), snapshot(device1)))
+    probe = MemoryProbe._from_snapshot_provider(
+        lambda marker: next(values), devices="all"
+    )
+
+    first = probe.snapshot()
+    second = probe.snapshot()
+
+    assert first.observations == ()
+    assert probe.devices == (1,)
+    assert set(second.pool_stats) == {MemoryPoolKey(1, (0, 0))}

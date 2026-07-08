@@ -118,6 +118,13 @@ ProbeContext::ProbeContext(
             TCGD_CUDA_CHECK(cudaEventCreateWithFlags(
                 &replay_index_ready_event_, cudaEventDisableTiming));
         }
+        if (mode_ == ProbeMode::Always) {
+            // Tracks completion of eager D2H copies (with or without
+            // callbacks) so close and staging reclaim never free memory a
+            // pending copy still targets.
+            TCGD_CUDA_CHECK(cudaEventCreateWithFlags(
+                &eager_work_event_, cudaEventDisableTiming));
+        }
     } catch (...) {
         release_resources_noexcept();
         throw;
@@ -159,7 +166,7 @@ torch::Tensor ProbeContext::enqueue(
         validate_eager_stream(stream);
     }
     const uint64_t capture_id = is_capturing ? capture_id_for_stream(stream) : 0;
-    const uint64_t order = next_slot_index(is_capturing, capture_id);
+    const uint64_t order = peek_slot_index(is_capturing, capture_id);
 
     validate_tensor(tensor);
     validate_check_actions(
@@ -167,6 +174,11 @@ torch::Tensor ProbeContext::enqueue(
         order,
         observation_name,
         invocation_index);
+    // Consume the slot order and first-capture registration only after
+    // validation passed: a rejected call must not burn the order its retry
+    // needs, mis-bind positional expectations, or lose the order-0 replay
+    // counter capture.
+    commit_slot_index(is_capturing, capture_id);
 
     torch::Tensor source = source_tensor_for_enqueue(tensor);
     const size_t nbytes = static_cast<size_t>(tensor_nbytes(tensor));
@@ -238,6 +250,11 @@ torch::Tensor ProbeContext::enqueue(
                 TCGD_CUDA_CHECK(status);
             }
         }
+    }
+    if (!is_capturing && eager_work_event_ != nullptr) {
+        // Marks completion of every eager copy and callback issued so far on
+        // this stream; close and staging reclaim query it before freeing.
+        TCGD_CUDA_CHECK(cudaEventRecord(eager_work_event_, stream));
     }
     return tensor;
 }
@@ -323,6 +340,15 @@ pybind11::dict ProbeContext::debug_resource_counts() const {
 }
 
 void ProbeContext::reclaim_retired_staging() {
+    // Reclaim is opportunistic: defer whenever a pending eager callback or
+    // an unfinished eager copy could still target a retired buffer.
+    if (eager_callbacks_in_flight_.load(std::memory_order_acquire) != 0) {
+        return;
+    }
+    if (eager_work_event_ != nullptr &&
+        cudaEventQuery(eager_work_event_) == cudaErrorNotReady) {
+        return;
+    }
     std::vector<void*> retired;
     {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -333,6 +359,11 @@ void ProbeContext::reclaim_retired_staging() {
             TCGD_CUDA_CHECK(cudaFreeHost(ptr));
         }
     }
+}
+
+bool ProbeContext::has_captured_work() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return captured_once_;
 }
 
 void ProbeContext::close() {
@@ -349,6 +380,20 @@ void ProbeContext::close() {
                 << " while " << in_flight
                 << " eager callback(s) are pending; synchronize first";
             throw std::runtime_error(oss.str());
+        }
+        if (eager_work_event_ != nullptr) {
+            // Record-only eager copies have no callback accounting; the
+            // event is the only witness that their D2H transfers finished.
+            const cudaError_t eager_state = cudaEventQuery(eager_work_event_);
+            if (eager_state == cudaErrorNotReady) {
+                std::ostringstream oss;
+                oss << "cannot close tensor debug probe " << name_
+                    << " while eager device work is pending; synchronize first";
+                throw std::runtime_error(oss.str());
+            }
+            if (eager_state != cudaSuccess) {
+                TCGD_CUDA_CHECK(eager_state);
+            }
         }
         closed_ = true;
     }
@@ -575,18 +620,15 @@ void ProbeContext::validate_eager_stream(cudaStream_t stream) {
     }
 }
 
-uint64_t ProbeContext::next_slot_index(bool is_capturing, uint64_t capture_id) {
+uint64_t ProbeContext::peek_slot_index(
+    bool is_capturing, uint64_t capture_id) const {
     std::lock_guard<std::mutex> guard(mutex_);
 
     if (!is_capturing) {
         return 0;
     }
 
-    if (!captured_once_) {
-        captured_once_ = true;
-        captured_capture_id_ = capture_id;
-        next_slot_index_ = 0;
-    } else if (captured_capture_id_ != capture_id) {
+    if (captured_once_ && captured_capture_id_ != capture_id) {
         std::ostringstream oss;
         oss << "tensor debug probe " << name_
             << " has already been captured by a CUDA graph; create a new probe "
@@ -594,7 +636,22 @@ uint64_t ProbeContext::next_slot_index(bool is_capturing, uint64_t capture_id) {
         throw std::runtime_error(oss.str());
     }
 
-    return next_slot_index_++;
+    return captured_once_ ? next_slot_index_ : 0;
+}
+
+void ProbeContext::commit_slot_index(bool is_capturing, uint64_t capture_id) {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    if (!is_capturing) {
+        return;
+    }
+
+    if (!captured_once_) {
+        captured_once_ = true;
+        captured_capture_id_ = capture_id;
+        next_slot_index_ = 0;
+    }
+    ++next_slot_index_;
 }
 
 torch::Tensor ProbeContext::source_tensor_for_enqueue(const torch::Tensor& tensor) const {
@@ -693,6 +750,10 @@ void ProbeContext::release_resources_noexcept() {
     if (replay_index_ready_event_ != nullptr) {
         cudaEventDestroy(replay_index_ready_event_);
         replay_index_ready_event_ = nullptr;
+    }
+    if (eager_work_event_ != nullptr) {
+        cudaEventDestroy(eager_work_event_);
+        eager_work_event_ = nullptr;
     }
     if (replay_index_staging_ != nullptr) {
         cudaFreeHost(replay_index_staging_);

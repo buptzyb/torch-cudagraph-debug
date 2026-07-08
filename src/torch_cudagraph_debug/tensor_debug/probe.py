@@ -77,15 +77,20 @@ class TensorProbe:
         """Return ``tensor`` unchanged while enqueueing one named observation."""
 
         resolved_name = validate_observation_name(self.name if name is None else name)
-        invocation_index = self._next_capture_invocation(
+        invocation_index, counted = self._classify_invocation(
             tensor,
             resolved_name,
         )
-        return self._collector.enqueue(
+        result = self._collector.enqueue(
             tensor,
             name=resolved_name,
             invocation_index=invocation_index,
         )
+        # Commit the invocation index only after the enqueue succeeded: a
+        # rejected call must not burn the index its retry will need.
+        if counted:
+            self._capture_invocation_counts[resolved_name] = invocation_index + 1
+        return result
 
     def watch_grad(
         self,
@@ -267,23 +272,23 @@ class TensorProbe:
             self._collector.close(synchronize=selected)
             self._closed = True
 
-    def _next_capture_invocation(
+    def _classify_invocation(
         self,
         tensor: torch.Tensor,
         name: str,
-    ) -> int:
+    ) -> tuple[int, bool]:
+        """Return ``(invocation_index, counted)`` without consuming the index."""
+
         if (
             not self._collector.enabled
             or not isinstance(tensor, torch.Tensor)
             or tensor.device.type != "cuda"
         ):
-            return 0
+            return 0, False
         with torch.cuda.device(tensor.device):
             if not torch.cuda.is_current_stream_capturing():
-                return 0
-        invocation_index = self._capture_invocation_counts.get(name, 0)
-        self._capture_invocation_counts[name] = invocation_index + 1
-        return invocation_index
+                return 0, False
+        return self._capture_invocation_counts.get(name, 0), True
 
     def _ensure_open(self) -> None:
         if self._closed:

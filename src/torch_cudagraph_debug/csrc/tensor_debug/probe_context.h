@@ -112,6 +112,7 @@ class ProbeContext {
     pybind11::dict check_status();
     pybind11::dict debug_resource_counts() const;
     void reclaim_retired_staging();
+    bool has_captured_work() const;
     void close();
 
     void on_callback(const CallbackPayload& payload) noexcept;
@@ -127,7 +128,8 @@ class ProbeContext {
         uint64_t invocation_index) const;
     uint64_t capture_id_for_stream(cudaStream_t stream) const;
     void validate_eager_stream(cudaStream_t stream);
-    uint64_t next_slot_index(bool is_capturing, uint64_t capture_id);
+    uint64_t peek_slot_index(bool is_capturing, uint64_t capture_id) const;
+    void commit_slot_index(bool is_capturing, uint64_t capture_id);
     torch::Tensor source_tensor_for_enqueue(const torch::Tensor& tensor) const;
     TensorSlot& ensure_slot(
         const torch::Tensor& tensor,
@@ -161,6 +163,7 @@ class ProbeContext {
     int replay_index_device_ = -1;
     int64_t* replay_index_staging_ = nullptr;
     cudaEvent_t replay_index_ready_event_ = nullptr;
+    cudaEvent_t eager_work_event_ = nullptr;
     NonContiguousPolicy non_contiguous_;
     ProbeMode mode_;
     bool has_record_action_ = false;

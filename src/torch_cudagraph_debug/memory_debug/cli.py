@@ -351,3 +351,7 @@ def _parse_pool_key(value: str) -> MemoryPoolKey:
     except ValueError as exc:
         raise ValueError(f"invalid pool key {value!r}") from exc
     return MemoryPoolKey(device_index, pool_parts)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -101,6 +103,56 @@ def test_export_snapshots_empty_tensor_writes_only_numel() -> None:
     export_snapshots_to_tensorboard(writer, [snapshot], write_histograms=True)
 
     assert writer.scalars == [("empty/numel", 0, 3)]
+    assert writer.histograms == []
+
+
+def test_export_scalars_use_persisted_float64_summary() -> None:
+    writer = FakeWriter()
+    snapshot = make_probe_snapshot(
+        torch.tensor([1e200, 1e200], dtype=torch.float64), replay_index=1
+    )
+    summary = snapshot.observations[0].summary
+
+    export_snapshots_to_tensorboard(writer, [snapshot])
+
+    assert math.isfinite(scalar_value(writer, "mid/mean"))
+    assert scalar_value(writer, "mid/mean") == summary.mean
+    assert scalar_value(writer, "mid/std") == summary.std
+    assert scalar_value(writer, "mid/min") == summary.minimum
+    assert scalar_value(writer, "mid/max") == summary.maximum
+    assert summary.l2_norm is None
+    assert not any(tag == "mid/l2_norm" for tag, _, _ in writer.scalars)
+
+
+def test_export_histogram_values_are_detached_copies() -> None:
+    writer = FakeWriter()
+    snapshot = make_probe_snapshot(torch.tensor([1.0, 2.0]), replay_index=1)
+
+    export_snapshots_to_tensorboard(writer, [snapshot], write_histograms=True)
+
+    _, values, _ = writer.histograms[0]
+    values.fill_(-1.0)
+    assert torch.equal(snapshot.tensor(), torch.tensor([1.0, 2.0]))
+
+
+def test_export_summary_only_observation_writes_scalars_without_payload() -> None:
+    run = make_tensor_run(
+        [("point", [("hidden", torch.tensor([1.0, 3.0]), "summary")])]
+    )
+    snapshot = TensorProbeSnapshot(
+        probe_id="probe",
+        probe_name="hidden",
+        snapshot_index=0,
+        replay_index=1,
+        timestamp=0.0,
+        observations=run["point"].observations,
+    )
+    writer = FakeWriter()
+
+    export_snapshots_to_tensorboard(writer, [snapshot], write_histograms=True)
+
+    assert scalar_value(writer, "hidden/mean") == pytest.approx(2.0)
+    assert scalar_value(writer, "hidden/std") == pytest.approx(1.0)
     assert writer.histograms == []
 
 
