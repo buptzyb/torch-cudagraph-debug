@@ -123,3 +123,35 @@ def make_run(
     for label in point_labels:
         recorder.record_point(label)
     return recorder.finish()
+
+
+def make_history_run(
+    steps: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]],
+    *,
+    labels: tuple[str, ...],
+    name: str = "run",
+    bundle_dir: Path | None = None,
+) -> MemoryRun:
+    """Build a run whose snapshots carry a cumulative, marker-complete trace.
+
+    Each step is ``(segments, events_since_previous_point)``. Marker snapshot
+    events are appended automatically so every interval window is complete.
+    """
+
+    markers: list[str] = []
+    trace: list[dict[str, Any]] = []
+
+    def provider(marker: str) -> dict[str, Any]:
+        index = len(markers)
+        markers.append(marker)
+        segments, events_between = steps[index]
+        trace.extend(events_between)
+        trace.append(event("snapshot", marker=marker))
+        return snapshot(*segments, traces=[list(trace)])
+
+    recorder = MemoryRecorder._from_snapshot_provider(
+        provider, name=name, bundle_dir=bundle_dir
+    )
+    for label in labels:
+        recorder.record_point(label)
+    return recorder.finish()

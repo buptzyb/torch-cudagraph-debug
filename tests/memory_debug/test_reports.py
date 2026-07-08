@@ -12,7 +12,7 @@ from torch_cudagraph_debug.memory_debug import (
     compare_phases,
 )
 
-from ._helpers import make_run, segment, snapshot
+from ._helpers import event, make_history_run, make_run, segment, snapshot
 
 
 def test_comparison_owns_all_report_formats(tmp_path: Path) -> None:
@@ -220,34 +220,38 @@ def test_phase_report_writes_decomposition_and_component_tables(
 
 
 def test_timeline_and_phase_propagate_component_warnings() -> None:
-    run = make_run(
-        [snapshot(segment(active=10)), snapshot(segment(active=20))],
-        labels=("before", "after"),
+    def history_steps():
+        return [
+            ([segment(active=10)], []),
+            (
+                [segment(active=10)],
+                [event("future_action", address=4000, size=1)],
+            ),
+        ]
+
+    run = make_history_run(history_steps(), labels=("before", "after"))
+    timeline = run.timeline(
+        attribution=MemoryAttributionOptions(lifetimes=True, events=True)
     )
-    timeline = run.timeline(attribution=MemoryAttributionOptions(events=True))
-    assert "allocator event history" in timeline.to_text()
+    assert "unknown allocator actions" in timeline.to_text()
     assert any(
-        "allocator event history" in item for item in timeline.to_dict()["warnings"]
+        "unknown allocator actions" in item for item in timeline.to_dict()["warnings"]
     )
 
-    baseline = make_run(
-        [snapshot(segment(active=10)), snapshot(segment(active=20))],
-        name="baseline",
-        labels=("start", "end"),
+    baseline = make_history_run(
+        history_steps(), name="baseline", labels=("start", "end")
     )
-    candidate = make_run(
-        [snapshot(segment(active=12)), snapshot(segment(active=25))],
-        name="candidate",
-        labels=("start", "end"),
+    candidate = make_history_run(
+        history_steps(), name="candidate", labels=("start", "end")
     )
     phase = compare_phases(
         baseline.between("start", "end"),
         candidate.between("start", "end"),
-        attribution=MemoryAttributionOptions(events=True),
+        attribution=MemoryAttributionOptions(lifetimes=True, events=True),
     )
-    assert "allocator event history" in phase.to_text()
+    assert "unknown allocator actions" in phase.to_text()
     assert any(
-        "allocator event history" in item for item in phase.to_dict()["warnings"]
+        "unknown allocator actions" in item for item in phase.to_dict()["warnings"]
     )
 
 

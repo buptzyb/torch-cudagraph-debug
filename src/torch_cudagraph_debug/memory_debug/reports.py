@@ -152,14 +152,9 @@ class MemoryAllocationLifetimeAnalysis:
                 f"blocks={item.peak_block_count} at {item.display_stack(depth)}"
             )
             lines.append(
-                f"{indent}    born exact={format_bytes(item.event_exact_birth_bytes)} "
-                f"inferred={format_bytes(item.snapshot_inferred_birth_bytes)}; "
-                f"free requested exact="
-                f"{format_bytes(item.event_exact_free_requested_bytes)} "
-                f"inferred={format_bytes(item.snapshot_inferred_free_requested_bytes)}; "
-                f"free completed exact="
-                f"{format_bytes(item.event_exact_free_completed_bytes)} "
-                f"inferred={format_bytes(item.snapshot_inferred_free_completed_bytes)}; "
+                f"{indent}    born={format_bytes(item.born_bytes)}; "
+                f"free requested={format_bytes(item.free_requested_bytes)}; "
+                f"free completed={format_bytes(item.free_completed_bytes)}; "
                 f"end owner active={format_bytes(item.owner_active_at_end_bytes)}, "
                 f"awaiting free={format_bytes(item.awaiting_free_at_end_bytes)}"
             )
@@ -238,21 +233,21 @@ class MemoryAllocationLifetimeAnalysis:
                     "    birth "
                     f"{birth.start_label!r} -> {birth.end_label!r}: "
                     f"{format_bytes(birth.size_bytes)} in {birth.count} blocks "
-                    f"[{birth.confidence}] at {birth.display_stack(depth)}"
+                    f"[{birth.origin}] at {birth.display_stack(depth)}"
                 )
             for request in cohort.free_requests:
                 lines.append(
                     "    free requested "
                     f"{request.start_label!r} -> {request.end_label!r}: "
                     f"{format_bytes(request.size_bytes)} in {request.count} blocks "
-                    f"[{request.confidence}] at {request.display_stack(depth)}"
+                    f"[{request.origin}] at {request.display_stack(depth)}"
                 )
             for completion in cohort.free_completions:
                 lines.append(
                     "    free completed "
                     f"{completion.start_label!r} -> {completion.end_label!r}: "
                     f"{format_bytes(completion.size_bytes)} in {completion.count} blocks "
-                    f"[{completion.confidence}] at {completion.display_stack(depth)}"
+                    f"[{completion.origin}] at {completion.display_stack(depth)}"
                 )
         return "\n".join(lines)
 

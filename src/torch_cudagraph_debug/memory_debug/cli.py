@@ -56,20 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop tracing at this point instead of the final point",
     )
     _add_output_options(lifetime_analysis)
-    lifetime_analysis.add_argument(
-        "--no-events",
-        action="store_false",
-        dest="events",
-        help="Skip allocator event pairing and use snapshots only",
-    )
-    lifetime_analysis.add_argument(
-        "--on-missing",
-        choices=("warn", "error"),
-        default="warn",
-    )
     lifetime_analysis.add_argument("--stack-depth", type=int, default=4)
     lifetime_analysis.add_argument("--limit", type=int, default=20)
-    lifetime_analysis.set_defaults(events=True)
 
     compare = commands.add_parser(
         "compare-points",
@@ -164,8 +152,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selection,
                 through=args.through,
                 options=MemoryLifetimeOptions(
-                    events=args.events,
-                    on_missing=args.on_missing,
                     display=MemoryDisplayOptions(
                         stack_depth=args.stack_depth,
                         limit=args.limit,
@@ -288,11 +274,6 @@ def _add_attribution_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--stacks", action="store_true")
     parser.add_argument("--events", action="store_true")
     parser.add_argument("--lifetimes", action="store_true")
-    parser.add_argument(
-        "--on-missing",
-        choices=("warn", "error"),
-        default="warn",
-    )
     parser.add_argument("--stack-depth", type=int, default=2)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument(
@@ -307,7 +288,6 @@ def _attribution_from_args(args: argparse.Namespace) -> MemoryAttributionOptions
         stacks=args.stacks,
         events=args.events,
         lifetimes=args.lifetimes,
-        on_missing=args.on_missing,
         display=MemoryDisplayOptions(
             stack_depth=args.stack_depth,
             limit=args.limit,

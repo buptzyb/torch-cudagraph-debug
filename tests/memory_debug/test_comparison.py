@@ -6,8 +6,10 @@ import torch_cudagraph_debug.memory_debug.allocator_snapshot as allocator_snapsh
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
     MemoryDebugError,
-    MemoryHistoryError,
+    MemoryHistoryDisabledError,
+    MemoryHistoryTruncatedError,
     MemoryOwnershipError,
+    MemoryReconciliationError,
     MemoryPoint,
     MemoryPoolKey,
     MemoryRecorder,
@@ -258,9 +260,15 @@ def test_compare_points_rejects_same_run_and_events() -> None:
             other["point"],
             attribution=MemoryAttributionOptions(events=True),
         )
+    with pytest.raises(MemoryDebugError, match="lifetimes cannot"):
+        compare_points(
+            run["before"],
+            other["point"],
+            attribution=MemoryAttributionOptions(lifetimes=True),
+        )
 
 
-def test_missing_stack_history_warns_or_errors() -> None:
+def test_missing_stack_history_raises_typed_error() -> None:
     run = make_run(
         [
             snapshot(segment(active=10, frame=None)),
@@ -269,36 +277,66 @@ def test_missing_stack_history_warns_or_errors() -> None:
         labels=("before", "after"),
     )
 
-    warning = run.compare(
+    with pytest.raises(
+        MemoryHistoryDisabledError, match="stack history is unavailable"
+    ):
+        run.compare(
+            "before",
+            "after",
+            attribution=MemoryAttributionOptions(stacks=True),
+        )
+
+
+def test_partial_stack_history_returns_exact_rows_and_coverage() -> None:
+    reference = snapshot(
+        segment(active=40, address=1000, frame="known.py"),
+        segment(active=60, address=2000, frame=None),
+    )
+    candidate = snapshot(
+        segment(active=50, address=1000, frame="known.py"),
+        segment(active=70, address=2000, frame=None),
+    )
+    run = make_run([reference, candidate], labels=("before", "after"))
+
+    comparison = run.compare(
         "before",
         "after",
         attribution=MemoryAttributionOptions(stacks=True),
     )
-    assert any("coverage is incomplete" in item for item in warning.warnings)
-    assert warning.reference_stack_coverage is not None
-    assert warning.reference_stack_coverage.ratio == 0.0
-    assert warning.attribution_status.stacks.requested is True
-    assert warning.attribution_status.stacks.available is False
-    assert warning.attribution_status.stacks.complete is False
-    assert warning.attribution_status.events.requested is False
-    assert warning.to_dict()["attribution_status"]["stacks"] == {
-        "requested": True,
-        "available": False,
-        "complete": False,
-    }
 
-    with pytest.raises(MemoryHistoryError, match="coverage is incomplete"):
-        run.compare(
-            "before",
-            "after",
-            attribution=MemoryAttributionOptions(
-                stacks=True,
-                on_missing="error",
-            ),
-        )
+    assert comparison.reference_stack_coverage is not None
+    assert comparison.candidate_stack_coverage is not None
+    assert comparison.reference_stack_coverage.ratio == pytest.approx(0.4)
+    assert comparison.reference_stack_coverage.unattributed_bytes == 60
+    assert comparison.candidate_stack_coverage.unattributed_bytes == 70
+    assert comparison.attribution_status.stacks.available is True
+    assert comparison.attribution_status.stacks.complete is False
+    assert any("coverage is incomplete" in warning for warning in comparison.warnings)
+    unattributed = next(
+        row for row in comparison.allocation_stack_comparisons if not row.stack_frames
+    )
+    assert unattributed.reference_size_bytes == 60
+    assert unattributed.candidate_size_bytes == 70
+    assert unattributed.delta_size_bytes == 10
 
 
-def test_missing_device_trace_is_reported_as_unavailable() -> None:
+def test_empty_stack_state_is_complete() -> None:
+    run = make_run([snapshot(), snapshot()], labels=("before", "after"))
+
+    comparison = run.compare(
+        "before",
+        "after",
+        attribution=MemoryAttributionOptions(stacks=True),
+    )
+
+    assert comparison.reference_stack_coverage is not None
+    assert comparison.reference_stack_coverage.ratio == 1.0
+    assert comparison.attribution_status.stacks.available is True
+    assert comparison.attribution_status.stacks.complete is True
+    assert comparison.allocation_stack_comparisons == ()
+
+
+def test_missing_device_trace_raises_typed_error() -> None:
     before = segment(active=10)
     after = segment(active=20)
     before["device"] = 0
@@ -308,19 +346,14 @@ def test_missing_device_trace_is_reported_as_unavailable() -> None:
         labels=("before", "after"),
     )
 
-    comparison = run.compare(
-        "before",
-        "after",
-        attribution=MemoryAttributionOptions(events=True),
-    )
-
-    assert comparison.attribution_status.events.requested is True
-    assert comparison.attribution_status.events.available is False
-    assert comparison.attribution_status.events.complete is False
-    assert any(
-        "allocator event history is unavailable" in warning
-        for warning in comparison.warnings
-    )
+    with pytest.raises(
+        MemoryHistoryDisabledError, match="event history is unavailable"
+    ):
+        run.compare(
+            "before",
+            "after",
+            attribution=MemoryAttributionOptions(events=True),
+        )
 
 
 def test_event_history_uses_point_boundary_marker() -> None:
@@ -361,7 +394,7 @@ def test_event_history_uses_point_boundary_marker() -> None:
     comparison = run.compare(
         "before",
         "after",
-        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
+        attribution=MemoryAttributionOptions(events=True),
     )
 
     assert comparison.attribution_status.events.available is True
@@ -411,7 +444,7 @@ def test_event_history_normalizes_only_the_marker_window(monkeypatch) -> None:
     comparison = recorder.finish().compare(
         "before",
         "after",
-        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
+        attribution=MemoryAttributionOptions(events=True),
     )
 
     assert len(comparison.allocator_events) == 1
@@ -542,7 +575,7 @@ def test_event_history_uses_trace_for_segment_device() -> None:
     comparison = recorder.finish().compare(
         "before",
         "after",
-        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
+        attribution=MemoryAttributionOptions(events=True),
     )
 
     assert comparison.attribution_status.events.available is True
@@ -552,7 +585,7 @@ def test_event_history_uses_trace_for_segment_device() -> None:
     assert comparison.allocator_events[0].size_bytes == 64
 
 
-def test_event_history_detects_overwritten_marker_on_segment_device() -> None:
+def test_event_history_overwritten_marker_raises_typed_error() -> None:
     markers: list[str] = []
 
     def provider(marker: str):
@@ -572,16 +605,43 @@ def test_event_history_detects_overwritten_marker_on_segment_device() -> None:
     recorder = MemoryRecorder._from_snapshot_provider(provider)
     recorder.record_point("before")
     recorder.record_point("after")
-    comparison = recorder.finish().compare(
-        "before",
-        "after",
-        attribution=MemoryAttributionOptions(events=True),
-    )
+    run = recorder.finish()
 
-    assert comparison.attribution_status.events.available is True
-    assert comparison.attribution_status.events.complete is False
-    assert len(comparison.allocator_events) == 1
-    assert any("device 0" in warning for warning in comparison.warnings)
+    with pytest.raises(MemoryHistoryTruncatedError, match="truncated"):
+        run.compare(
+            "before",
+            "after",
+            attribution=MemoryAttributionOptions(events=True),
+        )
+
+
+def test_event_history_boundary_order_raises_reconciliation_error() -> None:
+    markers: list[str] = []
+
+    def provider(marker: str):
+        markers.append(marker)
+        traces = (
+            [[event("snapshot", marker=marker)]]
+            if len(markers) == 1
+            else [
+                [
+                    event("snapshot", marker=marker),
+                    event("snapshot", marker=markers[0]),
+                ]
+            ]
+        )
+        return snapshot(segment(active=64), traces=traces)
+
+    recorder = MemoryRecorder._from_snapshot_provider(provider)
+    recorder.record_point("before")
+    recorder.record_point("after")
+
+    with pytest.raises(MemoryReconciliationError, match="boundary order"):
+        recorder.finish().compare(
+            "before",
+            "after",
+            attribution=MemoryAttributionOptions(events=True),
+        )
 
 
 def test_manifest_only_comparisons_do_not_load_raw_snapshots(monkeypatch) -> None:
@@ -706,18 +766,17 @@ def test_phase_pool_mapping_accepts_pools_present_at_only_one_endpoint() -> None
     assert active.components.identity_holds
 
 
-def test_snapshot_inferred_lifetimes_are_available_but_incomplete() -> None:
+def test_lifetimes_attribution_requires_history() -> None:
     run = make_run(
         [snapshot(segment(active=10)), snapshot(segment(active=20))],
         labels=("before", "after"),
     )
 
-    comparison = run.compare(
-        "before",
-        "after",
-        attribution=MemoryAttributionOptions(lifetimes=True, events=False),
-    )
-
-    assert comparison.attribution_status.lifetimes.requested is True
-    assert comparison.attribution_status.lifetimes.available is True
-    assert comparison.attribution_status.lifetimes.complete is False
+    with pytest.raises(
+        MemoryHistoryDisabledError, match="event history is unavailable"
+    ):
+        run.compare(
+            "before",
+            "after",
+            attribution=MemoryAttributionOptions(lifetimes=True),
+        )

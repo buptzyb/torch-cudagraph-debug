@@ -7,7 +7,7 @@ import pytest
 
 from torch_cudagraph_debug.memory_debug.cli import build_parser, main
 
-from ._helpers import make_run, segment, snapshot
+from ._helpers import event, make_history_run, make_run, segment, snapshot
 
 
 def _bundles(tmp_path: Path) -> tuple[Path, Path]:
@@ -153,20 +153,30 @@ def test_cli_pool_mapping_syntax(tmp_path: Path) -> None:
     assert payload["pool_comparisons"][0]["match"] == "mapped"
 
 
-def test_cli_lifetimes_and_timeline_summary(tmp_path: Path) -> None:
-    baseline, _ = _bundles(tmp_path)
+def test_cli_lifetimes_and_timeline_summary(tmp_path: Path, capsys) -> None:
+    history_path = tmp_path / "history.tcgd-memory"
+    make_history_run(
+        [
+            ([segment(active=10)], []),
+            (
+                [segment(active=10), segment(active=30, address=2000)],
+                [event("alloc", address=2000, size=30, frame="grow.py")],
+            ),
+        ],
+        labels=("start", "end"),
+        bundle_dir=history_path,
+    )
 
     lifetime_output = tmp_path / "lifetimes"
     assert (
         main(
             [
                 "allocation-lifetimes",
-                str(baseline),
+                str(history_path),
                 "--active-at",
                 "start",
                 "--through",
                 "end",
-                "--no-events",
                 "--output",
                 str(lifetime_output),
             ]
@@ -182,11 +192,10 @@ def test_cli_lifetimes_and_timeline_summary(tmp_path: Path) -> None:
         main(
             [
                 "allocation-lifetimes",
-                str(baseline),
+                str(history_path),
                 "--born-between",
                 "start",
                 "end",
-                "--no-events",
                 "--output",
                 str(born_output),
             ]
@@ -204,7 +213,7 @@ def test_cli_lifetimes_and_timeline_summary(tmp_path: Path) -> None:
         main(
             [
                 "timeline",
-                str(baseline),
+                str(history_path),
                 "--lifetimes",
                 "--output",
                 str(timeline_output),
@@ -216,6 +225,22 @@ def test_cli_lifetimes_and_timeline_summary(tmp_path: Path) -> None:
         (timeline_output / "report.json").read_text(encoding="utf-8")
     )
     assert timeline_payload["allocation_lifetimes"] is not None
+    assert timeline_payload["point_comparisons"] == []
+
+    traceless, _ = _bundles(tmp_path)
+    assert (
+        main(
+            [
+                "allocation-lifetimes",
+                str(traceless),
+                "--output",
+                str(tmp_path / "rejected"),
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "event history is unavailable" in captured.err
 
 
 def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:

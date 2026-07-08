@@ -101,8 +101,7 @@ MAJOR_WORKFLOW_COVERAGE = {
         ".timeline(",
     ),
     "memory_debug/recorder/history_requirements.py": (
-        'on_missing="warn"',
-        'on_missing="error"',
+        "MemoryHistoryDisabledError",
         ".lifetimes(",
     ),
     "memory_debug/recorder/stack_and_event_attribution.py": (
@@ -458,10 +457,9 @@ def test_examples_use_current_memory_option_keywords() -> None:
             "stacks",
             "events",
             "lifetimes",
-            "on_missing",
             "display",
         },
-        "MemoryLifetimeOptions": {"events", "on_missing", "display"},
+        "MemoryLifetimeOptions": {"display"},
     }
     for path in sorted(EXAMPLES.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

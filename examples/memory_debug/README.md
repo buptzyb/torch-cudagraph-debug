@@ -28,13 +28,15 @@ mode required by its analysis and disables it during cleanup:
 | Example | History mode | Analysis demonstrated |
 |---|---|---|
 | `timeline_and_reports.py` | state | live allocation stacks, capture points, persistence, all report formats |
-| `history_requirements.py` | disabled | state comparison, warn/error policy, snapshot-inferred lifetimes |
+| `history_requirements.py` | disabled | state comparison plus typed stack, event, and lifetime failures |
 | `stack_and_event_attribution.py` | all | allocation stacks, exact events, embedded lifetimes |
 | `allocation_lifetimes.py` | all | active-at and born-between cohorts with exact free transitions |
 | `compare_runs_and_phases.py` | disabled | cross-run point/phase comparison and explicit private-pool mapping |
 | `distributed_run_groups.py` | disabled | rank-local bundles, group extrema, group phase comparison |
 
-History must be enabled before allocations whose stacks or events matter. Probe
+Complete event history must cover intervals used for event or lifetime analysis.
+Stack attribution reports partial frame coverage and fails only when nonempty
+active state has no frames. Probe
 and Recorder never enable or disable it on the application's behalf.
 
 Persistent examples require an absent output directory. They print the absolute

@@ -31,7 +31,11 @@ from .allocator_snapshot import (
     normalize_trace_entries,
     trace_device_indices,
 )
-from .errors import MemoryHistoryError
+from .errors import (
+    MemoryHistoryDisabledError,
+    MemoryHistoryTruncatedError,
+    MemoryReconciliationError,
+)
 from .events import (
     extract_event_window,
     extract_event_window_from_snapshot,
@@ -44,7 +48,7 @@ if TYPE_CHECKING:
     from .snapshots import MemoryProbeSnapshot
 
 
-LifetimeConfidence = Literal["event_exact", "snapshot_inferred"]
+TransitionOrigin = Literal["event", "range_boundary"]
 LifetimeTerminalState = Literal[
     "owner_active", "awaiting_free", "free_completed", "unknown"
 ]
@@ -159,7 +163,7 @@ class _CohortTransition:
     end_label: str
     stack_frames: tuple[Mapping[str, Any], ...]
     stack_fallback: str
-    confidence: LifetimeConfidence
+    origin: TransitionOrigin
     size_bytes: int
     count: int
 
@@ -181,7 +185,7 @@ class _CohortTransition:
             "start_label": self.start_label,
             "end_label": self.end_label,
             "stack_key": self.stack_key,
-            "confidence": self.confidence,
+            "origin": self.origin,
             "stack_frames": [dict(frame) for frame in self.stack_frames],
             "size_bytes": self.size_bytes,
             "count": self.count,
@@ -239,18 +243,10 @@ class AllocationCohort:
     last_seen_label: str
     born_bytes: int
     born_count: int
-    event_exact_birth_bytes: int
-    event_exact_birth_count: int
-    snapshot_inferred_birth_bytes: int
-    snapshot_inferred_birth_count: int
-    event_exact_free_requested_bytes: int
-    event_exact_free_requested_count: int
-    snapshot_inferred_free_requested_bytes: int
-    snapshot_inferred_free_requested_count: int
-    event_exact_free_completed_bytes: int
-    event_exact_free_completed_count: int
-    snapshot_inferred_free_completed_bytes: int
-    snapshot_inferred_free_completed_count: int
+    free_requested_bytes: int
+    free_requested_count: int
+    free_completed_bytes: int
+    free_completed_count: int
     owner_active_at_end_bytes: int
     owner_active_at_end_count: int
     awaiting_free_at_end_bytes: int
@@ -262,20 +258,6 @@ class AllocationCohort:
 
     def display_stack(self, depth: int) -> str:
         return display_stack(self.stack_frames, depth=depth)
-
-    @property
-    def free_requested_bytes(self) -> int:
-        return (
-            self.event_exact_free_requested_bytes
-            + self.snapshot_inferred_free_requested_bytes
-        )
-
-    @property
-    def free_completed_bytes(self) -> int:
-        return (
-            self.event_exact_free_completed_bytes
-            + self.snapshot_inferred_free_completed_bytes
-        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -300,20 +282,10 @@ class AllocationCohort:
             "last_seen_label": self.last_seen_label,
             "born_bytes": self.born_bytes,
             "born_count": self.born_count,
-            "event_exact_birth_bytes": self.event_exact_birth_bytes,
-            "event_exact_birth_count": self.event_exact_birth_count,
-            "snapshot_inferred_birth_bytes": self.snapshot_inferred_birth_bytes,
-            "snapshot_inferred_birth_count": self.snapshot_inferred_birth_count,
             "free_requested_bytes": self.free_requested_bytes,
-            "event_exact_free_requested_bytes": self.event_exact_free_requested_bytes,
-            "event_exact_free_requested_count": self.event_exact_free_requested_count,
-            "snapshot_inferred_free_requested_bytes": self.snapshot_inferred_free_requested_bytes,
-            "snapshot_inferred_free_requested_count": self.snapshot_inferred_free_requested_count,
+            "free_requested_count": self.free_requested_count,
             "free_completed_bytes": self.free_completed_bytes,
-            "event_exact_free_completed_bytes": self.event_exact_free_completed_bytes,
-            "event_exact_free_completed_count": self.event_exact_free_completed_count,
-            "snapshot_inferred_free_completed_bytes": self.snapshot_inferred_free_completed_bytes,
-            "snapshot_inferred_free_completed_count": self.snapshot_inferred_free_completed_count,
+            "free_completed_count": self.free_completed_count,
             "owner_active_at_end_bytes": self.owner_active_at_end_bytes,
             "owner_active_at_end_count": self.owner_active_at_end_count,
             "awaiting_free_at_end_bytes": self.awaiting_free_at_end_bytes,
@@ -349,20 +321,10 @@ class AllocationCohort:
             "last_seen_label": self.last_seen_label,
             "born_bytes": self.born_bytes,
             "born_count": self.born_count,
-            "event_exact_birth_bytes": self.event_exact_birth_bytes,
-            "event_exact_birth_count": self.event_exact_birth_count,
-            "snapshot_inferred_birth_bytes": self.snapshot_inferred_birth_bytes,
-            "snapshot_inferred_birth_count": self.snapshot_inferred_birth_count,
             "free_requested_bytes": self.free_requested_bytes,
-            "event_exact_free_requested_bytes": self.event_exact_free_requested_bytes,
-            "event_exact_free_requested_count": self.event_exact_free_requested_count,
-            "snapshot_inferred_free_requested_bytes": self.snapshot_inferred_free_requested_bytes,
-            "snapshot_inferred_free_requested_count": self.snapshot_inferred_free_requested_count,
+            "free_requested_count": self.free_requested_count,
             "free_completed_bytes": self.free_completed_bytes,
-            "event_exact_free_completed_bytes": self.event_exact_free_completed_bytes,
-            "event_exact_free_completed_count": self.event_exact_free_completed_count,
-            "snapshot_inferred_free_completed_bytes": self.snapshot_inferred_free_completed_bytes,
-            "snapshot_inferred_free_completed_count": self.snapshot_inferred_free_completed_count,
+            "free_completed_count": self.free_completed_count,
             "owner_active_at_end_bytes": self.owner_active_at_end_bytes,
             "owner_active_at_end_count": self.owner_active_at_end_count,
             "awaiting_free_at_end_bytes": self.awaiting_free_at_end_bytes,
@@ -412,6 +374,7 @@ class _IntervalHistory:
     available: bool
     complete: bool
     warnings: tuple[str, ...]
+    causes: tuple[str, ...] = ()
 
 
 _REPLAY_WARNING_EXAMPLE_LIMIT = 3
@@ -504,29 +467,28 @@ def _analyze_allocation_lifetimes(
     points = tuple(states)
     observations, histories = _scan_points(
         points,
-        events=options.events,
+        events=True,
         raw_snapshots=raw_snapshots,
     )
     warnings = [warning for point in points for warning in point.warnings]
-    if options.events:
-        for history in histories:
-            warnings.extend(history.warnings)
-            unknown_actions = sorted(
-                {entry.action for entry in history.entries} - KNOWN_TRACE_ACTIONS
-            )
-            if unknown_actions:
-                warnings.append(f"unknown allocator actions: {unknown_actions}")
-        if any(not item.available or not item.complete for item in histories):
-            message = (
-                "allocator event history is unavailable or incomplete; "
-                "allocation lifetimes include snapshot-inferred transitions"
-            )
-            if options.on_missing == "error":
-                raise MemoryHistoryError(message)
-            warnings.append(message)
+    for history in histories:
+        warnings.extend(history.warnings)
+        unknown_actions = sorted(
+            {entry.action for entry in history.entries} - KNOWN_TRACE_ACTIONS
+        )
+        if unknown_actions:
+            warnings.append(f"unknown allocator actions: {unknown_actions}")
+    _raise_for_history_gaps(histories)
 
-    instances, replay_warnings = _track_instances(points, observations, histories)
-    warnings.extend(replay_warnings)
+    instances, contradictions = _track_instances(points, observations, histories)
+    if contradictions:
+        raise MemoryReconciliationError(
+            "allocator event history is complete but could not be reconciled "
+            "with the snapshots:\n- "
+            + "\n- ".join(contradictions)
+            + "\nThis indicates corrupted input data or a torch-cudagraph-debug "
+            "bug; please report it together with this message."
+        )
     if active_at is not None:
         instances = [
             item for item in instances if _state_index(active_at) in item.observations
@@ -540,30 +502,17 @@ def _analyze_allocation_lifetimes(
             and item.birth.start_index >= _state_index(born_start)
             and item.birth.end_index <= _state_index(born_end)
         ]
-        if not options.events:
-            warnings.append(
-                "born-between analysis is snapshot-inferred because allocator "
-                "events were disabled; transient allocations may be missing"
-            )
-        elif any(not item.available or not item.complete for item in histories):
-            warnings.append(
-                "born-between analysis fell back to snapshot-inferred births where "
-                "event history was unavailable or incomplete; transient allocations "
-                "may be missing"
-            )
     total_instance_bytes = sum(item.size_bytes for item in instances)
     attributed_instance_bytes = sum(
         item.size_bytes for item in instances if item.stack_frames
     )
     if attributed_instance_bytes < total_instance_bytes:
-        message = (
+        warnings.append(
             "allocation stack coverage is incomplete for lifetime cohorts: "
             f"{attributed_instance_bytes}/{total_instance_bytes} bytes attributed; "
-            "enable torch.cuda.memory._record_memory_history(...) before allocations"
+            "enable torch.cuda.memory._record_memory_history(...) with stack "
+            "context before the allocations of interest"
         )
-        if options.on_missing == "error":
-            raise MemoryHistoryError(message)
-        warnings.append(message)
 
     cohorts = _cohorts(
         instances,
@@ -580,9 +529,9 @@ def _analyze_allocation_lifetimes(
         active_at=active_at,
         born_between=born_between,
         cohorts=cohorts,
-        history_requested=options.events,
-        history_available=options.events and all(item.available for item in histories),
-        history_complete=options.events and all(item.complete for item in histories),
+        history_requested=True,
+        history_available=True,
+        history_complete=True,
         total_instance_bytes=total_instance_bytes,
         attributed_instance_bytes=attributed_instance_bytes,
         display_stack_depth=options.display.stack_depth,
@@ -670,12 +619,18 @@ def _scan_points(
             warnings = tuple(
                 warning for window in windows for warning in window.warnings
             )
+            causes = tuple(
+                dict.fromkeys(
+                    window.cause for window in windows if window.cause is not None
+                )
+            )
         else:
             entries = ()
             pool_ranges = None
             available = False
             complete = False
             warnings = ()
+            causes = ("history_disabled",)
 
         histories.append(
             _IntervalHistory(
@@ -686,6 +641,7 @@ def _scan_points(
                 available=available,
                 complete=complete,
                 warnings=warnings,
+                causes=causes,
             )
         )
         previous = point
@@ -736,17 +692,18 @@ def _track_instances(
 ) -> tuple[list[_AllocationInstance], tuple[str, ...]]:
     instances: list[_AllocationInstance] = []
     current: dict[tuple[int | None, int], _AllocationInstance] = {}
-    missing_address: list[_AllocationInstance] = []
-    warning_groups: dict[tuple[str, int | None], _ReplayWarningGroup] = {}
+    contradiction_groups: dict[tuple[str, int | None], _ReplayWarningGroup] = {}
     event_order = 0
 
-    def record_warning(
+    def record_contradiction(
         kind: str,
         *,
         device: int | None,
         address: int,
     ) -> None:
-        warning_groups.setdefault((kind, device), _ReplayWarningGroup()).add(address)
+        contradiction_groups.setdefault((kind, device), _ReplayWarningGroup()).add(
+            address
+        )
 
     def create_from_block(
         block: _BlockObservation,
@@ -769,35 +726,28 @@ def _track_instances(
         instances.append(item)
         return item
 
-    def infer_free_request(
-        history: _IntervalHistory, instance: _AllocationInstance
+    def boundary_free_request(
+        start_state: Any, end_state: Any, instance: _AllocationInstance
     ) -> None:
         nonlocal event_order
         if instance.free_request is not None:
             return
         event_order += 1
-        instance.free_request = _transition_from_snapshot(
-            CohortFreeRequest, history, instance
+        instance.free_request = _transition_at_boundary(
+            CohortFreeRequest, start_state, end_state, instance
         )
         instance.free_request_order = event_order
 
-    def infer_free_completion(
-        history: _IntervalHistory, instance: _AllocationInstance
-    ) -> None:
-        nonlocal event_order
-        infer_free_request(history, instance)
-        if instance.free_completion is not None:
-            return
-        event_order += 1
-        instance.free_completion = _transition_from_snapshot(
-            CohortFreeCompletion, history, instance
-        )
-        instance.free_completion_order = event_order
-
     for block in observations.get(_state_index(points[0]), ()):
         item = create_from_block(block)
+        if block.state in AWAITING_FREE_STATES:
+            # The free request predates the analysis range; record it as a
+            # range-boundary fact instead of guessing its interval.
+            boundary_free_request(points[0], points[0], item)
         if block.address is None:
-            missing_address.append(item)
+            record_contradiction(
+                "block_without_address", device=block.device, address=0
+            )
         else:
             current[(block.device, block.address)] = item
 
@@ -812,7 +762,19 @@ def _track_instances(
                 current, entry.device_index, entry.addr
             )
             if entry.action == "free_requested":
-                if instance is None or not _event_size_matches(entry, instance):
+                if instance is None:
+                    record_contradiction(
+                        "free_requested_without_allocation",
+                        device=entry.device_index,
+                        address=entry.addr,
+                    )
+                    continue
+                if not _event_size_matches(entry, instance):
+                    record_contradiction(
+                        "event_size_contradiction",
+                        device=entry.device_index,
+                        address=entry.addr,
+                    )
                     continue
                 if instance.free_request is None:
                     instance.free_request = _transition_from_event(
@@ -822,30 +784,28 @@ def _track_instances(
                 continue
             if entry.action == "free_completed":
                 if instance is None:
-                    record_warning(
+                    record_contradiction(
                         "free_completed_without_allocation",
                         device=entry.device_index,
                         address=entry.addr,
                     )
                     continue
                 if not _event_size_matches(entry, instance):
-                    record_warning(
-                        "free_completed_size_mismatch",
+                    record_contradiction(
+                        "event_size_contradiction",
                         device=entry.device_index,
                         address=entry.addr,
                     )
                     continue
                 if instance.free_request is None:
-                    instance.free_request = _transition_from_snapshot(
-                        CohortFreeRequest, history, instance
-                    )
-                    instance.free_request_order = event_order
-                    event_order += 1
-                    record_warning(
+                    # A complete window must contain the request event for any
+                    # allocation that entered the range owner-active.
+                    record_contradiction(
                         "free_completed_without_request",
                         device=entry.device_index,
                         address=entry.addr,
                     )
+                    boundary_free_request(history.start, history.end, instance)
                 if instance.free_completion is None:
                     instance.free_completion = _transition_from_event(
                         CohortFreeCompletion, history, instance, entry
@@ -856,8 +816,7 @@ def _track_instances(
                 continue
 
             if instance is not None:
-                infer_free_completion(history, instance)
-                record_warning(
+                record_contradiction(
                     "allocation_address_reused",
                     device=entry.device_index,
                     address=entry.addr,
@@ -874,7 +833,7 @@ def _track_instances(
                 end_label=_state_label(history.end),
                 stack_frames=frames,
                 stack_fallback="<unattributed>",
-                confidence="event_exact",
+                origin="event",
                 size_bytes=size,
                 count=1,
             )
@@ -893,18 +852,24 @@ def _track_instances(
             current[(entry.device_index, entry.addr)] = item
 
         end_blocks = list(observations.get(_state_index(history.end), ()))
-        exact_blocks, fallback_blocks = _block_indexes(end_blocks)
+        blocks_by_address = _block_indexes(end_blocks)
         consumed_after: set[int] = set()
         next_current: dict[tuple[int | None, int], _AllocationInstance] = {}
         for _key, instance in current.items():
-            block_index = _matching_block_index(
-                exact_blocks,
-                fallback_blocks,
+            block_index, size_contradiction = _matching_block_index(
+                blocks_by_address,
+                end_blocks,
                 instance,
                 consumed_after,
             )
             if block_index is None:
-                infer_free_completion(history, instance)
+                record_contradiction(
+                    "block_size_contradiction"
+                    if size_contradiction
+                    else "unexplained_disappearance",
+                    device=instance.device,
+                    address=instance.address or 0,
+                )
                 continue
             block = end_blocks[block_index]
             previous = _latest_observation(instance)
@@ -916,34 +881,43 @@ def _track_instances(
                 instance.free_request is not None and block.state in OWNER_ACTIVE_STATES
             )
             if generation_reused:
-                infer_free_completion(history, instance)
+                # A generational swap must be witnessed by free_completed and
+                # alloc events inside a complete window.
+                record_contradiction(
+                    "allocation_address_reused",
+                    device=instance.device,
+                    address=instance.address or 0,
+                )
                 continue
             consumed_after.add(block_index)
             if block.state in AWAITING_FREE_STATES and instance.free_request is None:
-                infer_free_request(history, instance)
+                record_contradiction(
+                    "free_request_event_missing",
+                    device=instance.device,
+                    address=instance.address or 0,
+                )
+                boundary_free_request(history.start, history.end, instance)
             instance.observations[block.point_index] = block
             _refine_instance_from_block(instance, block)
             assert block.address is not None
             next_current[(block.device, block.address)] = instance
 
-        for instance in missing_address:
-            infer_free_completion(history, instance)
-        missing_address = []
-
         for block_index, block in enumerate(end_blocks):
             if block_index in consumed_after:
                 continue
+            record_contradiction(
+                "unexplained_birth",
+                device=block.device,
+                address=block.address or 0,
+            )
             event_order += 1
-            birth = CohortBirth(
-                start_index=_state_index(history.start),
-                end_index=_state_index(history.end),
-                start_label=_state_label(history.start),
-                end_label=_state_label(history.end),
+            birth = _transition_at_boundary(
+                CohortBirth,
+                history.start,
+                history.end,
+                size_bytes=block.size_bytes,
                 stack_frames=block.stack_frames,
                 stack_fallback="<unattributed>",
-                confidence="snapshot_inferred",
-                size_bytes=block.size_bytes,
-                count=1,
             )
             item = create_from_block(
                 block,
@@ -951,52 +925,105 @@ def _track_instances(
                 birth_order=event_order,
             )
             if block.state in AWAITING_FREE_STATES:
-                infer_free_request(history, item)
-            if block.address is None:
-                missing_address.append(item)
-            else:
+                boundary_free_request(history.start, history.end, item)
+            if block.address is not None:
                 next_current[(block.device, block.address)] = item
         current = next_current
-    return instances, _format_replay_warnings(warning_groups)
+    return instances, _format_contradictions(contradiction_groups)
 
 
-def _format_replay_warnings(
+_CONTRADICTION_TEMPLATES = {
+    "free_requested_without_allocation": (
+        "{count} free_requested {label} referenced addresses with no tracked "
+        "allocation on {device}"
+    ),
+    "free_completed_without_allocation": (
+        "{count} free_completed {label} referenced addresses with no tracked "
+        "allocation on {device}"
+    ),
+    "event_size_contradiction": (
+        "{count} free {label} on {device} carried sizes incompatible with the "
+        "tracked allocation"
+    ),
+    "free_completed_without_request": (
+        "{count} free_completed {label} on {device} arrived without any "
+        "free_requested event for an in-range allocation"
+    ),
+    "allocation_address_reused": (
+        "{count} allocation {label} on {device} reused an address whose "
+        "previous allocation has no free_completed event"
+    ),
+    "block_size_contradiction": (
+        "{count} tracked allocation(s) on {device} found only "
+        "size-incompatible blocks at their address"
+    ),
+    "unexplained_disappearance": (
+        "{count} tracked allocation(s) on {device} disappeared from the "
+        "snapshot without any free event"
+    ),
+    "unexplained_birth": (
+        "{count} snapshot block(s) on {device} appeared without any alloc event"
+    ),
+    "free_request_event_missing": (
+        "{count} block(s) on {device} entered an awaiting-free state without "
+        "a free_requested event"
+    ),
+    "block_without_address": ("{count} active block(s) on {device} carried no address"),
+}
+
+
+def _format_contradictions(
     groups: Mapping[tuple[str, int | None], _ReplayWarningGroup],
 ) -> tuple[str, ...]:
     messages: list[str] = []
     for (kind, device), group in groups.items():
         device_label = f"device {device}" if device is not None else "an unknown device"
         count_label = "event" if group.count == 1 else "events"
-        if kind == "free_completed_without_allocation":
-            message = (
-                f"{group.count} free_completed {count_label} could not be matched to "
-                f"an active allocation on {device_label} because no allocation was "
-                "tracked; allocator history may start mid-lifetime or be truncated"
-            )
-        elif kind == "free_completed_size_mismatch":
-            message = (
-                f"{group.count} free_completed {count_label} could not be matched to "
-                f"an active allocation on {device_label} because event sizes differed "
-                "from the tracked generation"
-            )
-        elif kind == "free_completed_without_request":
-            message = (
-                f"{group.count} free_completed {count_label} on {device_label} had no "
-                "matching free_requested; requests were inferred from snapshot boundaries"
-            )
-        elif kind == "allocation_address_reused":
-            message = (
-                f"{group.count} allocation {count_label} reused an active address before "
-                f"a matching free_completed on {device_label}; prior completions were "
-                "inferred from snapshot boundaries"
-            )
-        else:  # pragma: no cover - all callers use the closed set above.
-            raise AssertionError(f"unknown replay warning kind: {kind}")
+        template = _CONTRADICTION_TEMPLATES.get(kind)
+        if template is None:  # pragma: no cover - callers use the closed set.
+            raise AssertionError(f"unknown contradiction kind: {kind}")
+        message = template.format(
+            count=group.count, label=count_label, device=device_label
+        )
         addresses = ", ".join(hex(address) for address in group.example_addresses)
         if addresses:
             message = f"{message}; example addresses: {addresses}"
         messages.append(message)
     return tuple(messages)
+
+
+def _raise_for_history_gaps(histories: Sequence[_IntervalHistory]) -> None:
+    disabled: list[str] = []
+    truncated: list[str] = []
+    inconsistent: list[str] = []
+    for history in histories:
+        label = f"{_state_label(history.start)} -> {_state_label(history.end)}"
+        if "boundary_order" in history.causes:
+            inconsistent.append(label)
+        elif "history_disabled" in history.causes or not history.available:
+            disabled.append(label)
+        elif history.causes or not history.complete:
+            truncated.append(label)
+    if inconsistent:
+        raise MemoryReconciliationError(
+            "allocator event boundary order is inconsistent for interval(s): "
+            + ", ".join(dict.fromkeys(inconsistent))
+            + "; the recorded markers or input snapshots are corrupted"
+        )
+    if disabled:
+        raise MemoryHistoryDisabledError(
+            "allocator event history is unavailable for interval(s): "
+            + ", ".join(dict.fromkeys(disabled))
+            + "; enable torch.cuda.memory._record_memory_history() before the "
+            "allocations of interest on every analyzed device"
+        )
+    if truncated:
+        raise MemoryHistoryTruncatedError(
+            "allocator event history was truncated for interval(s): "
+            + ", ".join(dict.fromkeys(truncated))
+            + "; raise _record_memory_history(max_entries=...) or record "
+            "points more frequently so each interval fits the ring buffer"
+        )
 
 
 def _find_address_instance(
@@ -1015,47 +1042,52 @@ def _find_address_instance(
 
 def _block_indexes(
     blocks: Sequence[_BlockObservation],
-) -> tuple[
-    Mapping[tuple[int | None, int, int], tuple[int, ...]],
-    Mapping[tuple[int, int], tuple[int, ...]],
-]:
-    exact: defaultdict[tuple[int | None, int, int], list[int]] = defaultdict(list)
-    fallback: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+) -> Mapping[tuple[int | None, int], tuple[int, ...]]:
+    by_address: defaultdict[tuple[int | None, int], list[int]] = defaultdict(list)
     for index, block in enumerate(blocks):
         if block.address is None:
             continue
-        exact[(block.device, block.address, block.size_bytes)].append(index)
-        fallback[(block.address, block.size_bytes)].append(index)
-    return (
-        {key: tuple(indices) for key, indices in exact.items()},
-        {key: tuple(indices) for key, indices in fallback.items()},
-    )
+        by_address[(block.device, block.address)].append(index)
+    return {key: tuple(indices) for key, indices in by_address.items()}
+
+
+def _block_sizes_compatible(
+    instance: _AllocationInstance, block: _BlockObservation
+) -> bool:
+    # Trace events carry the unrounded request while snapshot blocks carry the
+    # allocator-rounded size; either identity is valid evidence for one block.
+    block_sizes = {block.size_bytes, block.requested_bytes}
+    return instance.size_bytes in block_sizes or instance.requested_bytes in block_sizes
 
 
 def _matching_block_index(
-    exact_blocks: Mapping[tuple[int | None, int, int], Sequence[int]],
-    fallback_blocks: Mapping[tuple[int, int], Sequence[int]],
+    blocks_by_address: Mapping[tuple[int | None, int], Sequence[int]],
+    end_blocks: Sequence[_BlockObservation],
     instance: _AllocationInstance,
     consumed: set[int],
-) -> int | None:
+) -> tuple[int | None, bool]:
+    """Return (matched block index, size-contradiction-at-address flag)."""
+
     if instance.address is None:
-        return None
-    exact = (
+        return None, False
+    candidates = [
         index
-        for index in exact_blocks.get(
-            (instance.device, instance.address, instance.size_bytes), ()
-        )
+        for index in blocks_by_address.get((instance.device, instance.address), ())
         if index not in consumed
-    )
-    exact_index = next(exact, None)
-    if exact_index is not None:
-        return exact_index
-    fallback = tuple(
+    ]
+    if not candidates:
+        return None, False
+    compatible = [
         index
-        for index in fallback_blocks.get((instance.address, instance.size_bytes), ())
-        if index not in consumed
-    )
-    return fallback[0] if len(fallback) == 1 else None
+        for index in candidates
+        if _block_sizes_compatible(instance, end_blocks[index])
+    ]
+    if not compatible:
+        return None, True
+    for index in compatible:
+        if end_blocks[index].size_bytes == instance.size_bytes:
+            return index, False
+    return compatible[0], False
 
 
 def _event_size_matches(
@@ -1115,26 +1147,35 @@ def _transition_from_event(
         end_label=_state_label(history.end),
         stack_frames=frames,
         stack_fallback="<unavailable>",
-        confidence="event_exact",
+        origin="event",
         size_bytes=instance.size_bytes,
         count=1,
     )
 
 
-def _transition_from_snapshot(
+def _transition_at_boundary(
     kind: type[TransitionT],
-    history: _IntervalHistory,
-    instance: _AllocationInstance,
+    start_state: Any,
+    end_state: Any,
+    instance: _AllocationInstance | None = None,
+    *,
+    size_bytes: int | None = None,
+    stack_frames: tuple[Mapping[str, Any], ...] = (),
+    stack_fallback: str = "<unavailable>",
 ) -> TransitionT:
+    """Record a transition whose trigger lies outside the analyzed range."""
+
+    resolved_size = instance.size_bytes if instance is not None else size_bytes
+    assert resolved_size is not None
     return kind(
-        start_index=_state_index(history.start),
-        end_index=_state_index(history.end),
-        start_label=_state_label(history.start),
-        end_label=_state_label(history.end),
-        stack_frames=(),
-        stack_fallback="<unavailable>",
-        confidence="snapshot_inferred",
-        size_bytes=instance.size_bytes,
+        start_index=_state_index(start_state),
+        end_index=_state_index(end_state),
+        start_label=_state_label(start_state),
+        end_label=_state_label(end_state),
+        stack_frames=stack_frames,
+        stack_fallback=stack_fallback,
+        origin="range_boundary",
+        size_bytes=resolved_size,
         count=1,
     )
 
@@ -1220,22 +1261,9 @@ def _cohorts(
             for member in members
             if member.free_completion is not None
         )
-        exact_births = _instances_by_confidence(members, "birth", "event_exact")
-        inferred_births = _instances_by_confidence(
-            members, "birth", "snapshot_inferred"
-        )
-        exact_requests = _instances_by_confidence(
-            members, "free_request", "event_exact"
-        )
-        inferred_requests = _instances_by_confidence(
-            members, "free_request", "snapshot_inferred"
-        )
-        exact_completions = _instances_by_confidence(
-            members, "free_completion", "event_exact"
-        )
-        inferred_completions = _instances_by_confidence(
-            members, "free_completion", "snapshot_inferred"
-        )
+        born_members = _instances_with(members, "birth")
+        requested_members = _instances_with(members, "free_request")
+        completed_members = _instances_with(members, "free_completion")
         owner_active_at_end = [
             member
             for member in members
@@ -1318,12 +1346,9 @@ def _cohorts(
                 "births": births,
                 "free_requests": free_requests,
                 "free_completions": free_completions,
-                "exact_births": exact_births,
-                "inferred_births": inferred_births,
-                "exact_requests": exact_requests,
-                "inferred_requests": inferred_requests,
-                "exact_completions": exact_completions,
-                "inferred_completions": inferred_completions,
+                "born_members": born_members,
+                "requested_members": requested_members,
+                "completed_members": completed_members,
                 "owner_active_at_end": owner_active_at_end,
                 "awaiting_free_at_end": awaiting_free_at_end,
                 "anchor_bytes": anchor_bytes,
@@ -1351,12 +1376,9 @@ def _cohorts(
     for display_rank, item in enumerate(pending, start=1):
         point_states = item["points"]
         members = item["members"]
-        exact_births = item["exact_births"]
-        inferred_births = item["inferred_births"]
-        exact_requests = item["exact_requests"]
-        inferred_requests = item["inferred_requests"]
-        exact_completions = item["exact_completions"]
-        inferred_completions = item["inferred_completions"]
+        born_members = item["born_members"]
+        requested_members = item["requested_members"]
+        completed_members = item["completed_members"]
         owner_active_at_end = item["owner_active_at_end"]
         awaiting_free_at_end = item["awaiting_free_at_end"]
         active_values = [point.active_bytes for point in point_states]
@@ -1396,23 +1418,11 @@ def _cohorts(
                 last_seen_index=item["last_seen_index"],
                 last_seen_label=item["last_seen_label"],
                 born_bytes=item["born_bytes"],
-                born_count=len(exact_births) + len(inferred_births),
-                event_exact_birth_bytes=_instance_bytes(exact_births),
-                event_exact_birth_count=len(exact_births),
-                snapshot_inferred_birth_bytes=_instance_bytes(inferred_births),
-                snapshot_inferred_birth_count=len(inferred_births),
-                event_exact_free_requested_bytes=_instance_bytes(exact_requests),
-                event_exact_free_requested_count=len(exact_requests),
-                snapshot_inferred_free_requested_bytes=_instance_bytes(
-                    inferred_requests
-                ),
-                snapshot_inferred_free_requested_count=len(inferred_requests),
-                event_exact_free_completed_bytes=_instance_bytes(exact_completions),
-                event_exact_free_completed_count=len(exact_completions),
-                snapshot_inferred_free_completed_bytes=_instance_bytes(
-                    inferred_completions
-                ),
-                snapshot_inferred_free_completed_count=len(inferred_completions),
+                born_count=len(born_members),
+                free_requested_bytes=_instance_bytes(requested_members),
+                free_requested_count=len(requested_members),
+                free_completed_bytes=_instance_bytes(completed_members),
+                free_completed_count=len(completed_members),
                 owner_active_at_end_bytes=_instance_bytes(owner_active_at_end),
                 owner_active_at_end_count=len(owner_active_at_end),
                 awaiting_free_at_end_bytes=_instance_bytes(awaiting_free_at_end),
@@ -1436,17 +1446,11 @@ def _terminal_state(
     return "unknown"
 
 
-def _instances_by_confidence(
+def _instances_with(
     members: Sequence[_AllocationInstance],
     attribute: Literal["birth", "free_request", "free_completion"],
-    confidence: LifetimeConfidence,
 ) -> list[_AllocationInstance]:
-    return [
-        member
-        for member in members
-        if (transition := getattr(member, attribute)) is not None
-        and transition.confidence == confidence
-    ]
+    return [member for member in members if getattr(member, attribute) is not None]
 
 
 def _instance_bytes(instances: Sequence[_AllocationInstance]) -> int:
@@ -1485,7 +1489,27 @@ def _event_peaks(
                 (member.birth_order, member.size_bytes, member.size_bytes)
             )
         if member.free_request_order is not None:
-            transitions.append((member.free_request_order, -member.size_bytes, 0))
+            # A free request only balances an owner contribution the member
+            # actually made: an in-range birth or an owner-active range-start
+            # state. Blocks already awaiting free at the range start never
+            # entered owner_live, so their boundary free request must not
+            # subtract from it.
+            observation = (
+                member.observations.get(start_index)
+                if member.birth is None
+                else None
+            )
+            held_owner_active = member.birth_order is not None or (
+                observation is not None
+                and observation.state in OWNER_ACTIVE_STATES
+            )
+            transitions.append(
+                (
+                    member.free_request_order,
+                    -member.size_bytes if held_owner_active else 0,
+                    0,
+                )
+            )
         if member.free_completion_order is not None:
             transitions.append((member.free_completion_order, 0, -member.size_bytes))
     for _order, owner_delta, unreusable_delta in sorted(transitions):
@@ -1513,7 +1537,7 @@ def _aggregate_transitions(
             transition.end_label,
             _stack_fingerprint(transition.stack_frames),
             transition.stack_fallback,
-            transition.confidence,
+            transition.origin,
         )
         totals[key][0] += transition.size_bytes
         totals[key][1] += transition.count
@@ -1529,7 +1553,7 @@ def _aggregate_transitions(
                 end_label=example.end_label,
                 stack_frames=example.stack_frames,
                 stack_fallback=example.stack_fallback,
-                confidence=example.confidence,
+                origin=example.origin,
                 size_bytes=size_bytes,
                 count=count,
             )
@@ -1538,7 +1562,7 @@ def _aggregate_transitions(
         key=lambda item: (
             item.end_index,
             -item.size_bytes,
-            item.confidence,
+            item.origin,
             item.stack_key,
         )
     )

@@ -76,7 +76,6 @@ def main() -> None:
             stacks=True,
             events=True,
             lifetimes=True,
-            on_missing="error",
             display=MemoryDisplayOptions(stack_depth=4, limit=20),
         )
 
@@ -100,10 +99,7 @@ def main() -> None:
         assert comparison.allocation_lifetimes is not None
         assert comparison.allocation_lifetimes.history_complete is True
         assert (
-            sum(
-                item.event_exact_birth_bytes
-                for item in comparison.allocation_lifetimes.cohorts
-            )
+            sum(item.born_bytes for item in comparison.allocation_lifetimes.cohorts)
             >= 48 * MIB
         )
         comparison_paths = comparison.write(output_dir / "comparison-report")
@@ -121,14 +117,14 @@ def main() -> None:
         assert timeline.allocation_lifetimes.history_complete is True
         assert (
             sum(
-                item.event_exact_free_completed_bytes
+                item.free_completed_bytes
                 for item in timeline.allocation_lifetimes.cohorts
             )
             >= 48 * MIB
         )
         assert (
             sum(
-                item.event_exact_free_requested_bytes
+                item.free_requested_bytes
                 for item in timeline.allocation_lifetimes.cohorts
             )
             >= 48 * MIB

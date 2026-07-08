@@ -80,8 +80,6 @@ def main() -> None:
 
         run = MemoryRun.load(bundle_dir, cache_snapshots=False)
         options = MemoryLifetimeOptions(
-            events=True,
-            on_missing="error",
             display=MemoryDisplayOptions(stack_depth=4, limit=20),
         )
         active = run.lifetimes(
@@ -102,21 +100,11 @@ def main() -> None:
             sum(item.owner_active_at_end_bytes for item in active.cohorts) >= 32 * MIB
         )
         assert born.total_instance_bytes >= 16 * MIB
-        assert sum(item.event_exact_birth_bytes for item in born.cohorts) >= 16 * MIB
-        assert (
-            sum(item.event_exact_free_requested_bytes for item in active.cohorts)
-            >= 64 * MIB
-        )
-        assert (
-            sum(item.event_exact_free_completed_bytes for item in active.cohorts)
-            >= 64 * MIB
-        )
-        assert sum(item.event_exact_free_requested_bytes for item in born.cohorts) >= (
-            16 * MIB
-        )
-        assert sum(item.event_exact_free_completed_bytes for item in born.cohorts) >= (
-            16 * MIB
-        )
+        assert sum(item.born_bytes for item in born.cohorts) >= 16 * MIB
+        assert sum(item.free_requested_bytes for item in active.cohorts) >= 64 * MIB
+        assert sum(item.free_completed_bytes for item in active.cohorts) >= 64 * MIB
+        assert sum(item.free_requested_bytes for item in born.cohorts) >= (16 * MIB)
+        assert sum(item.free_completed_bytes for item in born.cohorts) >= (16 * MIB)
         assert active_paths["json"].is_file()
         assert active_paths["size_outcomes"].is_file()
         assert active_paths["free_request_stacks"].is_file()

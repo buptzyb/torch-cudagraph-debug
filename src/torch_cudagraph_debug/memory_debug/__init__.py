@@ -12,7 +12,6 @@ from .attribution import (
     MemoryDisplayOptions,
     MemoryEvidenceStatus,
     MemoryLifetimeOptions,
-    MissingPolicy,
 )
 from .comparison import compare_phases, compare_points, compare_snapshots
 from .comparison_models import (
@@ -29,7 +28,10 @@ from .comparison_models import (
 from .errors import (
     MemoryBundleError,
     MemoryDebugError,
+    MemoryHistoryDisabledError,
     MemoryHistoryError,
+    MemoryHistoryTruncatedError,
+    MemoryReconciliationError,
     MemoryOwnershipError,
 )
 from .events import AllocatorEventSummary
@@ -107,7 +109,10 @@ __all__ = [
     "MemoryDebugError",
     "MemoryDisplayOptions",
     "MemoryEvidenceStatus",
+    "MemoryHistoryDisabledError",
     "MemoryHistoryError",
+    "MemoryHistoryTruncatedError",
+    "MemoryReconciliationError",
     "MemoryLifetimeOptions",
     "MemoryLifetimeSelection",
     "MemoryLifecycleDelta",
@@ -143,7 +148,6 @@ __all__ = [
     "MemoryStats",
     "MemoryStatsDelta",
     "MemoryTimeline",
-    "MissingPolicy",
     "PhaseMetric",
     "PoolId",
     "StreamId",

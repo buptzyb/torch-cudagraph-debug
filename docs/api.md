@@ -54,7 +54,7 @@ Memory facade:
 - State and policies: `AllocatorScope`, `MemoryStats`,
   `MemoryStatsDelta`, `MemoryStatMetric`, `MemoryDisplayOptions`,
   `MemoryAttributionOptions`, `MemoryLifetimeOptions`,
-  `MemoryEvidenceStatus`, `MemoryAttributionStatus`, `MissingPolicy`,
+  `MemoryEvidenceStatus`, `MemoryAttributionStatus`,
   `MatchKind`, and `PhaseMetric`.
 - Comparison and timeline leaves: `MemoryLifecycleDelta`,
   `MemoryAllocatorScopeComparison`, `MemoryPoolComparison`,
@@ -77,7 +77,9 @@ Memory facade:
 - Functions: `compare_snapshots`, `compare_points`, `compare_phases`, and
   `compare_run_group_phases`.
 - Errors: `MemoryDebugError`, `MemoryHistoryError`,
-  `MemoryBundleError`, and `MemoryOwnershipError`.
+  `MemoryHistoryDisabledError`, `MemoryHistoryTruncatedError`,
+  `MemoryReconciliationError`, `MemoryBundleError`, and
+  `MemoryOwnershipError`.
 
 ## Tensor Debug
 
@@ -895,23 +897,26 @@ MemoryAttributionOptions(
     stacks: bool = False,
     events: bool = False,
     lifetimes: bool = False,
-    on_missing: MissingPolicy = "warn",
     display: MemoryDisplayOptions = MemoryDisplayOptions(),
 )
 
 MemoryLifetimeOptions(
-    events: bool = True,
-    on_missing: MissingPolicy = "warn",
     display: MemoryDisplayOptions = MemoryDisplayOptions(stack_depth=4),
 )
 ```
 
 The application owns `torch.cuda.memory._record_memory_history()`; this
-package never enables it. State totals never require history. Stack attribution
-needs block frames, while events and exact lifetime transitions need allocator
-event history. Missing requested evidence warns or raises according to
-`on_missing`. Display limits affect only text and HTML, never structured
-result tuples, JSON, or CSV.
+package never enables it. State totals never require history. Stack
+attribution uses live block frames:
+partial frame coverage returns exact attributed rows plus an `<unattributed>`
+bucket, while zero coverage for nonempty active state raises
+`MemoryHistoryDisabledError`. Events and lifetime transitions require complete
+allocator event history. Missing event history raises
+`MemoryHistoryDisabledError`, and an overwritten boundary marker raises
+`MemoryHistoryTruncatedError`. Complete history that still cannot be reconciled
+with the snapshots raises `MemoryReconciliationError` unconditionally. Display
+limits
+affect only text and HTML, never structured result tuples, JSON, or CSV.
 
 ```python
 MemoryEvidenceStatus(requested: bool, available: bool, complete: bool)
@@ -923,8 +928,8 @@ MemoryAttributionStatus(
 ```
 
 Every comparison stores `attribution_status`, distinguishing unrequested
-analysis from requested evidence that is missing, partial, or complete. Stack
-byte coverage remains available separately. Event windows and address identity
+analysis, partial stack coverage, and complete evidence. Stack byte coverage
+remains available separately. Event windows and address identity
 are device-specific.
 
 ### Allocation Cohort Lifetimes
@@ -945,9 +950,8 @@ run.lifetimes(
 The default selection is `all()`. `active_at(point)` retains generations
 not allocator-reusable at that point. `born_between(start, end)` retains
 generations allocated in `(start, end]`. `through` cannot precede the
-selection anchor or born-between end. Complete events preserve transient
-generations; snapshot-only inference warns that invisible transients may be
-missing.
+selection anchor or born-between end. Complete event history preserves transient generations that are active
+in neither endpoint snapshot; incomplete history is rejected.
 
 An allocation generation is tracked by device, block address, size, requested
 size, pool, and stream. Its state transitions are:
@@ -975,21 +979,19 @@ unrelated unattributed sizes are not merged. Each cohort retains:
 
 - owner-active and awaiting-free bytes/counts at every point;
 - streams, a unique-generation size histogram, and size-by-terminal-state rows;
-- birth, free-request, and free-completion transitions with independent
-  `event_exact` or `snapshot_inferred` confidence;
+- birth, free-request, and free-completion transitions, each marked with
+  an `event` or `range_boundary` origin;
 - snapshot peaks plus event-derived owner-active and unreusable peaks;
 - owner-active and awaiting-free terminal totals.
 
-Full allocator history must be enabled before the allocations of interest to
-obtain exact transition ordering and event stacks. With events disabled or
-unavailable, snapshot disappearance infers request and completion in the
-containing interval. Snapshot-only matching cannot detect a free-and-reallocate
-cycle that reuses the same address and shape entirely between two points.
-Replay mismatches are summarized by reason and device with a total count and up
-to three example addresses, so truncated history produces bounded diagnostics.
+Full allocator history must be enabled before the allocations of interest.
+Lifetime analysis rejects unavailable or truncated event windows rather than
+inferring transitions from snapshot disappearance. Replay contradictions are
+summarized by reason and device with a total count and up to three example
+addresses, then raised as `MemoryReconciliationError`.
 
-Calling `run.lifetimes()` without explicit options enables event attribution,
-warns on missing history, and displays up to 20 cohorts with four stack frames.
+Calling `run.lifetimes()` without explicit options requires complete event
+history and displays up to 20 cohorts with four stack frames.
 The complete ordered cohort set remains available through `report.cohorts`,
 `to_dict()`, `report.json`, and CSV. Cohort IDs are stable fingerprints of
 identity; `display_rank` records the current report ordering.
@@ -1201,7 +1203,7 @@ Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
 create `cohorts.csv`, `cohort_points.csv`, `size_histograms.csv`, and
 `size_outcomes.csv`. They add `birth_stacks.csv`, `free_request_stacks.csv`, or
 `free_completion_stacks.csv` when those transitions exist. Lifetime JSON keeps
-full stack identity, split point states, size outcomes, transition confidence,
+full stack identity, split point states, size outcomes, transition origins,
 and point/event peaks nested under each cohort.
 
 Group summaries create `rank_points.csv` and `point_aggregates.csv`.
@@ -1232,7 +1234,7 @@ its own bundles and exercises every command below.
 tcgd-memory summary BUNDLE
 tcgd-memory allocation-lifetimes BUNDLE \
   [--active-at POINT | --born-between START END] [--through POINT] \
-  [--no-events] [--output DIR]
+  [--output DIR]
 tcgd-memory timeline BUNDLE [--output DIR]
 tcgd-memory compare-points REFERENCE_BUNDLE [CANDIDATE_BUNDLE] \
   --reference-point POINT --candidate-point POINT \
@@ -1254,10 +1256,10 @@ For group phases, repeat rank-qualified `--pool-map` for each private-pool pair.
 
 `timeline`, `compare-points`, `compare-phases`, and
 `compare-run-group-phases` accept `--stacks`, `--events`, `--lifetimes`,
-`--on-missing {warn,error}`, `--stack-depth`, `--limit`, and `--only-changed`.
-`allocation-lifetimes` accepts `--no-events`, `--on-missing {warn,error}`,
-`--stack-depth`, and `--limit`; it uses event history by default and
-snapshot inference with `--no-events`. `summary` writes to standard output.
+`--stack-depth`, `--limit`, and `--only-changed`. Lifetime analysis always uses
+complete event history internally; `--events` independently controls whether an
+allocator-event table is included. `allocation-lifetimes` accepts `--stack-depth` and `--limit` and
+always uses event history. `summary` writes to standard output.
 Every report-producing command prints to standard output and writes files only
 when `--output` is present. Reusing a nonempty report directory requires
 `--overwrite`. Cross-run event and lifetime requests are rejected.
@@ -1387,5 +1389,10 @@ advanced.format_comparison(reference, candidate, delta)
 - `TensorPayloadUnavailableError`: full values requested from a summary observation.
 - `MemoryDebugError`: memory domain base.
 - `MemoryHistoryError`: requested history unavailable or incomplete.
+- `MemoryHistoryDisabledError`: history never recorded on an analyzed device.
+- `MemoryHistoryTruncatedError`: a boundary marker was overwritten in the
+  history ring buffer.
+- `MemoryReconciliationError`: complete history contradicts the snapshots;
+  corrupted input or a torch-cudagraph-debug bug.
 - `MemoryBundleError`: malformed, unsupported, or unreadable bundle.
 - `MemoryOwnershipError`: point used with a run that does not own it.

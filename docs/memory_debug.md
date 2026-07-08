@@ -19,13 +19,15 @@ multi-rank workflows. For exact signatures, see the
 | What changed between two quick snapshots? | `probe.compare()` or `compare_snapshots()` | Not required |
 | What changed between two points in one run? | `run.compare()` | Not required |
 | How did allocator state evolve across all points? | `run.timeline()` | Not required |
-| Which allocations were born, released, or remained active? | `run.lifetimes()` | Not required for snapshot inference; full history enables exact event evidence |
+| Which allocations were born, released, or remained active? | `run.lifetimes()` | Complete event history required |
 | How do endpoints from independent runs differ? | `compare_points()` | Not required; state history enables stack attribution |
 | How does candidate phase change differ from baseline phase change? | `compare_phases()` | Not required; attribution is optional on each same-run change leg |
 | Which ranks differ or have the worst change? | `MemoryRunGroup.summary()` and `compare_run_group_phases()` | Not required; phase attribution is optional |
 
-Allocator history enriches an analysis; it is not required for pool, stream,
-segment, block, or fragmentation state. Neither the probe nor the recorder
+Allocator history is not required for pool, stream, segment, block, or
+fragmentation state. Stack attribution uses available live-block frames, while
+event and lifetime analysis require the corresponding complete history.
+Neither the probe nor the recorder
 enables history on the application's behalf.
 
 ## Core Usage
@@ -237,20 +239,25 @@ needed. Then request attribution explicitly:
 options = MemoryAttributionOptions(
     stacks=True,
     events=True,
-    on_missing="warn",
     display=MemoryDisplayOptions(stack_depth=2, limit=20),
 )
 comparison = run.compare("start", "end", attribution=options)
 ```
 
-`on_missing="warn"` preserves state results and adds warnings.
-`on_missing="error"` raises `MemoryHistoryError`.
+Event and lifetime requests fail with typed errors instead of degrading:
+`MemoryHistoryDisabledError` when history was never recorded on an analyzed
+device, and `MemoryHistoryTruncatedError` when a boundary marker was overwritten
+in the bounded history ring buffer. Stack attribution returns exact framed rows
+plus an `<unattributed>` bucket when coverage is partial; it raises
+`MemoryHistoryDisabledError` only when nonempty active state has zero frame
+coverage. When complete history still
+cannot be reconciled with the snapshots, `MemoryReconciliationError` is raised
+unconditionally — that combination indicates corrupted input or a bug in this
+package, never a legitimate state.
 
-Every comparison exposes `attribution_status`. `requested` distinguishes an
-analysis the caller asked for, `available` means some usable evidence exists,
-and `complete` means that evidence covers the full request. Snapshot-inferred
-lifetimes are available but incomplete; exact event ordering requires complete
-history.
+Every successful comparison exposes `attribution_status`. `requested`
+distinguishes an analysis the caller asked for, and `available`/`complete`
+describe the evidence that backed it.
 
 A block's `frames` are the allocation call stack for memory still active in a
 snapshot. Entries under `device_traces` are historical allocator events, and
@@ -298,8 +305,6 @@ lifetimes = run.lifetimes(
     MemoryLifetimeSelection.active_at("before_capture"),
     through="after_replay",
     options=MemoryLifetimeOptions(
-        events=True,
-        on_missing="warn",
         display=MemoryDisplayOptions(stack_depth=4, limit=20),
     ),
 )
@@ -322,17 +327,18 @@ A generation can occupy three relevant states:
 - **free completed**: `free_completed` occurred and the block can be reused by
   the allocator.
 
-Free request and completion are reported independently, each with
-`event_exact` or `snapshot_inferred` confidence and its own stack table. A
-snapshot disappearance can infer that both transitions occurred within an
-interval, but only full allocator history identifies their exact order and
-call stacks. `free_completed` means allocator-reusable; it does not mean the
+Free request and completion are reported independently, each with its own
+stack table. Every transition is backed by an allocator event; a request whose
+trigger predates the analysis range (a block already awaiting free at the
+first point) is recorded with a `range_boundary` origin instead of a guessed
+interval. `free_completed` means allocator-reusable; it does not mean the
 segment was returned to CUDA or that pool `reserved_bytes` decreased.
 
-Snapshot-only lifetime analysis still works, but it cannot distinguish an
-unobserved free-and-reallocate cycle that reuses the same address and shape.
-When event replay finds mismatches, warnings summarize each reason and device
-with the total count and up to three example addresses. The report describes
+Lifetime analysis requires complete allocator event history for the analyzed
+range and reconciles the event stream against every snapshot. When event
+replay finds contradictions, the raised `MemoryReconciliationError` summarizes
+each reason and device with the total count and up to three example
+addresses. The report describes
 allocator blocks, not Python tensor names or object ownership.
 
 Synchronizing the recorded stream completes the CUDA work, but the caching
@@ -347,20 +353,19 @@ the half-open `(start, end]` birth selection:
 born = run.lifetimes(
     MemoryLifetimeSelection.born_between("before_capture", "after_capture"),
     through="after_replay",
-    options=MemoryLifetimeOptions(events=True),
+    options=MemoryLifetimeOptions(),
 )
 ```
 
-With full event history, this mode retains generations that were both created
-and completed between the two points, even when they are active in neither
-endpoint snapshot. It reports birth, free-request, and free-completion stacks,
-plus event-derived owner-active and allocator-unreusable peaks. With events
-disabled or incomplete, it falls back to snapshot-inferred transitions and
-warns that transient allocations may be missing.
+This mode retains generations that were both created and completed between
+the two points, even when they are active in neither endpoint snapshot. It
+reports birth, free-request, and free-completion stacks, plus event-derived
+owner-active and allocator-unreusable peaks.
 
 Set `lifetimes=True` in `MemoryAttributionOptions` to embed the same cohort
 summary in a same-run comparison, a timeline, or both same-run change legs of a
-four-point phase comparison.
+four-point phase comparison. This consumes event history internally but does not
+add allocator-event tables unless `events=True` is also requested.
 
 Same-run comparison can use allocator addresses for lifecycle observations such
 as new segments and blocks becoming active or inactive.
@@ -563,9 +568,10 @@ in the reference run; `--pool-map` is valid only across independent runs.
 
 `timeline`, `compare-points`, `compare-phases`, and
 `compare-run-group-phases` accept `--stacks`, `--events`, `--lifetimes`,
-`--on-missing`, `--stack-depth`, `--limit`, and `--only-changed`.
-`allocation-lifetimes` instead accepts `--no-events`, `--on-missing`,
-`--stack-depth`, and `--limit`; event evidence is enabled by default.
+`--stack-depth`, `--limit`, and `--only-changed`. Lifetime analysis always uses
+complete event history internally; `--events` independently controls event-table
+output. `allocation-lifetimes` instead accepts `--stack-depth` and
+`--limit`; event evidence is always required.
 `summary` writes to standard output. All report commands print text and write
 files only when `--output` is supplied. Reusing a nonempty output directory
 requires `--overwrite`. Cross-run event and lifetime requests are rejected
@@ -580,9 +586,9 @@ change in a minor release. Snapshot summaries use
 
 - Full allocator event history is cumulative up to PyTorch's `max_entries`;
   frequent memory points can produce large bundles.
-- Lifetime analysis is per process and rank. Event-backed `born_between` can
-  retain transient allocations between points; snapshot-only fallback cannot
-  observe allocations that are active at no recorded point.
+- Lifetime analysis is per process and rank and requires complete marker-bounded
+  event history. `born_between` retains transient allocations that are active at
+  neither endpoint snapshot.
 
 ## Further Reading
 

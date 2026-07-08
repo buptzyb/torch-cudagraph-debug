@@ -1,4 +1,9 @@
-"""Show which analyses remain available without allocator history.
+"""Show which analyses need allocator history and how missing history fails.
+
+State-only comparisons always work. Event and lifetime attribution require
+complete ``torch.cuda.memory._record_memory_history()`` evidence. Stack
+attribution accepts partial frame coverage, but zero coverage for nonempty active
+state fails with a typed error.
 
 Run with:
   python examples/memory_debug/recorder/history_requirements.py --output-dir /tmp/tcgd-history
@@ -7,7 +12,6 @@ Run with:
 from __future__ import annotations
 
 import argparse
-import gc
 from pathlib import Path
 
 import torch
@@ -15,8 +19,7 @@ import torch
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
     MemoryDisplayOptions,
-    MemoryHistoryError,
-    MemoryLifetimeOptions,
+    MemoryHistoryDisabledError,
     MemoryLifetimeSelection,
     MemoryRecorder,
     MemoryRun,
@@ -51,34 +54,19 @@ def _record_without_history(output_dir: Path) -> None:
     visible = torch.empty(16 * MIB, dtype=torch.uint8, device="cuda")
     recorder.record_point("after_alloc")
     del visible
-    gc.collect()
     torch.cuda.synchronize()
     recorder.record_point("after_free")
     recorder.finish()
 
     run = MemoryRun.load(bundle_dir, cache_snapshots=False)
 
+    # State-only analysis never needs allocator history.
     state = run.compare("before", "after_alloc")
     assert _all_total(state).delta.allocated_bytes >= 16 * MIB
+    state_paths = state.write(output_dir / "state-only-comparison")
+    assert state_paths["json"].is_file()
 
-    warned = run.compare(
-        "before",
-        "after_alloc",
-        attribution=MemoryAttributionOptions(
-            stacks=True,
-            events=True,
-            on_missing="warn",
-            display=MemoryDisplayOptions(stack_depth=4),
-        ),
-    )
-    assert warned.candidate_stack_coverage is not None
-    assert warned.candidate_stack_coverage.unattributed_bytes >= 16 * MIB
-    assert warned.attribution_status.events.available is False
-    assert any("coverage is incomplete" in item for item in warned.warnings)
-    assert any("allocator event history" in item for item in warned.warnings)
-    warning_paths = warned.write(output_dir / "no-history-warning-comparison")
-    assert warning_paths["json"].is_file()
-
+    # Zero stack coverage and unavailable event history fail explicitly.
     try:
         run.compare(
             "before",
@@ -86,59 +74,27 @@ def _record_without_history(output_dir: Path) -> None:
             attribution=MemoryAttributionOptions(
                 stacks=True,
                 events=True,
-                on_missing="error",
                 display=MemoryDisplayOptions(stack_depth=4),
             ),
         )
-    except MemoryHistoryError as error:
-        print(f"expected strict-policy error: {error}")
+    except MemoryHistoryDisabledError as error:
+        print(f"expected attribution error: {error}")
     else:
-        raise AssertionError("strict missing-history policy did not raise")
+        raise AssertionError("missing history did not raise for attribution")
 
-    inferred = run.lifetimes(
-        MemoryLifetimeSelection.born_between("before", "after_alloc"),
-        through="after_free",
-        options=MemoryLifetimeOptions(
-            events=False,
-            on_missing="warn",
-            display=MemoryDisplayOptions(stack_depth=4),
-        ),
-    )
-    assert inferred.history_requested is False
-    assert sum(item.snapshot_inferred_birth_bytes for item in inferred.cohorts) >= (
-        16 * MIB
-    )
-    assert sum(
-        item.snapshot_inferred_free_completed_bytes for item in inferred.cohorts
-    ) >= (16 * MIB)
-    assert sum(
-        item.snapshot_inferred_free_requested_bytes for item in inferred.cohorts
-    ) >= (16 * MIB)
-    assert sum(item.event_exact_birth_bytes for item in inferred.cohorts) == 0
-    assert sum(item.event_exact_free_completed_bytes for item in inferred.cohorts) == 0
-    assert sum(item.event_exact_free_requested_bytes for item in inferred.cohorts) == 0
-    assert any(
-        request.confidence == "snapshot_inferred"
-        for cohort in inferred.cohorts
-        for request in cohort.free_requests
-    )
-    assert any(
-        completion.confidence == "snapshot_inferred"
-        for cohort in inferred.cohorts
-        for completion in cohort.free_completions
-    )
-    assert any(
-        "transient allocations may be missing" in item for item in inferred.warnings
-    )
-    inferred_paths = inferred.write(output_dir / "snapshot-only-lifetimes")
-    assert inferred_paths["json"].is_file()
+    try:
+        run.lifetimes(
+            MemoryLifetimeSelection.born_between("before", "after_alloc"),
+            through="after_free",
+        )
+    except MemoryHistoryDisabledError as error:
+        print(f"expected lifetime error: {error}")
+    else:
+        raise AssertionError("missing history did not raise for lifetimes")
 
     print()
-    print("=== No allocator history: warning policy ===")
-    print(warned.to_text(include_unchanged=False))
-    print()
-    print("=== Snapshot-only lifetime inference ===")
-    print(inferred.to_text())
+    print("=== State-only comparison (no history required) ===")
+    print(state.to_text(include_unchanged=False))
 
 
 def main() -> None:

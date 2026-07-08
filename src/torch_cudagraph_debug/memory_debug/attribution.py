@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
-
-MissingPolicy = Literal["warn", "error"]
 
 
 @dataclass(frozen=True)
@@ -84,45 +81,29 @@ class MemoryAttributionOptions:
     stacks: bool = False
     events: bool = False
     lifetimes: bool = False
-    on_missing: MissingPolicy = "warn"
     display: MemoryDisplayOptions = field(default_factory=MemoryDisplayOptions)
 
     def __post_init__(self) -> None:
         for name in ("stacks", "events", "lifetimes"):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be a boolean")
-        _validate_missing_policy(self.on_missing)
         if not isinstance(self.display, MemoryDisplayOptions):
             raise TypeError("display must be MemoryDisplayOptions")
 
     def lifetime_options(self) -> "MemoryLifetimeOptions":
-        """Return the lifetime policy embedded in this attribution request."""
+        """Return display options for embedded lifetime analysis."""
 
-        return MemoryLifetimeOptions(
-            events=self.events,
-            on_missing=self.on_missing,
-            display=self.display,
-        )
+        return MemoryLifetimeOptions(display=self.display)
 
 
 @dataclass(frozen=True)
 class MemoryLifetimeOptions:
-    """Allocator-history policy for allocation lifetime analysis."""
+    """Presentation options for exact allocation lifetime analysis."""
 
-    events: bool = True
-    on_missing: MissingPolicy = "warn"
     display: MemoryDisplayOptions = field(
         default_factory=lambda: MemoryDisplayOptions(stack_depth=4)
     )
 
     def __post_init__(self) -> None:
-        if type(self.events) is not bool:
-            raise TypeError("events must be a boolean")
-        _validate_missing_policy(self.on_missing)
         if not isinstance(self.display, MemoryDisplayOptions):
             raise TypeError("display must be MemoryDisplayOptions")
-
-
-def _validate_missing_policy(value: MissingPolicy) -> None:
-    if not isinstance(value, str) or value not in {"warn", "error"}:
-        raise ValueError("on_missing must be 'warn' or 'error'")

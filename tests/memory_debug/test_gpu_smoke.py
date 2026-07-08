@@ -9,13 +9,17 @@ import torch
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
     MemoryDisplayOptions,
+    MemoryHistoryTruncatedError,
     MemoryLifetimeOptions,
     MemoryLifetimeSelection,
     MemoryRecorder,
     MemoryRun,
 )
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA"),
+]
 
 
 def _active_block(snapshot: dict[str, object], address: int):
@@ -95,7 +99,6 @@ def test_real_full_history_produces_marker_delimited_events() -> None:
             "after",
             attribution=MemoryAttributionOptions(
                 events=True,
-                on_missing="error",
             ),
         )
         assert comparison.attribution_status.events.available is True
@@ -136,8 +139,6 @@ def test_real_full_history_attributes_allocation_free_completion() -> None:
             MemoryLifetimeSelection.active_at("anchor"),
             through="completed",
             options=MemoryLifetimeOptions(
-                events=True,
-                on_missing="error",
                 display=MemoryDisplayOptions(stack_depth=4),
             ),
         )
@@ -147,8 +148,7 @@ def test_real_full_history_attributes_allocation_free_completion() -> None:
         matching = [
             cohort
             for cohort in report.cohorts
-            if cohort.event_exact_free_completed_bytes > 0
-            and cohort.snapshot_inferred_free_completed_bytes == 0
+            if cohort.free_completed_bytes > 0
             and cohort.points[0].active_bytes > 0
             and cohort.points[-1].active_bytes == 0
         ]
@@ -192,8 +192,6 @@ def test_real_cross_stream_free_waits_for_completion() -> None:
         report = recorder.finish().lifetimes(
             MemoryLifetimeSelection.active_at("owned"),
             options=MemoryLifetimeOptions(
-                events=True,
-                on_missing="error",
                 display=MemoryDisplayOptions(stack_depth=4),
             ),
         )
@@ -205,8 +203,8 @@ def test_real_cross_stream_free_waits_for_completion() -> None:
             and cohort.points[0].owner_active_bytes > 0
             and cohort.points[1].awaiting_free_bytes > 0
             and cohort.points[2].active_bytes == 0
-            and cohort.event_exact_free_requested_bytes > 0
-            and cohort.event_exact_free_completed_bytes > 0
+            and cohort.free_requested_bytes > 0
+            and cohort.free_completed_bytes > 0
         ]
         assert matching, report.to_text()
     finally:
@@ -236,8 +234,6 @@ def test_real_full_history_keeps_event_only_born_and_freed_generation() -> None:
         report = recorder.finish().lifetimes(
             MemoryLifetimeSelection.born_between("before", "after"),
             options=MemoryLifetimeOptions(
-                events=True,
-                on_missing="error",
                 display=MemoryDisplayOptions(stack_depth=4),
             ),
         )
@@ -246,12 +242,51 @@ def test_real_full_history_keeps_event_only_born_and_freed_generation() -> None:
             cohort
             for cohort in report.cohorts
             if "_allocate_with_named_stack" in cohort.stack_key
-            and cohort.event_exact_birth_bytes > 0
-            and cohort.event_exact_free_completed_bytes > 0
+            and cohort.born_bytes > 0
+            and cohort.free_completed_bytes > 0
             and cohort.event_unreusable_peak_bytes > 0
             and all(point.active_bytes == 0 for point in cohort.points)
         ]
         assert matching, report.to_text()
+    finally:
+        _disable_history()
+
+
+def test_real_ring_buffer_overwrite_raises_truncated_error() -> None:
+    _disable_history()
+    torch.cuda.empty_cache()
+    torch.cuda.memory._record_memory_history(
+        enabled="all",
+        context="all",
+        stacks="python",
+        max_entries=600,
+        clear_history=True,
+    )
+    try:
+        recorder = MemoryRecorder()
+        recorder.record_point("before")
+
+        # Each alloc/free pair appends several trace entries; overflowing the
+        # 600-entry ring buffer evicts the "before" boundary marker.
+        for _ in range(600):
+            transient = torch.empty(4_096, device="cuda")
+            del transient
+        gc.collect()
+        torch.cuda.synchronize()
+        recorder.record_point("after")
+        run = recorder.finish()
+
+        with pytest.raises(MemoryHistoryTruncatedError) as excinfo:
+            run.lifetimes(
+                MemoryLifetimeSelection.born_between("before", "after"),
+                options=MemoryLifetimeOptions(
+                    display=MemoryDisplayOptions(stack_depth=4),
+                ),
+            )
+        message = str(excinfo.value)
+        assert "before" in message
+        assert "after" in message
+        assert "max_entries" in message
     finally:
         _disable_history()
 

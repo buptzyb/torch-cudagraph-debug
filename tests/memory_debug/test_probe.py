@@ -46,7 +46,8 @@ def test_same_probe_compare_supports_event_attribution() -> None:
         if len(markers) == 1:
             return snapshot(segment(active=10))
         return snapshot(
-            segment(active=14),
+            segment(active=10),
+            segment(active=4, address=1010),
             traces=[
                 [
                     event("snapshot", marker=markers[0]),
@@ -63,7 +64,7 @@ def test_same_probe_compare_supports_event_attribution() -> None:
     comparison = probe.compare(
         before,
         after,
-        attribution=MemoryAttributionOptions(events=True, on_missing="error"),
+        attribution=MemoryAttributionOptions(events=True),
     )
 
     assert comparison.attribution_status.events.available is True
@@ -76,7 +77,7 @@ def test_same_probe_compare_supports_event_attribution() -> None:
     lifetime_comparison = probe.compare(
         before,
         after,
-        attribution=MemoryAttributionOptions(lifetimes=True),
+        attribution=MemoryAttributionOptions(lifetimes=True, events=True),
     )
     lifetimes = lifetime_comparison.allocation_lifetimes
     assert lifetimes is not None

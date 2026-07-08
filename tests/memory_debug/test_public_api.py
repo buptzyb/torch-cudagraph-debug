@@ -10,6 +10,7 @@ from torch_cudagraph_debug.memory_debug import (
     MemoryDebugError,
     MemoryDisplayOptions,
     MemoryHistoryError,
+    MemoryLifetimeOptions,
     MemoryOwnershipError,
 )
 
@@ -75,7 +76,9 @@ def test_memory_facade_exports_public_result_types() -> None:
         "MemoryStats",
         "MemoryStatsDelta",
         "MemoryTimeline",
-        "MissingPolicy",
+        "MemoryHistoryDisabledError",
+        "MemoryHistoryTruncatedError",
+        "MemoryReconciliationError",
         "PhaseMetric",
         "PoolId",
         "StreamId",
@@ -99,8 +102,10 @@ def test_memory_errors_share_package_base() -> None:
 
 
 def test_attribution_and_display_options_validate_independently() -> None:
-    with pytest.raises(ValueError, match="on_missing"):
-        MemoryAttributionOptions(on_missing="ignore")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="on_missing"):
+        MemoryAttributionOptions(on_missing="warn")  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="events"):
+        MemoryLifetimeOptions(events=True)  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="stack_depth"):
         MemoryDisplayOptions(stack_depth=0)
     with pytest.raises(ValueError, match="limit"):

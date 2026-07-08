@@ -33,7 +33,13 @@ from .comparison_models import (
     MemoryPoolComparison,
     MemoryPoolPhaseDecomposition,
 )
-from .errors import MemoryDebugError, MemoryHistoryError, MemoryOwnershipError
+from .errors import (
+    MemoryDebugError,
+    MemoryHistoryDisabledError,
+    MemoryHistoryTruncatedError,
+    MemoryOwnershipError,
+    MemoryReconciliationError,
+)
 from .events import (
     extract_event_window,
     extract_event_window_from_snapshot,
@@ -251,12 +257,7 @@ def _compare_independent_states(
         )
         reference_coverage = reference_index.coverage
         candidate_coverage = candidate_index.coverage
-        _check_stack_coverage(
-            reference_coverage,
-            candidate_coverage,
-            options,
-            warnings,
-        )
+        _check_stack_coverage(reference_coverage, candidate_coverage, warnings)
         stack_deltas = _compare_mapped_stack_indexes(
             reference_index,
             candidate_index,
@@ -353,7 +354,6 @@ def compare_phases(
         stacks=options.stacks,
         events=False,
         lifetimes=False,
-        on_missing=options.on_missing,
         display=options.display,
     )
     baseline_pool_universe = {
@@ -535,12 +535,7 @@ def _compare_same_identity_views(
         assert reference_index is not None and candidate_index is not None
         reference_coverage = reference_index.coverage
         candidate_coverage = candidate_index.coverage
-        _check_stack_coverage(
-            reference_coverage,
-            candidate_coverage,
-            options,
-            warnings,
-        )
+        _check_stack_coverage(reference_coverage, candidate_coverage, warnings)
         stack_deltas = _compare_stack_indexes(
             reference_index,
             candidate_index,
@@ -558,6 +553,7 @@ def _compare_same_identity_views(
     if options.events:
         entries = []
         events_available = True
+        event_causes: set[str] = set()
         event_devices = _segment_device_indices(reference_segments, candidate_segments)
         for reference_block, candidate_block in zip(interval_views, interval_views[1:]):
             reference_state = reference_block.state
@@ -590,14 +586,25 @@ def _compare_same_identity_views(
                 entries.extend(window.entries)
                 events_available = events_available and window.available
                 events_complete = events_complete and window.complete
+                if window.cause is not None:
+                    event_causes.add(window.cause)
                 warnings.extend(window.warnings)
-        if not events_available or not events_complete:
-            _missing(
-                "allocator event history is unavailable or incomplete; "
-                "enable torch.cuda.memory._record_memory_history(...) "
-                "before the phase",
-                options,
-                warnings,
+        if "boundary_order" in event_causes:
+            raise MemoryReconciliationError(
+                "allocator event boundary order is inconsistent for the compared "
+                "interval; the recorded markers or input snapshots are corrupted"
+            )
+        if not events_available:
+            raise MemoryHistoryDisabledError(
+                "allocator event history is unavailable for the compared "
+                "interval; enable torch.cuda.memory._record_memory_history() "
+                "before the allocations of interest"
+            )
+        if not events_complete:
+            raise MemoryHistoryTruncatedError(
+                "allocator event history was truncated for the compared "
+                "interval; raise _record_memory_history(max_entries=...) or "
+                "record points more frequently"
             )
         allocator_events = summarize_allocator_events(
             entries,
@@ -845,28 +852,34 @@ def _attribution_status(
 def _check_stack_coverage(
     reference: AllocationStackCoverage,
     candidate: AllocationStackCoverage,
-    options: MemoryAttributionOptions,
     warnings: list[str],
 ) -> None:
-    if reference.unattributed_bytes or candidate.unattributed_bytes:
-        _missing(
-            "allocation stack coverage is incomplete: "
-            f"reference={reference.ratio:.1%}, candidate={candidate.ratio:.1%}; "
-            "enable torch.cuda.memory._record_memory_history(...) "
-            "before the allocations",
-            options,
-            warnings,
+    unavailable = [
+        label
+        for label, coverage in (
+            ("reference", reference),
+            ("candidate", candidate),
         )
-
-
-def _missing(
-    message: str,
-    options: MemoryAttributionOptions,
-    warnings: list[str],
-) -> None:
-    if options.on_missing == "error":
-        raise MemoryHistoryError(message)
-    warnings.append(message)
+        if coverage.active_bytes > 0 and coverage.attributed_bytes == 0
+    ]
+    if unavailable:
+        raise MemoryHistoryDisabledError(
+            "allocation stack history is unavailable for active bytes at: "
+            + ", ".join(unavailable)
+            + "; "
+            "enable torch.cuda.memory._record_memory_history(...) with stack "
+            "context before the allocations of interest"
+        )
+    if reference.unattributed_bytes or candidate.unattributed_bytes:
+        warnings.append(
+            "allocation stack coverage is incomplete: "
+            f"reference={reference.ratio:.1%} "
+            f"({reference.unattributed_bytes} unattributed bytes), "
+            f"candidate={candidate.ratio:.1%} "
+            f"({candidate.unattributed_bytes} unattributed bytes); "
+            "attributed rows remain exact and unframed active bytes are grouped "
+            "under <unattributed>"
+        )
 
 
 def _phase_decomposition(

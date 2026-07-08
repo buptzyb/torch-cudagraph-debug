@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from ._pool_identity import PoolId
 from ._pool_ranges import PoolRangeIndex, build_pool_range_index
@@ -27,6 +27,13 @@ from .allocator_snapshot import (
 )
 
 
+WindowCause = Literal[
+    "history_disabled",
+    "start_marker_missing",
+    "boundary_order",
+]
+
+
 @dataclass(frozen=True)
 class EventWindow:
     """Events delimited by two recorder metadata markers."""
@@ -35,6 +42,7 @@ class EventWindow:
     available: bool
     complete: bool
     warnings: tuple[str, ...]
+    cause: WindowCause | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,7 @@ class _WindowBounds:
     complete: bool
     ordered: bool
     warnings: tuple[str, ...]
+    cause: WindowCause | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +134,7 @@ def extract_event_window(
         available=True,
         complete=bounds.complete,
         warnings=bounds.warnings,
+        cause=bounds.cause,
     )
 
 
@@ -161,6 +171,7 @@ def extract_event_window_from_snapshot(
         available=True,
         complete=bounds.complete,
         warnings=bounds.warnings,
+        cause=bounds.cause,
     )
 
 
@@ -170,6 +181,7 @@ def _unavailable_window() -> EventWindow:
         available=False,
         complete=False,
         warnings=("allocator event history is unavailable",),
+        cause="history_disabled",
     )
 
 
@@ -181,15 +193,24 @@ def _window_bounds(
     start_label: str,
 ) -> _WindowBounds:
     warnings: list[str] = []
-    complete = True
     if start is None:
-        complete = False
+        # The marker was overwritten in the bounded history ring buffer. The
+        # remaining trace cannot be trusted to cover the interval, so the
+        # window is excluded from event analysis instead of replaying the
+        # whole ring from its truncated start.
         warnings.append(
-            f"event boundary for record {start_label!r} was not found; "
-            "memory history may be disabled or its ring buffer may have "
-            "overwritten the marker"
+            f"event boundary for record {start_label!r} was not found in the "
+            "device trace; the history ring buffer has overwritten it and the "
+            "interval is excluded from event analysis"
         )
-        start = -1
+        return _WindowBounds(
+            start=0,
+            end=0,
+            complete=False,
+            ordered=False,
+            warnings=tuple(warnings),
+            cause="start_marker_missing",
+        )
     if end is None:
         end = length
     elif end < start:
@@ -200,11 +221,12 @@ def _window_bounds(
             complete=False,
             ordered=False,
             warnings=tuple(warnings),
+            cause="boundary_order",
         )
     return _WindowBounds(
         start=start,
         end=end,
-        complete=complete,
+        complete=True,
         ordered=True,
         warnings=tuple(warnings),
     )

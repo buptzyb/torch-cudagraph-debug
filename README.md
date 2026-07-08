@@ -245,8 +245,10 @@ Beyond two-point comparison, Memory Debug can:
 - compare points and phases across runs, and summarize multi-rank run groups;
 - save `.tcgd-memory` bundles for offline reports and the `tcgd-memory` CLI.
 
-Stack and event attribution require allocator history to be enabled before the
-allocations of interest. State comparison, timelines, and phase totals do not.
+Event and lifetime attribution require complete allocator history for the
+analyzed interval. Stack attribution uses available live-block frames and
+reports partial coverage explicitly. State comparison, timelines, and phase
+totals do not require history.
 Reports can be exported as text, JSON, CSV, and HTML.
 
 Continue with the [Memory Debug guide](docs/memory_debug.md), the

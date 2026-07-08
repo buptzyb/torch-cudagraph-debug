@@ -79,7 +79,6 @@ def main() -> None:
         timeline = loaded.timeline(
             attribution=MemoryAttributionOptions(
                 stacks=True,
-                on_missing="error",
                 display=MemoryDisplayOptions(stack_depth=4),
             )
         )

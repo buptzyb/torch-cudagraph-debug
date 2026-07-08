@@ -2,6 +2,42 @@
 
 ## v0.2.0 - Unreleased
 
+### Fixed
+
+- Allocation lifetime reconciliation now matches event-born instances to
+  their allocator-rounded snapshot blocks by address with request/rounded
+  size compatibility. Previously any allocation whose request size was not
+  already allocator-rounded was double counted (a fabricated free plus a
+  duplicate birth) whenever it survived a point boundary.
+- A missing start marker no longer silently replays the entire history ring
+  buffer as event evidence; the affected interval is excluded and reported.
+- `event_owner_peak_bytes` no longer subtracts the free request of a block
+  that was already awaiting free at the range start. Such blocks never enter
+  the owner-active running sum, so the unbalanced subtraction underreported
+  cohort owner peaks (down to zero) whenever a range began with pending
+  cross-stream frees.
+
+### Changed
+
+- Allocation lifetime analysis requires complete allocator event history.
+  Snapshot-only lifetime analysis and all snapshot-inferred transitions were
+  removed; every reported transition is event-backed, and requests that
+  predate the analysis range carry a `range_boundary` origin.
+- Missing or incomplete event and lifetime evidence now raises typed errors:
+  `MemoryHistoryDisabledError` (history never recorded) and
+  `MemoryHistoryTruncatedError` (marker overwritten in the ring buffer). Stack
+  attribution retains exact partial results with explicit coverage and raises
+  only when nonempty active state has zero frame coverage. The `on_missing`
+  policy, `MissingPolicy`, and the CLI `--on-missing`/`--no-events` flags were
+  removed; lifetime evidence and event-table output are independent requests.
+- Complete event history that cannot be reconciled with the snapshots raises
+  `MemoryReconciliationError` unconditionally, aggregating every
+  contradiction with per-device counts and example addresses.
+- `AllocationCohort` replaces the paired `event_exact_*` /
+  `snapshot_inferred_*` counters with merged `born_*`, `free_requested_*`,
+  and `free_completed_*` totals; transition `confidence` was replaced by
+  `origin` (`event` or `range_boundary`).
+
 ### Added
 
 - `memory_debug`, a Python-only CUDA allocator analysis domain built around
@@ -19,14 +55,14 @@
   and same-run lifecycle observations.
 - Conservative cross-run matching with automatic default-pool pairing,
   explicit one-to-one private-pool mappings, and visible unmatched pools.
-- Optional live-allocation stack and marker-delimited allocator-event
-  attribution with configurable warning or error policies.
+- Optional live-allocation stack attribution with explicit partial coverage,
+  plus strict marker-delimited allocator-event attribution.
 - Allocation cohort lifetime analysis with address-reuse generation splitting,
   owner-active versus awaiting-free point states, event-backed birth,
   free-request, and free-completion stacks, size-by-terminal-state outcomes,
   transient generations, owner/unreusable event peaks, stable full-stack cohort
-  identity, lossless structured output, snapshot-inferred confidence, and
-  explicit `run` or `probe` source metadata.
+  identity, lossless structured output, explicit transition origin, and `run`
+  or `probe` source metadata.
 - Strict allocator-state invariants plus explicit awaiting-free, inactive,
   fragmentation, segment, block, and expandable-segment metrics.
 - Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
