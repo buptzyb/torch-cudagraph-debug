@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from ._pool_identity import MemoryObservationKey, MemoryPoolKey
@@ -13,6 +13,7 @@ from .comparison import (
     _load_interval_views,
     _MemoryStateView,
 )
+from .events import EventWindow
 from .lifetimes import analyze_allocation_lifetimes
 from .recording import MemoryRun
 from .reports import MemoryPointComparison, MemoryTimeline
@@ -215,6 +216,11 @@ def _build_timeline(
     interval_views: tuple[_MemoryStateView, ...] = ()
     if (options.stacks or options.events or options.lifetimes) and run.points:
         interval_views = _load_interval_views(run.points, comparison_options)
+    shared_event_windows = (
+        tuple(point._event_windows() for point in run.points[1:])
+        if options.events and options.lifetimes
+        else None
+    )
     if options.lifetimes and run.points:
         allocation_lifetimes = analyze_allocation_lifetimes(
             run,
@@ -224,9 +230,15 @@ def _build_timeline(
             born_between=None,
             options=options.lifetime_options(),
             _allocator_states=tuple(view.raw for view in interval_views),
+            _event_windows=shared_event_windows,
         )
     point_comparisons = (
-        _build_point_comparisons(run, comparison_options, interval_views)
+        _build_point_comparisons(
+            run,
+            comparison_options,
+            interval_views,
+            event_windows=shared_event_windows,
+        )
         if options.stacks or options.events
         else ()
     )
@@ -246,14 +258,18 @@ def _build_point_comparisons(
     run: MemoryRun,
     options: MemoryAttributionOptions,
     interval_views: tuple[_MemoryStateView, ...],
+    *,
+    event_windows: Sequence[Sequence[EventWindow]] | None = None,
 ) -> tuple[MemoryPointComparison, ...]:
     if len(run.points) < 2:
         return ()
     rows = []
     if len(interval_views) != len(run.points):
         raise ValueError("timeline interval views must match run points")
+    if event_windows is not None and len(event_windows) != len(run.points) - 1:
+        raise ValueError("timeline event windows must match run intervals")
     reference_view = interval_views[0]
-    for candidate_view in interval_views[1:]:
+    for interval_index, candidate_view in enumerate(interval_views[1:]):
         rows.append(
             _compare_same_run_views(
                 run,
@@ -261,6 +277,11 @@ def _build_point_comparisons(
                 candidate_view,
                 options,
                 interval_views=(reference_view, candidate_view),
+                _event_windows=(
+                    (event_windows[interval_index],)
+                    if event_windows is not None
+                    else None
+                ),
             )
         )
         reference_view = candidate_view

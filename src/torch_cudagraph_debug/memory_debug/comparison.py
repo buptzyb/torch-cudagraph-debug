@@ -16,7 +16,6 @@ from .allocator_snapshot import (
     AllocatorSnapshotData,
     compare_observation_lifecycle,
     normalize_snapshot,
-    normalize_trace_entries,
     trace_device_indices,
 )
 from .attribution import (
@@ -42,8 +41,8 @@ from .errors import (
     MemoryReconciliationError,
 )
 from .events import (
-    extract_event_window,
-    extract_event_window_from_snapshot,
+    EventWindow,
+    _extract_snapshot_event_windows,
     summarize_allocator_events,
 )
 from .lifetimes import (
@@ -445,6 +444,7 @@ def _compare_same_run_views(
     options: MemoryAttributionOptions,
     *,
     interval_views: Sequence[_MemoryStateView] | None = None,
+    _event_windows: Sequence[Sequence[EventWindow]] | None = None,
 ) -> MemoryPointComparison:
     reference = reference_view.state
     candidate = candidate_view.state
@@ -462,6 +462,7 @@ def _compare_same_run_views(
         interval_views=selected_views,
         lifetime_run=run,
         match="same_run",
+        _event_windows=_event_windows,
     )
     assert isinstance(comparison, MemoryPointComparison)
     return comparison
@@ -475,6 +476,7 @@ def _compare_same_identity_views(
     interval_views: Sequence[_MemoryStateView],
     lifetime_run: MemoryRun | None,
     match: Literal["same_run", "same_probe"],
+    _event_windows: Sequence[Sequence[EventWindow]] | None = None,
 ) -> MemoryPointComparison | MemorySnapshotComparison:
     reference = reference_view.state
     candidate = candidate_view.state
@@ -554,6 +556,7 @@ def _compare_same_identity_views(
             by_stream=True,
         )
 
+    interval_event_windows = _event_windows
     allocator_events = ()
     events_available = False
     events_complete = True
@@ -561,55 +564,50 @@ def _compare_same_identity_views(
         entries = []
         events_available = True
         event_causes: set[str] = set()
-        if lifetime_run is None:
+        if interval_event_windows is None and lifetime_run is None:
             event_devices = _segment_device_indices(
                 reference_segments, candidate_segments
             )
-            interval_windows = []
+            computed_windows = []
             for reference_block, candidate_block in zip(
                 interval_views, interval_views[1:]
             ):
                 reference_state = reference_block.state
                 candidate_state = candidate_block.state
+                assert isinstance(reference_state, MemoryProbeSnapshot)
+                assert isinstance(candidate_state, MemoryProbeSnapshot)
                 current_snapshot = candidate_block.raw
                 interval_devices = tuple(
                     sorted(
                         set(event_devices) | set(trace_device_indices(current_snapshot))
                     )
                 )
-                if interval_devices:
-                    windows = tuple(
-                        extract_event_window_from_snapshot(
-                            current_snapshot,
-                            device_index=device,
-                            start_marker=reference_state.boundary_marker,
-                            end_marker=candidate_state.boundary_marker,
-                            start_label=(
-                                f"{_state_label(reference_state)} on device {device}"
-                            ),
-                        )
-                        for device in interval_devices
+                computed_windows.append(
+                    _extract_snapshot_event_windows(
+                        current_snapshot,
+                        devices=interval_devices,
+                        previous_boundary_recorded=reference_state._boundary_recorded,
+                        current_boundary_recorded=candidate_state._boundary_recorded,
+                        start_marker=reference_state.boundary_marker,
+                        end_marker=candidate_state.boundary_marker,
+                        start_label=_state_label(reference_state),
+                        end_label=_state_label(candidate_state),
+                        start_index=reference_state.snapshot_index,
+                        end_index=candidate_state.snapshot_index,
                     )
-                else:
-                    windows = (
-                        extract_event_window(
-                            normalize_trace_entries(current_snapshot),
-                            start_marker=reference_state.boundary_marker,
-                            end_marker=candidate_state.boundary_marker,
-                            start_label=_state_label(reference_state),
-                        ),
-                    )
-                interval_windows.append(windows)
-        else:
+                )
+            interval_event_windows = tuple(computed_windows)
+        elif interval_event_windows is None:
             assert isinstance(reference, MemoryPoint)
             assert isinstance(candidate, MemoryPoint)
-            interval_windows = [
+            interval_event_windows = tuple(
                 point._event_windows()
                 for point in lifetime_run.points[
                     reference.index + 1 : candidate.index + 1
                 ]
-            ]
-        for windows in interval_windows:
+            )
+        assert interval_event_windows is not None
+        for windows in interval_event_windows:
             if not windows:
                 event_causes.add("disabled")
                 events_available = False
@@ -662,6 +660,7 @@ def _compare_same_identity_views(
                 candidate,
                 options=lifetime_options,
                 _raw_snapshots=tuple(view.raw for view in interval_views),
+                _event_windows=interval_event_windows,
             )
         else:
             assert isinstance(reference, MemoryPoint)
@@ -674,6 +673,7 @@ def _compare_same_identity_views(
                 born_between=None,
                 options=lifetime_options,
                 _allocator_states=tuple(view.raw for view in interval_views),
+                _event_windows=interval_event_windows,
             )
         warnings.extend(allocation_lifetimes.warnings)
 

@@ -265,7 +265,7 @@ class TensorProbe:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> None:
-        """Synchronize as configured, then release native resources."""
+        """Release native resources after captured graphs can no longer replay."""
 
         if not self._closed:
             selected = self.synchronize if synchronize is None else synchronize

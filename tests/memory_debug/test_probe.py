@@ -7,6 +7,7 @@ import pytest
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
     MemoryDebugError,
+    MemoryHistoryBoundaryError,
     MemoryOwnershipError,
     MemoryPoolKey,
     MemoryProbe,
@@ -87,6 +88,50 @@ def test_same_probe_compare_supports_event_attribution() -> None:
     assert lifetimes.to_dict()["source"]["kind"] == "probe"
 
 
+@pytest.mark.parametrize("missing_snapshot_index", [0, 1])
+@pytest.mark.parametrize(
+    "attribution",
+    [
+        pytest.param(MemoryAttributionOptions(events=True), id="events"),
+        pytest.param(MemoryAttributionOptions(lifetimes=True), id="lifetimes"),
+    ],
+)
+def test_same_probe_compare_reports_unrecorded_boundary(
+    missing_snapshot_index: int,
+    attribution: MemoryAttributionOptions,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    markers: list[str] = []
+
+    def provider(marker: str) -> dict[str, object]:
+        markers.append(marker)
+        return snapshot(
+            segment(active=10),
+            traces=[[event("snapshot", marker=recorded) for recorded in markers]],
+        )
+
+    probe = MemoryProbe._from_snapshot_provider(provider)
+    original_capture = probe._collector.capture
+    capture_index = 0
+
+    def capture(marker: str, **kwargs: object) -> object:
+        nonlocal capture_index
+        result = original_capture(marker, **kwargs)
+        current_index = capture_index
+        capture_index += 1
+        return replace(
+            result,
+            boundary_recorded=current_index != missing_snapshot_index,
+        )
+
+    monkeypatch.setattr(probe._collector, "capture", capture)
+    snapshots = (probe.snapshot(), probe.snapshot())
+
+    assert snapshots[missing_snapshot_index]._boundary_recorded is False
+    with pytest.raises(MemoryHistoryBoundaryError, match="boundar"):
+        probe.compare(snapshots[0], snapshots[1], attribution=attribution)
+
+
 def test_compare_snapshots_supports_independent_probes_without_history() -> None:
     reference = MemoryProbe._from_snapshot_provider(
         lambda marker: snapshot(segment(active=10))
@@ -140,6 +185,16 @@ def test_probe_snapshot_override_reaches_collector() -> None:
     captured = probe.snapshot(synchronize=False)
 
     assert seen == [captured.boundary_marker]
+
+
+def test_probe_snapshot_rejects_nonboolean_boundary_status() -> None:
+    probe = MemoryProbe._from_snapshot_provider(
+        lambda marker: snapshot(segment(active=10))
+    )
+    captured = probe.snapshot()
+
+    with pytest.raises(TypeError, match="boundary status must be boolean"):
+        replace(captured, _boundary_recorded=1)
 
 
 def test_probe_snapshot_rejects_noncontiguous_observation_order() -> None:

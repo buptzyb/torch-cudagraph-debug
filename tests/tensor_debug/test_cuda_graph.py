@@ -1013,11 +1013,7 @@ def test_always_mode_rejects_eager_calls_after_capture() -> None:
 
     with pytest.raises(RuntimeError, match="eager calls after capture"):
         probe(value)
-    # Captured probes reject unsynchronized close; a replay could still be
-    # writing into staging.
-    with pytest.raises(RuntimeError, match="without\\s+synchronization"):
-        probe.close(synchronize=False)
-    probe.close()
+    probe.close(synchronize=False)
 
 
 def test_capture_callback_payload_count_is_fixed_per_invocation() -> None:
@@ -1044,7 +1040,7 @@ def test_capture_callback_payload_count_is_fixed_per_invocation() -> None:
     counts = debug_resource_counts(probe)
     assert counts["captured_payloads"] == 2
     assert counts["eager_callbacks_in_flight"] == 0
-    probe.close()
+    probe.close(synchronize=False)
 
 
 def test_close_without_synchronization_rejects_pending_eager_callback() -> None:
@@ -1087,11 +1083,8 @@ def test_close_is_rejected_during_capture() -> None:
         with pytest.raises(RuntimeError, match="during CUDA graph capture"):
             probe.close(synchronize=False)
 
-    # The collector cannot observe external synchronization; captured probes
-    # always require a synchronizing close.
-    with pytest.raises(RuntimeError, match="without\\s+synchronization"):
-        probe.close(synchronize=False)
-    probe.close()
+    torch.cuda.synchronize()
+    probe.close(synchronize=False)
 
 
 def test_close_without_synchronization_rejects_pending_record_only_copy() -> None:

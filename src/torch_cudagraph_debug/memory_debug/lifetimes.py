@@ -28,7 +28,6 @@ from .allocator_snapshot import (
     AllocatorTraceEntry,
     normalize_pool_id,
     normalize_snapshot,
-    normalize_trace_entries,
     trace_device_indices,
 )
 from .errors import (
@@ -37,10 +36,7 @@ from .errors import (
     MemoryHistoryTruncatedError,
     MemoryReconciliationError,
 )
-from .events import (
-    extract_event_window,
-    extract_event_window_from_snapshot,
-)
+from .events import EventWindow, _extract_snapshot_event_windows
 
 if TYPE_CHECKING:
     from .attribution import MemoryLifetimeOptions
@@ -404,6 +400,7 @@ def analyze_allocation_lifetimes(
     born_between: tuple[MemoryPoint, MemoryPoint] | None,
     options: MemoryLifetimeOptions,
     _allocator_states: Sequence[Any] | None = None,
+    _event_windows: Sequence[Sequence[EventWindow]] | None = None,
 ) -> MemoryAllocationLifetimeAnalysis:
     """Build allocation cohorts for a range in one recorded run."""
 
@@ -418,6 +415,7 @@ def analyze_allocation_lifetimes(
         born_between=born_between,
         options=options,
         raw_snapshots=_allocator_states,
+        event_windows=_event_windows,
     )
 
 
@@ -427,6 +425,7 @@ def analyze_probe_snapshot_lifetimes(
     *,
     options: MemoryLifetimeOptions,
     _raw_snapshots: Sequence[Any] | None = None,
+    _event_windows: Sequence[Sequence[EventWindow]] | None = None,
 ) -> MemoryAllocationLifetimeAnalysis:
     """Build allocation cohorts for two ordered snapshots from one Probe."""
 
@@ -449,6 +448,7 @@ def analyze_probe_snapshot_lifetimes(
             if _raw_snapshots is None
             else _raw_snapshots
         ),
+        event_windows=_event_windows,
     )
 
 
@@ -464,6 +464,7 @@ def _analyze_allocation_lifetimes(
     born_between: tuple[Any, Any] | None,
     options: MemoryLifetimeOptions,
     raw_snapshots: Sequence[Any] | None,
+    event_windows: Sequence[Sequence[EventWindow]] | None,
 ) -> MemoryAllocationLifetimeAnalysis:
     """Build an offline allocation-cohort lifetime report."""
 
@@ -475,6 +476,7 @@ def _analyze_allocation_lifetimes(
         source_kind=source_kind,
         events=True,
         raw_snapshots=raw_snapshots,
+        event_windows=event_windows,
     )
     warnings = [warning for point in points for warning in point.warnings]
     for history in histories:
@@ -564,6 +566,7 @@ def _scan_points(
     source_kind: Literal["run", "probe"],
     events: bool,
     raw_snapshots: Sequence[Any] | None,
+    event_windows: Sequence[Sequence[EventWindow]] | None,
 ) -> tuple[
     dict[int, tuple[_BlockObservation, ...]],
     tuple[_IntervalHistory, ...],
@@ -575,6 +578,11 @@ def _scan_points(
 
     if raw_snapshots is not None and len(raw_snapshots) != len(points):
         raise ValueError("raw snapshot count must match lifetime points")
+    interval_count = max(len(points) - 1, 0)
+    if event_windows is not None and len(event_windows) != interval_count:
+        raise ValueError("event window count must match lifetime intervals")
+    interval_index = 0
+
     snapshots = (
         iter(raw_snapshots)
         if raw_snapshots is not None
@@ -591,7 +599,9 @@ def _scan_points(
             continue
 
         if events:
-            if source_kind == "run":
+            if event_windows is not None:
+                windows = list(event_windows[interval_index])
+            elif source_kind == "run":
                 windows = list(point._event_windows())
             else:
                 devices = sorted(
@@ -602,28 +612,20 @@ def _scan_points(
                     }
                     | set(trace_device_indices(snapshot))
                 )
-                if devices:
-                    windows = [
-                        extract_event_window_from_snapshot(
-                            snapshot,
-                            device_index=device,
-                            start_marker=previous.boundary_marker,
-                            end_marker=point.boundary_marker,
-                            start_label=(
-                                f"{_state_label(previous)} on device {device}"
-                            ),
-                        )
-                        for device in devices
-                    ]
-                else:
-                    windows = [
-                        extract_event_window(
-                            normalize_trace_entries(snapshot),
-                            start_marker=previous.boundary_marker,
-                            end_marker=point.boundary_marker,
-                            start_label=_state_label(previous),
-                        )
-                    ]
+                windows = list(
+                    _extract_snapshot_event_windows(
+                        snapshot,
+                        devices=devices,
+                        previous_boundary_recorded=previous._boundary_recorded,
+                        current_boundary_recorded=point._boundary_recorded,
+                        start_marker=previous.boundary_marker,
+                        end_marker=point.boundary_marker,
+                        start_label=_state_label(previous),
+                        end_label=_state_label(point),
+                        start_index=_state_index(previous),
+                        end_index=_state_index(point),
+                    )
+                )
             entries = tuple(entry for window in windows for entry in window.entries)
             pool_ranges = build_pool_range_index(segments, previous_segments)
             available = bool(windows) and all(window.available for window in windows)
@@ -661,6 +663,7 @@ def _scan_points(
         )
         previous = point
         previous_segments = segments
+        interval_index += 1
 
     return observations, tuple(histories)
 

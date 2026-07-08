@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 import torch_cudagraph_debug.memory_debug.allocator_snapshot as allocator_snapshot_module
+import torch_cudagraph_debug.memory_debug.recording as recording_module
 from torch_cudagraph_debug.memory_debug import (
     MemoryAttributionOptions,
     MemoryDebugError,
@@ -16,11 +18,49 @@ from torch_cudagraph_debug.memory_debug import (
     MemoryPoolKey,
     MemoryReconciliationError,
     MemoryRecorder,
+    MemoryRun,
     compare_phases,
     compare_points,
 )
 
 from ._helpers import event, make_history_run, make_run, segment, snapshot
+
+
+@pytest.mark.parametrize("analysis", ["compare", "timeline"])
+def test_events_and_lifetimes_share_loaded_event_evidence(
+    analysis: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "shared-event-evidence.tcgd-memory"
+    make_history_run(
+        [
+            ([segment(active=0, total=64)], []),
+            (
+                [segment(active=64, total=64)],
+                [event("alloc", address=1000, size=64)],
+            ),
+        ],
+        labels=("before", "after"),
+        bundle_dir=bundle,
+    )
+    run = MemoryRun.load(bundle, cache_snapshots=False)
+    original_read = recording_module._read_gzip_json
+    read_names: list[str] = []
+
+    def tracked_read(path: Path, *, context: str) -> object:
+        read_names.append(path.name)
+        return original_read(path, context=context)
+
+    monkeypatch.setattr(recording_module, "_read_gzip_json", tracked_read)
+    options = MemoryAttributionOptions(events=True, lifetimes=True)
+
+    if analysis == "compare":
+        run.compare("before", "after", attribution=options)
+    else:
+        run.timeline(attribution=options)
+
+    assert read_names.count("0000-0001.json.gz") == 1
 
 
 def test_same_run_keeps_pool_totals_and_stream_deltas_separate() -> None:

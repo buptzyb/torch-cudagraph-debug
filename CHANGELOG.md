@@ -98,6 +98,17 @@
   identical label, and a candidate label claimed twice across the merged
   mapping raises `ValueError`. Previously any mapping disabled auto-alignment
   and forced unmapped identical labels into a mismatch.
+- `MemoryProbeSnapshot` preserves whether each endpoint metadata boundary was
+  actually recorded. Event and lifetime requests now raise
+  `MemoryHistoryBoundaryError` for a failed Probe boundary instead of
+  misclassifying it as truncated history.
+- Combined event and lifetime analysis reuses each loaded interval event
+  payload within compare, phase, and timeline workflows. With snapshot caching
+  disabled, the same gzip payload is no longer decompressed twice in one
+  analysis.
+- Serialized tensor comparison options include `layout_policy`; reports no
+  longer omit the policy that determined whether source-stride differences
+  were mismatches.
 - Tensor run groups accept an incomplete rank whose point labels are a strict
   prefix of the longest rank sequence (a crashed rank) with the existing
   incomplete-bundle warning instead of raising; a complete rank with fewer
@@ -112,10 +123,13 @@
   rejected instead of issuing a blocking counter read that invalidates the
   capture; retired-staging reclaim is likewise deferred during capture and
   while eager work is pending.
-- Unsynchronized `close()` is rejected while eager device copies are pending
+- Unsynchronized `close()` verifies pending eager device work through a CUDA
+  event and is rejected while copies or callbacks are provably in flight
   (record-only probes previously freed staging a running D2H copy still
-  targeted) and always rejected once the probe was captured by a CUDA graph,
-  since an asynchronous replay may still write into probe staging.
+  targeted). Replays cannot be verified from inside the probe;
+  closing after capture asserts both that no replay is in flight and that no
+  graph containing the probe can replay again. `synchronize=False` additionally
+  asserts that required synchronization already occurred.
 
 ### Changed
 

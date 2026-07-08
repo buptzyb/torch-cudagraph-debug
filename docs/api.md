@@ -255,14 +255,16 @@ method returns a removable hook handle. If `tensor.requires_grad` is false, it
 returns `None`; with `strict=True`, it raises `RuntimeError`.
 
 `close()` first performs the requested synchronization, reclaims retired host
-staging, and releases native resources. An unsynchronized close fails while an
-eager host callback or eager device copy is still pending, and is always
-rejected for a probe that has been captured by a CUDA graph (the collector
-cannot observe external synchronization, and a replay may still write into
-probe staging). Do not close a probe while a graph that captured it may still
-replay. `TensorProbe` is also a context manager whose exit uses the
-correctness-first default close; use that form only when every replay occurs
-inside the context.
+staging, and releases native resources. An unsynchronized close verifies
+pending eager work and fails while an eager host callback or eager device
+copy is provably still in flight. Replays cannot be verified from inside the
+probe: after capture, closing asserts that no replay is in flight and that no
+graph containing the probe can replay again. A current or later replay would
+access freed staging, replay-counter, and callback resources. Passing
+`synchronize=False` additionally asserts that required synchronization already
+occurred. `TensorProbe` is also a context manager whose exit
+uses the correctness-first default close; use that form only when every
+replay occurs inside the context.
 
 ### Actions
 
@@ -500,7 +502,10 @@ matching `probe_id` values, so eager and CUDA Graph snapshots collected by
 different probes can be compared directly. `TensorSnapshotComparison` and
 `TensorPointComparison` are sibling result types with direct `reference`,
 `candidate`, `options`, and `observation_comparisons` fields; snapshot results
-do not contain a synthetic `point_comparison`.
+do not contain a synthetic `point_comparison`. Serialized point and snapshot
+comparisons preserve every `TensorComparisonOptions` field above, including
+`layout_policy`, under `options`. Run and point-series reports retain those
+complete comparison objects under `point_comparisons`.
 
 The stable observation key is `(name, invocation_index)`.
 `compare_points()` follows reference order and appends candidate-only keys.

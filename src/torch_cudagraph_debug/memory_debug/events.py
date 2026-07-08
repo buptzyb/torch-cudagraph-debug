@@ -186,6 +186,35 @@ def _extract_point_event_evidence(
     )
 
 
+def _extract_snapshot_event_windows(
+    snapshot: AllocatorSnapshotData,
+    *,
+    devices: Sequence[int],
+    previous_boundary_recorded: bool,
+    current_boundary_recorded: bool,
+    start_marker: str,
+    end_marker: str,
+    start_label: str,
+    end_label: str,
+    start_index: int,
+    end_index: int,
+) -> tuple[EventWindow, ...]:
+    """Classify one in-memory interval with Recorder-equivalent semantics."""
+
+    return _extract_point_event_evidence(
+        snapshot,
+        devices=devices,
+        previous_boundary_recorded=previous_boundary_recorded,
+        current_boundary_recorded=current_boundary_recorded,
+        start_marker=start_marker,
+        end_marker=end_marker,
+        start_label=start_label,
+        end_label=end_label,
+        start_index=start_index,
+        end_index=end_index,
+    ).windows()
+
+
 @dataclass(frozen=True)
 class AllocatorEventSummary:
     """Allocator events grouped by device, pool, stream, action, and stack."""

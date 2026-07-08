@@ -440,3 +440,4 @@ def test_layout_policy_uses_recorded_source_stride() -> None:
         options=TensorComparisonOptions(layout_policy="ignore"),
     )
     assert ignored.ok
+    assert ignored.to_dict()["options"]["layout_policy"] == "ignore"

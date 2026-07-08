@@ -93,6 +93,7 @@ class MemoryProbe:
             boundary_marker=capture.boundary_marker,
             observations=observations,
             warnings=capture.warnings,
+            _boundary_recorded=capture.boundary_recorded,
             _raw_snapshot=capture.raw_snapshot,
         )
         self._next_snapshot_index += 1

@@ -361,11 +361,6 @@ void ProbeContext::reclaim_retired_staging() {
     }
 }
 
-bool ProbeContext::has_captured_work() const {
-    std::lock_guard<std::mutex> guard(mutex_);
-    return captured_once_;
-}
-
 void ProbeContext::close() {
     {
         std::lock_guard<std::mutex> guard(mutex_);

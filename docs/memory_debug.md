@@ -246,7 +246,7 @@ comparison = run.compare("start", "end", attribution=options)
 
 Event and lifetime requests fail with typed errors instead of degrading:
 `MemoryHistoryDisabledError` when history was never recorded on an analyzed
-device, `MemoryHistoryBoundaryError` when the previous point could not record a
+device, `MemoryHistoryBoundaryError` when either endpoint could not record its
 metadata boundary, and `MemoryHistoryTruncatedError` when a recorded boundary was
 overwritten in the bounded history ring buffer. Stack attribution returns exact framed rows plus an `<unattributed>` bucket when coverage is partial; it raises
 `MemoryHistoryDisabledError` only when nonempty active state has zero frame
@@ -289,6 +289,8 @@ without decompressing allocator-state files, and
 `timeline.point_comparisons` is empty.
 Passing `MemoryAttributionOptions(stacks=True)` loads each required allocator
 state, and `events=True` additionally loads each ending point's event evidence.
+When events and lifetimes are requested together, one loaded event window backs
+both analyses.
 The timeline then attaches attributed adjacent comparisons.
 The first point has `delta=None`; each later point is compared with its immediate
 predecessor. Pools that disappear remain visible with zero state and a negative

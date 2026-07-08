@@ -94,6 +94,8 @@ for observation in snapshot.observations:
         f"order={observation.order}: {observation.tensor()}"
     )
 # snapshot() already waited for replay_stream.
+# Destroy the graph before releasing the captured probe resources.
+del graph
 probe.close(synchronize=False)
 ```
 

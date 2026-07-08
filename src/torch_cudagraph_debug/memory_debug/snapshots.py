@@ -32,6 +32,7 @@ class MemoryProbeSnapshot:
     boundary_marker: str
     observations: tuple[MemoryObservation, ...]
     warnings: tuple[str, ...] = ()
+    _boundary_recorded: bool = field(default=True, repr=False, compare=False)
     _raw_snapshot: JSONValue | FrozenJSONValue = field(
         default_factory=dict,
         repr=False,
@@ -53,6 +54,8 @@ class MemoryProbeSnapshot:
             raise ValueError("snapshot timestamp must be finite")
         if not self.boundary_marker:
             raise ValueError("boundary_marker must be non-empty")
+        if type(self._boundary_recorded) is not bool:
+            raise TypeError("memory snapshot boundary status must be boolean")
         expected = list(range(len(self.observations)))
         orders = [item.order for item in self.observations]
         if orders != expected:

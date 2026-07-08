@@ -71,6 +71,8 @@ for observation in snapshot.observations:
 
 # The snapshot query already waited for every node in this replay.
 probe.assert_check_ok(synchronize=False)
+# No graph containing this probe may replay after close().
+del graph
 probe.close(synchronize=False)
 ```
 
@@ -316,10 +318,11 @@ ordering.
 
 `close()` inherits the object's configured synchronization policy when omitted.
 Pass the replay stream to avoid waiting on unrelated streams, or pass `False`
-only for a never-captured probe whose prior synchronization has completed all
-probe work. An unsynchronized close reports pending eager callbacks and
-pending eager copies instead of freeing their staging, and is always rejected
-once the probe has been captured by a CUDA graph. Eager (`when="always"`)
+only after prior synchronization has completed all probe work. For a captured
+probe, every graph containing it must also be unable to replay again; otherwise
+a later replay accesses resources released by `close()`. The probe cannot verify
+either condition. An unsynchronized close reports pending eager callbacks and
+pending eager copies instead of freeing their staging. Eager (`when="always"`)
 probes record one observation name for their whole lifetime; a second distinct
 name is rejected instead of silently overwriting the first.
 

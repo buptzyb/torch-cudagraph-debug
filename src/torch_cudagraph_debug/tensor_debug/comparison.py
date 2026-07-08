@@ -1140,6 +1140,7 @@ def _options_dict(options: TensorComparisonOptions) -> dict[str, object]:
         "atol": options.atol,
         "equal_nan": options.equal_nan,
         "dtype_policy": options.dtype_policy,
+        "layout_policy": options.layout_policy,
         "limit": options.limit,
     }
 

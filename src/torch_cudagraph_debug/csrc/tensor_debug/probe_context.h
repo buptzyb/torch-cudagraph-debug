@@ -112,7 +112,6 @@ class ProbeContext {
     pybind11::dict check_status();
     pybind11::dict debug_resource_counts() const;
     void reclaim_retired_staging();
-    bool has_captured_work() const;
     void close();
 
     void on_callback(const CallbackPayload& payload) noexcept;

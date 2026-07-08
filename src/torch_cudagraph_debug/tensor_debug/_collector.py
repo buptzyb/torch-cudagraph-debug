@@ -369,18 +369,6 @@ class _TensorCollector:
                 raise RuntimeError(
                     "cannot close tensor collector during CUDA graph capture"
                 )
-            if (
-                isinstance(synchronize, bool)
-                and not synchronize
-                and getattr(self._handle, "has_captured_work", lambda: False)()
-            ):
-                # A captured graph can replay concurrently; closing without
-                # synchronization would free staging its replay still writes.
-                raise RuntimeError(
-                    f"cannot close tensor collector {self.name!r} without "
-                    "synchronization after CUDA graph capture; pass "
-                    "synchronize=True or a stream/device target"
-                )
             self.synchronize(synchronize)
             self._handle.close()
         self._handle = None
