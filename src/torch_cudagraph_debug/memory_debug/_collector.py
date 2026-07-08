@@ -90,7 +90,7 @@ class _MemoryCollector:
             envelope = _snapshot_envelope(raw)
 
         snapshot = _filter_snapshot_devices(envelope, devices)
-        segments = normalize_snapshot(snapshot)
+        segments = normalize_snapshot(snapshot, warnings=warnings)
         return _CollectedMemorySnapshot(
             timestamp=time.time(),
             boundary_marker=boundary_marker,

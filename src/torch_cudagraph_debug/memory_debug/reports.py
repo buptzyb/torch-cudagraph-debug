@@ -2418,12 +2418,12 @@ def _timeline_svg(rows: Sequence[Mapping[str, object]], metric: str) -> str:
     max_value = max(int(row.get(metric, 0) or 0) for row in rows) or 1
     max_index = max(int(row.get("point_index", 0) or 0) for row in rows) or 1
     colors = ("#2563eb", "#dc2626", "#059669", "#9333ea", "#d97706", "#0891b2")
-    pools = sorted({str(row.get("pool_id", "")) for row in rows})
+    pools = sorted({str(row.get("key", "")) for row in rows})
     lines = []
     for color_index, pool in enumerate(pools):
         points = []
         for row in rows:
-            if str(row.get("pool_id", "")) != pool:
+            if str(row.get("key", "")) != pool:
                 continue
             x = left + int(row.get("point_index", 0) or 0) / max_index * plot_width
             y = (
@@ -2457,7 +2457,7 @@ def _cohort_timeline_svg(rows: Sequence[Mapping[str, object]]) -> str:
         {
             **row,
             "point_index": int(row.get("point_index", 0) or 0) - first_index,
-            "pool_id": row.get("cohort_id", ""),
+            "key": row.get("cohort_id", ""),
             "state_active_bytes": row.get("active_bytes", 0),
         }
         for row in rows

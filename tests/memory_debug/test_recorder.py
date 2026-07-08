@@ -195,6 +195,65 @@ def test_load_rejects_missing_manifest_fields(tmp_path: Path) -> None:
         MemoryRun.load(bundle)
 
 
+def test_schema_drift_missing_fields_warn_once_per_field() -> None:
+    def drifted_segment(address: int) -> dict[str, object]:
+        return {
+            "address": address,
+            "stream": 0,
+            "segment_type": "large",
+            "total_size": 100,
+            "allocated_size": 100,
+            "active_size": 100,
+            # missing: device, segment_pool_id, requested_size
+            "blocks": [
+                {
+                    "address": address,
+                    "size": 100,
+                    "state": "active_allocated",
+                    "frames": [],
+                    # missing: requested_size
+                }
+            ],
+        }
+
+    raw = {
+        "segments": [drifted_segment(1000), drifted_segment(2000)],
+        "device_traces": [],
+        "external_annotations": [],
+        "allocator_settings": {},
+    }
+    run = make_run([raw], labels=("point",))
+
+    joined = "\n".join(run.points[0].warnings)
+    assert "2 segment(s) missing 'device' (treated as device 0)" in joined
+    assert (
+        "2 segment(s) missing 'segment_pool_id' (treated as the default pool)" in joined
+    )
+    assert "2 segment(s) missing 'requested_size' (treated as 0)" in joined
+    assert "2 block(s) missing 'requested_size' (treated as 0)" in joined
+
+
+def test_complete_snapshot_produces_no_schema_warnings() -> None:
+    run = make_run([snapshot(segment(active=10))], labels=("point",))
+    assert run.points[0].warnings == ()
+
+
+def test_truncated_snapshot_payload_raises_bundle_error(tmp_path: Path) -> None:
+    bundle = tmp_path / "truncated.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=10))],
+        bundle_dir=bundle,
+        labels=("point",),
+    )
+    payload = bundle / "snapshots" / "0000.json.gz"
+    data = payload.read_bytes()
+    payload.write_bytes(data[: len(data) // 2])
+
+    run = MemoryRun.load(bundle, cache_snapshots=False)
+    with pytest.raises(MemoryBundleError, match="could not load snapshot"):
+        run.points[0].raw_snapshot()
+
+
 def test_load_rejects_unknown_point_fields(tmp_path: Path) -> None:
     bundle = tmp_path / "unknown-point-field.tcgd-memory"
     make_run(

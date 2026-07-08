@@ -72,9 +72,6 @@ Each snapshot or point contains one ordered observation for every
 `MemoryPoolKey(device_index, pool_id)`, and `allocator_scope_stats` provides
 `all`, `default`, and `private` totals across selected devices. Ownership and
 workflow metadata live on the snapshot or point, not on an observation.
-stream)` pair. Its `pool_stats` and `allocator_scope_stats` are derived views.
-Ownership and workflow metadata live on the snapshot or point, not on an
-observation.
 
 ## Interpreting CUDA Graph Private-Pool Inactive Memory
 

@@ -191,6 +191,31 @@ def test_timeline_html_contains_charts_and_zero_delta_rows(
     assert steady["delta_allocated_bytes"] == "0"
 
 
+def test_timeline_svg_draws_one_labeled_line_per_pool(tmp_path: Path) -> None:
+    run = make_run(
+        [
+            snapshot(
+                segment(active=10),
+                segment(active=20, pool=(0, 7), address=4000),
+            ),
+            snapshot(
+                segment(active=30),
+                segment(active=20, pool=(0, 7), address=4000),
+            ),
+        ],
+        labels=("start", "end"),
+    )
+    timeline = run.timeline()
+    output = tmp_path / "timeline"
+    timeline.write(output)
+
+    html = (output / "report.html").read_text(encoding="utf-8")
+    # Four metric charts, each with one polyline per pool.
+    assert html.count("<polyline") == 8
+    assert "<title>device[0]/pool[0,0]</title>" in html
+    assert "<title>device[0]/pool[0,7]</title>" in html
+
+
 def test_phase_report_writes_decomposition_and_component_tables(
     tmp_path: Path,
 ) -> None:

@@ -112,6 +112,39 @@ def test_same_size_blocks_keep_distinct_address_lifecycle_identity() -> None:
     assert lifecycle.became_inactive_bytes == 10
 
 
+def test_coalesced_freed_blocks_count_as_became_inactive() -> None:
+    before = segment(active=14, total=14, address=1000)
+    before["blocks"] = [
+        {
+            "address": 1000,
+            "size": 10,
+            "requested_size": 10,
+            "state": "active_allocated",
+            "frames": [],
+        },
+        {
+            "address": 1010,
+            "size": 4,
+            "requested_size": 4,
+            "state": "active_allocated",
+            "frames": [],
+        },
+    ]
+    # Both blocks were freed and the allocator coalesced them into one
+    # inactive block whose (address, size) key matches neither original.
+    after = segment(active=0, total=14, address=1000)
+
+    run = make_run(
+        [snapshot(before), snapshot(after)],
+        labels=("before", "after"),
+    )
+    lifecycle = run.compare("before", "after").pool_comparisons[0].lifecycle
+
+    assert lifecycle is not None
+    assert lifecycle.newly_active_bytes == 0
+    assert lifecycle.became_inactive_bytes == 14
+
+
 def test_cross_run_matches_only_default_pool_without_mapping() -> None:
     before = make_run(
         [

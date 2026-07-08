@@ -15,6 +15,7 @@ def segment(
     address: int = 1000,
     frame: str | None = "model.py",
     requested: int | None = None,
+    device: int = 0,
 ) -> dict[str, Any]:
     total = active if total is None else total
     requested = active if requested is None else requested
@@ -45,6 +46,7 @@ def segment(
         )
     return {
         "address": address,
+        "device": device,
         "stream": stream,
         "segment_pool_id": list(pool),
         "segment_type": "large",

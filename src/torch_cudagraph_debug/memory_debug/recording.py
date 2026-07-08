@@ -8,6 +8,7 @@ import math
 import time
 import uuid
 import warnings
+import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from functools import cached_property
@@ -238,7 +239,9 @@ class MemoryPoint:
         try:
             with gzip.open(self._snapshot_path, "rt", encoding="utf-8") as handle:
                 text = handle.read()
-        except OSError as exc:
+        # A truncated gzip member raises EOFError and a corrupted deflate
+        # stream raises zlib.error; neither is an OSError.
+        except (OSError, EOFError, zlib.error) as exc:
             raise MemoryBundleError(
                 f"could not load snapshot for point {self.label!r}: {exc}"
             ) from exc

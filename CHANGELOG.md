@@ -16,6 +16,19 @@
   the owner-active running sum, so the unbalanced subtraction underreported
   cohort owner peaks (down to zero) whenever a range began with pending
   cross-stream frees.
+- Snapshot normalization reports absent identity and size fields (`device`,
+  `segment_pool_id`, segment and block sizes, block `state`) through the
+  point warnings channel, aggregated per field, instead of substituting
+  defaults silently. Present-but-invalid fields still raise.
+- `became_inactive_bytes` now mirrors the newly-active rule: a
+  reference-active block whose `(address, size)` key is gone in the
+  candidate (freed and coalesced, re-split, or in a freed segment) counts as
+  became-inactive. Previously only in-place `inactive` transitions counted,
+  so steady-state churn read like a leak.
+- Timeline HTML charts group polylines by the pool key actually present in
+  timeline rows; previously every pool collapsed into one unlabeled line.
+- A truncated or corrupted gzip snapshot payload raises `MemoryBundleError`
+  instead of leaking a raw `EOFError` or `zlib.error` through the CLI.
 
 ### Changed
 

@@ -62,15 +62,53 @@ class AllocatorTraceEntry:
     pool_id: PoolId | None = None
 
 
+_SEGMENT_DRIFT_FIELDS = (
+    ("device", "device 0"),
+    ("segment_pool_id", "the default pool"),
+    ("total_size", "0"),
+    ("allocated_size", "0"),
+    ("active_size", "0"),
+    ("requested_size", "0"),
+)
+_BLOCK_DRIFT_FIELDS = (
+    ("size", "0"),
+    ("requested_size", "0"),
+    ("state", "'unknown'"),
+)
+
+
 def normalize_snapshot(
     snapshot: AllocatorSnapshotData,
+    *,
+    warnings: list[str] | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
-    """Return normalized segment dictionaries from a PyTorch snapshot shape."""
+    """Return normalized segment dictionaries from a PyTorch snapshot shape.
+
+    Absent identity and size fields keep their documented default values but
+    are reported through ``warnings`` (aggregated per field) instead of being
+    substituted silently; a field that is present with an invalid type or
+    value still raises.
+    """
 
     segments = _segments_from_snapshot(snapshot)
+    missing: dict[tuple[str, str, str], int] = {}
+
+    def count_missing(
+        mapping: Mapping[str, Any],
+        kind: str,
+        fields: tuple[tuple[str, str], ...],
+    ) -> None:
+        if warnings is None:
+            return
+        for name, substitute in fields:
+            if name not in mapping:
+                key = (kind, name, substitute)
+                missing[key] = missing.get(key, 0) + 1
+
     normalized = []
     for segment_index, segment in enumerate(segments):
         context = f"segment[{segment_index}]"
+        count_missing(segment, "segment", _SEGMENT_DRIFT_FIELDS)
         device = normalize_device_index(_int_field(segment, "device", context))
         pool_id = normalize_pool_id(segment.get("segment_pool_id", DEFAULT_POOL_ID))
         stream = normalize_stream(segment.get("stream", None))
@@ -81,6 +119,7 @@ def normalize_snapshot(
             _mapping_sequence_field(segment, "blocks", context)
         ):
             block_context = f"{context}.blocks[{block_index}]"
+            count_missing(block, "block", _BLOCK_DRIFT_FIELDS)
             current_address = _optional_int_field(block, "address", block_context)
             if current_address is None and block_address is not None:
                 current_address = block_address
@@ -116,6 +155,12 @@ def normalize_snapshot(
                 "frames": _frames_field(segment, context),
             }
         )
+    if warnings is not None:
+        for (kind, name, substitute), count in sorted(missing.items()):
+            warnings.append(
+                f"allocator snapshot schema drift: {count} {kind}(s) missing "
+                f"{name!r} (treated as {substitute})"
+            )
     return tuple(normalized)
 
 
@@ -288,7 +333,10 @@ def compare_observation_lifecycle(
             if candidate_block
             else "missing"
         )
-        if candidate_state == "inactive":
+        # Mirror of the newly-active rule: a block whose (address, size) key
+        # is gone (coalesced, re-split, or in a freed segment) stopped being
+        # active just as surely as one that turned inactive in place.
+        if candidate_state not in ACTIVE_STATES:
             counters[block_key[0]][3] += _int(block.get("size"))
 
     return {

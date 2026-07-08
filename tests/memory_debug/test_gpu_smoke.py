@@ -328,6 +328,13 @@ def test_graph_pool_capture_and_json_bundle_round_trip(
         after_replay = recorder.record_point("after_replay")
         run = recorder.finish()
 
+        # Real snapshots must never trip the schema-drift warnings.
+        assert not any(
+            "schema drift" in warning
+            for point in run.points
+            for warning in point.warnings
+        )
+
         capture_comparison = run.compare(
             "before_capture",
             "after_capture",

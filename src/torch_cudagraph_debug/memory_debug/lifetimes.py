@@ -1495,13 +1495,10 @@ def _event_peaks(
             # entered owner_live, so their boundary free request must not
             # subtract from it.
             observation = (
-                member.observations.get(start_index)
-                if member.birth is None
-                else None
+                member.observations.get(start_index) if member.birth is None else None
             )
             held_owner_active = member.birth_order is not None or (
-                observation is not None
-                and observation.state in OWNER_ACTIVE_STATES
+                observation is not None and observation.state in OWNER_ACTIVE_STATES
             )
             transitions.append(
                 (
