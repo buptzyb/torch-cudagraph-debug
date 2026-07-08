@@ -14,6 +14,7 @@ from torch_cudagraph_debug.tensor_debug import (
     TensorDebugError,
     TensorObservationKey,
     TensorProbe,
+    compare_snapshots,
 )
 from torch_cudagraph_debug.tensor_debug import _collector as collector_module
 
@@ -27,9 +28,7 @@ def _default_to_not_capturing(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _install_fake_native(
-    monkeypatch: pytest.MonkeyPatch, handle: object
-) -> None:
+def _install_fake_native(monkeypatch: pytest.MonkeyPatch, handle: object) -> None:
     class FakeNative:
         @staticmethod
         def create_tensor_debug_probe(
@@ -126,6 +125,111 @@ def test_record_only_collect_is_rejected_during_capture(
     assert handle.reclaims == 0
 
 
+class _ObservationsHandle:
+    def __init__(self, observations: list[dict[str, object]]) -> None:
+        self._observations = observations
+
+    def enqueue(
+        self, tensor: torch.Tensor, name: str, invocation_index: int
+    ) -> torch.Tensor:
+        return tensor
+
+    def observations(self, replay_index: int | None) -> list[dict[str, object]]:
+        return self._observations
+
+    def _reclaim_retired_staging(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _observation_row(
+    name: str, order: int, invocation_index: int, **extra: object
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "order": order,
+        "replay_index": 0,
+        "invocation_index": invocation_index,
+        "shape": (2,),
+        "device": "cuda:0",
+        "tensor": torch.tensor([1.0, 2.0]),
+        **extra,
+    }
+
+
+def test_snapshot_exposes_eager_overwrite_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handle = _ObservationsHandle([_observation_row("x", 0, 0, eager_overwrites=2)])
+    _install_fake_native(monkeypatch, handle)
+    probe = TensorProbe("x", [RecordAction()], when="always")
+    probe(torch.tensor([1.0]), name="x")
+
+    snapshot = probe.snapshot(synchronize=False)
+    assert snapshot.eager_overwrites == (("x", 2),)
+    assert dict(snapshot.eager_overwrite_counts) == {"x": 2}
+
+    # Fakes without the field default to zero overwrites.
+    plain = _ObservationsHandle([_observation_row("x", 0, 0)])
+    _install_fake_native(monkeypatch, plain)
+    other = TensorProbe("x", [RecordAction()], when="always")
+    other(torch.tensor([1.0]), name="x")
+    assert other.snapshot(synchronize=False).eager_overwrites == ()
+
+
+def test_compare_warns_when_eager_sample_faces_multiple_invocations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sampled_handle = _ObservationsHandle(
+        [_observation_row("x", 0, 0, eager_overwrites=1)]
+    )
+    _install_fake_native(monkeypatch, sampled_handle)
+    sampled_probe = TensorProbe("x", [RecordAction()], when="always")
+    sampled_probe(torch.tensor([1.0]), name="x")
+    sampled = sampled_probe.snapshot(synchronize=False)
+
+    multi_handle = _ObservationsHandle(
+        [
+            _observation_row("x", 0, 0),
+            _observation_row("x", 1, 1),
+        ]
+    )
+    _install_fake_native(monkeypatch, multi_handle)
+    multi_probe = TensorProbe("x", [RecordAction()], when="always")
+    monkeypatch.setattr(
+        multi_probe,
+        "_classify_invocation",
+        lambda tensor, name: (
+            multi_probe._capture_invocation_counts.get(name, 0),
+            True,
+        ),
+    )
+    multi_probe(torch.tensor([1.0]), name="x")
+    multi_probe(torch.tensor([1.0]), name="x")
+    multi = multi_probe.snapshot(synchronize=False)
+
+    reference_comparison = compare_snapshots(sampled, multi)
+    assert reference_comparison.warnings == (
+        "reference observation 'x' is an eager sample overwritten 1 time(s) "
+        "while the candidate recorded multiple invocations; the sample keeps "
+        "only the latest occurrence; collect the reference side with "
+        "TensorRecorder when complete invocation alignment matters",
+    )
+
+    candidate_comparison = compare_snapshots(multi, sampled)
+    assert candidate_comparison.warnings == (
+        "candidate observation 'x' is an eager sample overwritten 1 time(s) "
+        "while the reference recorded multiple invocations; the sample keeps "
+        "only the latest occurrence; collect the candidate side with "
+        "TensorRecorder when complete invocation alignment matters",
+    )
+    # No warning when the multi-invocation side is absent.
+    quiet = compare_snapshots(sampled, sampled_probe.snapshot(synchronize=False))
+    assert quiet.warnings == ()
+
+
 def test_require_native_reports_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_native, "_EXTENSION", None)
     monkeypatch.setattr(
@@ -218,17 +322,14 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     tensor = torch.tensor([3.0])
 
-    assert probe(tensor, name="activation") is tensor
+    assert probe(tensor) is tensor
     assert handle.input is not None
     recorded_tensor, recorded_name, recorded_invocation = handle.input
     assert recorded_tensor is tensor
-    assert (recorded_name, recorded_invocation) == ("activation", 0)
+    assert (recorded_name, recorded_invocation) == ("mid", 0)
 
-    # Eager observations share one native slot; a second distinct name
-    # would silently overwrite the first and is rejected instead.
-    with pytest.raises(RuntimeError, match="one observation name per probe"):
-        probe(tensor)
     assert probe(tensor, name="activation") is tensor
+    assert handle.input[1:] == ("activation", 0)
     snapshot = probe.snapshot(synchronize=False)
     assert snapshot.probe_name == "mid"
     assert snapshot.replay_index == 7
@@ -244,6 +345,44 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
 
     with pytest.raises(RuntimeError, match="closed"):
         probe.snapshot()
+
+
+def test_first_capture_replaces_eager_stride_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeHandle:
+        def enqueue(
+            self,
+            tensor: torch.Tensor,
+            name: str,
+            invocation_index: int,
+        ) -> torch.Tensor:
+            return tensor
+
+        def close(self) -> None:
+            pass
+
+    handle = FakeHandle()
+    _install_fake_native(monkeypatch, handle)
+    capturing = [False]
+    monkeypatch.setattr(
+        collector_module.torch.cuda,
+        "is_current_stream_capturing",
+        lambda: capturing[0],
+    )
+    probe = TensorProbe("metadata", [RecordAction()], when="always")
+    tensor = torch.arange(4)
+
+    probe(tensor, name="x")
+    probe(tensor, name="y")
+    assert set(probe._collector._source_strides) == {("x", 0), ("y", 0)}
+
+    capturing[0] = True
+    probe(tensor, name="captured")
+    assert set(probe._collector._source_strides) == {("captured", 0)}
+
+    capturing[0] = False
+    probe.close(synchronize=False)
 
 
 def test_assert_check_ok_raises_check_error(monkeypatch: pytest.MonkeyPatch) -> None:

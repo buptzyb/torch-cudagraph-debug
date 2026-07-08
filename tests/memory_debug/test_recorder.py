@@ -245,7 +245,9 @@ def test_schema_drift_missing_fields_warn_once_per_field() -> None:
     assert (
         "2 segment(s) missing 'segment_pool_id' (treated as the default pool)" in joined
     )
-    assert "2 segment(s) missing 'requested_size' (treated as the active size)" in joined
+    assert (
+        "2 segment(s) missing 'requested_size' (treated as the active size)" in joined
+    )
     assert "2 block(s) missing 'requested_size' (treated as the block size)" in joined
     # The requested-size fallbacks must keep the summaries consistent.
     observation = run.points[0].observations[0]

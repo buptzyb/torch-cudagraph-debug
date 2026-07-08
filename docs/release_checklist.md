@@ -64,6 +64,7 @@ TCGD_SDIST="$(find dist -maxdepth 1 -name 'torch_cudagraph_debug-*.tar.gz' -prin
 python -m pip install --no-build-isolation --no-deps "${TCGD_SDIST}"
 cd "${TCGD_RUN_ROOT}"
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 \
+  TCGD_FAIL_ON_SKIP=1 \
   python -m pytest -s -q "${TCGD_REPO_ROOT}/tests"
 ```
 
@@ -86,8 +87,11 @@ Tensor coverage must include:
 - bounded eager callback payload ownership, eager non-contiguous source
   release, retired pinned-staging reclamation, and pending-callback close
   protection;
-- eager single-stream ownership, eager-before-capture support, post-capture
-  eager rejection, and close rejection during capture;
+- eager single-stream ownership, one latest-value slot per observation name,
+  first-use positional order, eager-before-capture support, post-capture eager
+  rejection, and close rejection during capture;
+- host-side enqueue rollback for validation, slot reservation, staging, and
+  payload failures; explicit unusable state after partial CUDA submission;
 - 1-based replay advancement, one shared index across repeated invocations,
   queued replay visibility, and retained snapshot indices;
 - callback-free query-time counter transfer, callback-counter staging reuse,

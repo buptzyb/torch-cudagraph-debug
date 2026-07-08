@@ -38,6 +38,7 @@ def main() -> None:
 
     args = parse_args()
     static_x = torch.arange(8, device="cuda", dtype=torch.float32)
+    graph: torch.cuda.CUDAGraph | None = None
     probe = TensorProbe("tensorboard.activation", [RecordAction()])
     writer = SummaryWriter(str(args.logdir))
     try:
@@ -65,6 +66,8 @@ def main() -> None:
         print(f"TensorBoard logs: {args.logdir.resolve()}")
     finally:
         writer.close()
+        if graph is not None:
+            del graph
         probe.close()
 
 

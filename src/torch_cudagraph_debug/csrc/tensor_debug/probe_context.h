@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace torch_cudagraph_debug::tensor_debug {
@@ -67,6 +68,9 @@ struct TensorObservationData {
     size_t nbytes = 0;
     bool valid = false;
     bool captured = false;
+    // Times an eager slot was re-sampled in place; lets consumers tell a
+    // latest-value sample from a complete history.
+    uint64_t eager_overwrites = 0;
 };
 
 struct TensorSlot {
@@ -111,6 +115,7 @@ class ProbeContext {
     pybind11::list observations(std::optional<uint64_t> replay_index);
     pybind11::dict check_status();
     pybind11::dict debug_resource_counts() const;
+    void debug_fail_next_enqueue(const std::string& stage);
     void reclaim_retired_staging();
     void close();
 
@@ -118,6 +123,28 @@ class ProbeContext {
     uint64_t id() const { return id_; }
 
   private:
+    enum class DebugFailureStage {
+        None,
+        HostPreparation,
+        AfterCudaSubmission,
+    };
+
+    struct SlotCommit {
+        bool is_capturing = false;
+        bool inserted_eager_slot = false;
+        bool updating_eager_slot = false;
+        bool claimed_eager_stream = false;
+        bool began_capture = false;
+        uint64_t order = 0;
+        std::string observation_name;
+        void* prior_staging = nullptr;
+        size_t prior_staging_nbytes = 0;
+        size_t prior_retired_staging_size = 0;
+        TensorObservationData prior_observation;
+        std::vector<TensorSlot> prior_eager_slots;
+        std::unordered_map<std::string, uint64_t> prior_eager_slot_by_name;
+    };
+
     void ensure_open() const;
     void validate_tensor(const torch::Tensor& tensor) const;
     void validate_check_actions(
@@ -127,8 +154,20 @@ class ProbeContext {
         uint64_t invocation_index) const;
     uint64_t capture_id_for_stream(cudaStream_t stream) const;
     void validate_eager_stream(cudaStream_t stream);
-    uint64_t peek_slot_index(bool is_capturing, uint64_t capture_id) const;
-    void commit_slot_index(bool is_capturing, uint64_t capture_id);
+    uint64_t peek_slot_index(
+        bool is_capturing,
+        uint64_t capture_id,
+        const std::string& observation_name) const;
+    SlotCommit commit_slot_index(
+        bool is_capturing,
+        uint64_t capture_id,
+        uint64_t order,
+        const std::string& observation_name,
+        cudaStream_t stream);
+    void finalize_slot_commit(SlotCommit& commit) noexcept;
+    bool rollback_slot_commit(SlotCommit& commit) noexcept;
+    void maybe_fail_debug_enqueue(DebugFailureStage stage);
+    void mark_poisoned(const char* operation) noexcept;
     torch::Tensor source_tensor_for_enqueue(const torch::Tensor& tensor) const;
     TensorSlot& ensure_slot(
         const torch::Tensor& tensor,
@@ -173,12 +212,17 @@ class ProbeContext {
     std::vector<TensorSlot> slots_;
     std::atomic<uint64_t> eager_callbacks_in_flight_{0};
 
+    mutable std::mutex enqueue_mutex_;
     mutable std::mutex mutex_;
     bool closed_ = false;
+    bool poisoned_ = false;
+    const char* poison_operation_ = "enqueue";
+    DebugFailureStage debug_failure_stage_ = DebugFailureStage::None;
 
     bool captured_once_ = false;
     uint64_t captured_capture_id_ = 0;
     uint64_t next_slot_index_ = 0;
+    std::unordered_map<std::string, uint64_t> eager_slot_by_name_;
     uint64_t eager_callback_count_ = 0;
     std::optional<cudaStream_t> eager_stream_;
 

@@ -83,13 +83,14 @@ def main() -> None:
     args = parse_args()
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group("nccl")
+    # Coordination is CPU-only so NCCL state does not contaminate allocator snapshots.
+    dist.init_process_group("gloo")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     output_dir = args.output_dir.resolve()
 
     try:
-        output_ok = torch.ones(1, dtype=torch.int32, device="cuda")
+        output_ok = torch.ones(1, dtype=torch.int32)
         if rank == 0:
             if output_dir.exists():
                 output_ok.zero_()
@@ -98,7 +99,7 @@ def main() -> None:
         dist.broadcast(output_ok, src=0)
         if output_ok.item() == 0:
             raise FileExistsError(f"output directory already exists: {output_dir}")
-        dist.barrier(device_ids=[local_rank])
+        dist.barrier()
 
         torch.cuda.memory._record_memory_history(enabled=None)
         torch.cuda.empty_cache()
@@ -114,7 +115,7 @@ def main() -> None:
         gc.collect()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
-        dist.barrier(device_ids=[local_rank])
+        dist.barrier()
         _record_rank_run(
             name="candidate",
             group_id="distributed-example-candidate",
@@ -123,7 +124,7 @@ def main() -> None:
             world_size=world_size,
             use_graph_pool=True,
         )
-        dist.barrier(device_ids=[local_rank])
+        dist.barrier()
 
         if rank == 0 and not args.record_only:
             baseline = MemoryRunGroup.load(output_dir / "baseline")

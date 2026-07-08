@@ -644,8 +644,41 @@ def compare_snapshots(
         candidate=candidate,
         options=selected,
         observation_comparisons=observation_comparisons,
-        warnings=warnings,
+        warnings=warnings + _eager_sampling_warnings(reference, candidate),
     )
+
+
+def _eager_sampling_warnings(
+    reference: TensorProbeSnapshot,
+    candidate: TensorProbeSnapshot,
+) -> tuple[str, ...]:
+    """Flag eager samples aligned against multi-invocation observations.
+
+    An eager slot keeps only the latest occurrence of its name. When the
+    other side recorded several invocations of that name, the aligned
+    ``(name, 0)`` pair may pair non-corresponding occurrences.
+    """
+
+    messages = []
+    for sampled, multi, sampled_role, multi_role in (
+        (reference, candidate, "reference", "candidate"),
+        (candidate, reference, "candidate", "reference"),
+    ):
+        counts = dict(sampled.eager_overwrites)
+        if not counts:
+            continue
+        multi_invocation_names = {
+            item.name for item in multi.observations if item.invocation_index > 0
+        }
+        for name in sorted(set(counts) & multi_invocation_names):
+            messages.append(
+                f"{sampled_role} observation {name!r} is an eager sample "
+                f"overwritten {counts[name]} time(s) while the {multi_role} "
+                "recorded multiple invocations; the sample keeps only the "
+                f"latest occurrence; collect the {sampled_role} side with "
+                "TensorRecorder when complete invocation alignment matters"
+            )
+    return tuple(messages)
 
 
 def compare_points(

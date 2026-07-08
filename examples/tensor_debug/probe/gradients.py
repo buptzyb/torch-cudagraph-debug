@@ -57,6 +57,7 @@ def main() -> None:
     )
     assert weight_hook is not None
 
+    graph: torch.cuda.CUDAGraph | None = None
     capture_stream = torch.cuda.Stream()
     capture_stream.wait_stream(torch.cuda.current_stream())
     try:
@@ -94,6 +95,8 @@ def main() -> None:
                 f"shape={observation.shape}"
             )
     finally:
+        if graph is not None:
+            del graph
         weight_hook.remove()
         for probe in probes.values():
             probe.close()

@@ -183,6 +183,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             "_debug_resource_counts",
             &torch_cudagraph_debug::tensor_debug::ProbeContext::debug_resource_counts)
         .def(
+            "_debug_fail_next_enqueue",
+            &torch_cudagraph_debug::tensor_debug::ProbeContext::debug_fail_next_enqueue,
+            py::arg("stage"))
+        .def(
             "_reclaim_retired_staging",
             &torch_cudagraph_debug::tensor_debug::ProbeContext::reclaim_retired_staging)
         .def("close", &torch_cudagraph_debug::tensor_debug::ProbeContext::close);

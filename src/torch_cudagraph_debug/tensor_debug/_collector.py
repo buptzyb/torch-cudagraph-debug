@@ -35,6 +35,7 @@ class _CollectedTensor:
     stride: tuple[int, ...]
     dtype: torch.dtype
     source_device: str
+    eager_overwrites: int = 0
 
 
 def _create_replay_index(device: DeviceLike | None) -> torch.Tensor:
@@ -155,8 +156,8 @@ class _TensorCollector:
         self.non_contiguous = validate_non_contiguous_policy(non_contiguous)
         self.when = validate_probe_when(when)
         self._closed = False
-        self._eager_name: str | None = None
         self._source_strides: dict[tuple[str, int], tuple[int, ...]] = {}
+        self._captured_once = False
         self._actions = tuple(actions)
         self._enabled_actions = tuple(
             action for action in self._actions if bool(action.enabled)
@@ -211,19 +212,15 @@ class _TensorCollector:
         if self._handle is None:
             return tensor
         assert self._device is not None
-        if self.when == "always" and not _is_capturing_on_device(self._device):
-            # Eager observations share one native slot; a second distinct
-            # name would silently overwrite the first, so reject it.
-            if self._eager_name is not None and self._eager_name != name:
-                raise RuntimeError(
-                    f"eager tensor probe {self.name!r} already records "
-                    f"observation {self._eager_name!r}; eager mode keeps one "
-                    "observation name per probe"
-                )
-            result = self._handle.enqueue(tensor, name, invocation_index)
-            self._eager_name = name
-        else:
-            result = self._handle.enqueue(tensor, name, invocation_index)
+        capturing = _is_capturing_on_device(self._device)
+        result = self._handle.enqueue(tensor, name, invocation_index)
+        if self.when == "capture" and not capturing:
+            return result
+        if capturing and not self._captured_once:
+            # Native capture replaces the eager name layout. Mirror that
+            # transition so stale eager stride metadata does not survive.
+            self._source_strides.clear()
+            self._captured_once = True
         # Record stride bookkeeping only for enqueues the native layer
         # accepted; a rejected call must not leave a stale entry behind.
         self._source_strides[(name, invocation_index)] = tuple(tensor.stride())
@@ -296,6 +293,10 @@ class _TensorCollector:
                 item["invocation_index"],
                 f"observation {index} invocation_index",
             )
+            eager_overwrites = _native_nonnegative_int(
+                item.get("eager_overwrites", 0),
+                f"observation {index} eager_overwrites",
+            )
             raw_shape = item["shape"]
             if isinstance(raw_shape, (str, bytes)) or not isinstance(
                 raw_shape, Sequence
@@ -323,6 +324,7 @@ class _TensorCollector:
                     stride=self._source_strides[(name, invocation_index)],
                     dtype=tensor.dtype,
                     source_device=source_device,
+                    eager_overwrites=eager_overwrites,
                 )
             )
         return tuple(output)

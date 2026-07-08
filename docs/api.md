@@ -157,8 +157,32 @@ calls in that capture create globally ordered slots. Observation identity is
 each name; `order` preserves capture-call order. Reusing the
 probe in another capture is an error. The GPU counter advances once per graph
 replay, not once per invocation, so all slots in one replay share a 1-based
-replay index. Eager `when="always"` calls do not advance the counter and use
-index 0.
+replay index. Eager `when="always"` calls do not advance the counter and
+report replay index 0. Eager observations own one slot per observation name:
+a repeated name samples in place (latest value) with `invocation_index=0`,
+while each new name appends a slot. Positional `CheckAction` entries bind
+eager slots in first-use name order. Observation names are a fixed
+vocabulary — generating a fresh name per iteration grows a slot each time.
+Validation and host-side slot preparation failures do not consume a
+name's first-use order; a failed replacement also preserves the previous
+eager value. The probe's one capture then establishes its own slot
+layout; eager observations recorded before the capture are dropped. Their
+staging is retired immediately and reclaimed only after previously queued eager
+work completes.
+
+The same-name repeat therefore means two different things by mode, and the
+difference is disclosed rather than silent: within one capture it creates a
+new invocation (a distinct position in that execution), while an eager repeat
+re-samples in place. Every in-place re-sample increments a per-name counter
+exposed as `TensorProbeSnapshot.eager_overwrites` (pairs) and
+`eager_overwrite_counts` (mapping); snapshot comparisons emit a warning when
+an eager sample with a nonzero count is aligned against multi-invocation
+observations from a capture, because the sample keeps only the latest
+occurrence. The warning identifies which side requires complete collection;
+record that side with `TensorRecorder` when invocation alignment matters.
+Overwrite metadata is valid only on an eager snapshot (`replay_index=0`);
+names are unique, and each entry must refer to that name's sole invocation-0
+observation in the snapshot.
 
 #### Methods
 
@@ -167,7 +191,7 @@ probe(tensor: torch.Tensor, *, name: str | None = None) -> torch.Tensor
 probe.replay_index -> torch.Tensor | None
 probe.snapshot(
     *,
-    synchronize: bool | torch.cuda.Stream | torch.device = None,
+    synchronize: bool | torch.cuda.Stream | torch.device | None = None,
 ) -> TensorProbeSnapshot
 probe.compare(
     reference: TensorProbeSnapshot,
@@ -177,11 +201,11 @@ probe.compare(
 ) -> TensorSnapshotComparison
 probe.check_status(
     *,
-    synchronize: bool | torch.cuda.Stream | torch.device = None,
+    synchronize: bool | torch.cuda.Stream | torch.device | None = None,
 ) -> TensorCheckStatus
 probe.assert_check_ok(
     *,
-    synchronize: bool | torch.cuda.Stream | torch.device = None,
+    synchronize: bool | torch.cuda.Stream | torch.device | None = None,
 ) -> None
 probe.watch_grad(
     tensor: torch.Tensor,
@@ -191,7 +215,7 @@ probe.watch_grad(
 ) -> torch.utils.hooks.RemovableHandle | None
 probe.close(
     *,
-    synchronize: bool | torch.cuda.Stream | torch.device = None,
+    synchronize: bool | torch.cuda.Stream | torch.device | None = None,
 ) -> None
 ```
 
@@ -207,17 +231,21 @@ risk. Passing a `torch.cuda.Stream` synchronizes only that stream and is the
 recommended path when the replay stream is known. Passing a `torch.device`
 explicitly requests device-wide synchronization. `False` skips explicit
 synchronization and requires caller-owned ordering. A stream or device must
-match the probe device. Strings, integer device indices, `None`, and CPU
-devices are rejected. Synchronization-enabled queries are invalid during CUDA
-Graph capture; for an enabled probe, `close()` is invalid during capture for
-every synchronization setting.
+match the probe device. Omitting a method-level override or passing `None`
+inherits the probe's configured policy. Explicit
+strings, integer device indices, and CPU devices are rejected.
+Synchronization-enabled queries are invalid during CUDA Graph capture; for an
+enabled probe, `close()` is invalid during capture for every synchronization
+setting.
 
-`snapshot()` returns one aggregate `TensorProbeSnapshot` containing the latest
-value of every capture-time slot. Capture installs copy nodes but
-does not execute them. A Record-only probe reads its GPU counter at this query
-point. When Print or Check is also enabled, the query reuses their existing
-pinned-host counter staging instead of issuing another counter transfer. It
-raises `TensorDebugError` when no `RecordAction` is enabled or no slot has recorded a value.
+`snapshot()` returns one aggregate `TensorProbeSnapshot` containing the
+latest value in the probe's current slot layout: one slot per eager observation
+name before capture, or one slot per capture-time invocation after capture.
+Capture installs copy nodes but does not execute them. A Record-only probe reads
+its GPU counter at this query point. When Print or Check is also enabled, the
+query reuses their existing pinned-host counter staging instead of issuing
+another counter transfer. It raises `TensorDebugError` when no `RecordAction`
+is enabled or no slot has recorded a value.
 
 `compare()` accepts two snapshots owned by this probe in chronological replay
 order and returns the same result type as top-level `compare_snapshots()`.
@@ -262,9 +290,13 @@ probe: after capture, closing asserts that no replay is in flight and that no
 graph containing the probe can replay again. A current or later replay would
 access freed staging, replay-counter, and callback resources. Passing
 `synchronize=False` additionally asserts that required synchronization already
-occurred. `TensorProbe` is also a context manager whose exit
-uses the correctness-first default close; use that form only when every
-replay occurs inside the context.
+occurred. Host-side enqueue preparation is transactional: a rejected call does
+not consume its slot or capture order. If CUDA command submission itself fails
+after the transaction is published, the probe becomes unusable for further
+collection or queries; destroy any affected graph, close the probe, and create a
+new one. `TensorProbe` is also a context manager whose exit uses the
+correctness-first default close; use that form only when every replay occurs
+inside the context.
 
 ### Actions
 
@@ -398,7 +430,7 @@ recorder.finish() -> TensorRun
 recorder.result -> TensorRun
 recorder.close(
     *,
-    synchronize: bool | torch.cuda.Stream | torch.device = None,
+    synchronize: bool | torch.cuda.Stream | torch.device | None = None,
 ) -> None
 ```
 
@@ -949,9 +981,8 @@ allocator event history. Missing event history raises
 `MemoryHistoryBoundaryError`; and a previous boundary overwritten by the bounded
 history ring raises `MemoryHistoryTruncatedError`. Invalid boundary order or
 complete history that cannot be reconciled with allocator state raises
-`MemoryReconciliationError` unconditionally. Display
-limits
-affect only text and HTML, never structured result tuples, JSON, or CSV.
+`MemoryReconciliationError` unconditionally. Display limits affect only text
+and HTML, never structured result tuples, JSON, or CSV.
 
 ```python
 MemoryEvidenceStatus(requested: bool, available: bool, complete: bool)
@@ -985,8 +1016,9 @@ run.lifetimes(
 The default selection is `all()`. `active_at(point)` retains generations
 not allocator-reusable at that point. `born_between(start, end)` retains
 generations allocated in `(start, end]`. `through` cannot precede the
-selection anchor or born-between end. Complete event history preserves transient generations that are active
-in neither endpoint snapshot; incomplete history is rejected.
+selection anchor or born-between end. Complete event history preserves
+transient generations that are active in neither endpoint snapshot; incomplete
+history is rejected.
 
 An allocation generation is tracked by device, block address, size, requested
 size, pool, and stream. Its state transitions are:
@@ -1005,7 +1037,6 @@ Stream synchronization makes the dependency complete, but allocator bookkeeping
 may remain `active_awaiting_free` until a later allocator operation polls
 pending events and emits `free_completed`. A snapshot does not itself force that
 poll.
-
 
 Instances are grouped into cohorts by device, pool, and the complete normalized
 allocation stack. `stack_depth` changes display only. Allocations without stack
@@ -1045,7 +1076,8 @@ delta. Unchanged rows are retained by default.
 
 The default timeline is manifest-only and does not read allocator-state files;
 `timeline.point_comparisons` is empty. Requesting stack or event attribution
-streams each point once and stores attributed same-run point comparisons.
+loads each required point once and stores attributed same-run point
+comparisons.
 
 With `lifetimes=True`, one full-run cohort report is attached as
 `timeline.allocation_lifetimes`. Adjacent comparisons do not repeat the same
@@ -1071,8 +1103,8 @@ matching is conservative:
 2. Private pools match only through a one-to-one `pool_mapping`; every mapped
    reference and candidate must exist at the selected points.
 3. Identical raw private IDs are still unmatched without that mapping.
-4. Streams are never matched across runs; every device/pool/stream observation is
-   reference-only or candidate-only.
+4. Stream IDs are process-local CUDA handles with no stable cross-run identity;
+   every device/pool/stream observation is reference-only or candidate-only.
 5. Address lifecycle is disabled.
 6. `events=True` is rejected.
 7. `lifetimes=True` is rejected.
@@ -1143,9 +1175,10 @@ compare_run_group_phases(
 non-null unique ranks, one run name, one ordered point-label sequence, and no
 conflicting non-null group IDs or world sizes. Declared-but-missing ranks,
 missing identity fields, incomplete bundles, runtime provenance differences,
-and user metadata differences are warnings. The default does not retain decompressed allocator-state or event payloads across
-ranks or points; set `cache_snapshots=True` only for workloads that repeatedly
-inspect the same payloads.
+and user metadata differences are warnings. The default does not retain
+decompressed allocator-state or event payloads across ranks or points; set
+`cache_snapshots=True` only for workloads that repeatedly inspect the same
+payloads.
 
 `MemoryRunGroupSummary` emits per-rank point/scope states plus min, max, spread,
 and worst rank. `MemoryRunGroupPhaseComparison` pairs common ranks and

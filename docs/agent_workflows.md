@@ -33,8 +33,8 @@ Codex reads the canonical skill from
 `.agents/skills/tcgd-case-study/SKILL.md` and the custom-agent definition from
 `.codex/agents/tcgd-debugger.toml`.
 
-Codex has no plugin marketplace. For cross-project use, link the canonical
-assets into the user-level Codex configuration:
+For direct cross-project Codex use without installing a plugin, link the
+canonical skill into the user-level Codex configuration:
 
 ```bash
 ln -s /path/to/torch-cudagraph-debug/.agents/skills/tcgd-case-study \

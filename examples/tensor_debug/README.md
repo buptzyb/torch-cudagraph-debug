@@ -17,17 +17,20 @@ Run the Probe examples in this order:
 3. `replay_comparison.py` compares two ordered snapshots owned by one probe.
 4. `actions.py` combines Record, Print, and Check on a changing static input.
 5. `gradients.py` records activation and parameter gradients.
-6. `capture_modes.py` covers eager/capture policy and non-contiguous tensors.
+6. `capture_modes.py` covers eager per-name latest-value slots, capture policy,
+   and non-contiguous tensors.
 7. `module_integration.py` places a probe at a real module boundary.
 
-The normal lifecycle remains visible in every example: create before capture,
-capture, replay, query with the replay stream, stop replaying, then close.
+The normal lifecycle remains visible in every example: create the probe before
+capture, capture, replay, query with the replay stream, destroy the graph so it
+cannot replay again, then close the probe.
 `PrintAction` and `CheckAction` use CUDA host callbacks and are demonstrated for
 targeted diagnosis; `RecordAction` remains the recommended default.
 
 `actions.py` intentionally triggers and catches one `TensorCheckError`.
-`capture_modes.py` intentionally catches the default non-contiguous-input error.
-Both scripts exit successfully after verifying those diagnostics.
+`capture_modes.py` verifies eager multi-name sampling and intentionally catches
+the default non-contiguous-input error. Both scripts exit successfully after
+verifying those behaviors.
 
 ## Recorder And Run Workflow
 

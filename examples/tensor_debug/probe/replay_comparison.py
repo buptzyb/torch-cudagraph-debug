@@ -15,6 +15,7 @@ def main() -> None:
         raise RuntimeError("this example requires CUDA")
 
     static_x = torch.arange(4, device="cuda", dtype=torch.float32)
+    graph: torch.cuda.CUDAGraph | None = None
     probe = TensorProbe("replay.hidden", [RecordAction()])
     try:
         graph = torch.cuda.CUDAGraph()
@@ -43,6 +44,8 @@ def main() -> None:
         print(comparison.to_text(include_unchanged=False))
         assert output is not None
     finally:
+        if graph is not None:
+            del graph
         probe.close()
 
 

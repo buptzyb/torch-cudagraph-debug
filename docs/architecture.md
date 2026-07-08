@@ -142,8 +142,15 @@ Closing an enabled collector is invalid during capture and is valid only after
 every graph that references the collector can no longer replay.
 Captured callback payload addresses remain stable for the graph lifetime;
 eager callback payloads are destroyed when they fire. `when="always"` eager
-collection is single-stream, and eager use is rejected after that collector has
-participated in capture.
+collection is single-stream. Each eager observation name owns one stable slot,
+and repeated samples update that slot in place. Host-side slot preparation uses
+a two-phase transaction: failures before CUDA submission restore the prior slot
+layout and capture order. The first successful capture replaces the eager name
+layout with the graph's capture-call layout. Pre-capture staging becomes retired
+state and is reclaimed only after its eager copy or callback completion is
+observed. A failure after CUDA submission begins makes the collector unusable
+for further collection or queries, while preserving `close()` for cleanup.
+Eager use is rejected after the collector has participated in capture.
 
 Memory collectors have no persistent native graph resources to close. Probe and
 Recorder semantics are expressed by immutable snapshots and terminal runs

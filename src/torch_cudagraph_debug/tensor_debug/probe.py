@@ -167,6 +167,11 @@ class TensorProbe:
             replay_index=next(iter(replay_indices)),
             timestamp=time.time(),
             observations=tuple(observations),
+            eager_overwrites=tuple(
+                (item.name, item.eager_overwrites)
+                for item in collected
+                if item.eager_overwrites > 0
+            ),
         )
         self._next_snapshot_index += 1
         return snapshot

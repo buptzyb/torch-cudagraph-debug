@@ -61,12 +61,30 @@ class TensorProbeSnapshot:
     replay_index: int
     timestamp: float
     observations: tuple[TensorObservation, ...]
+    eager_overwrites: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.probe_id:
             raise ValueError("probe_id must be non-empty")
         if not self.probe_name:
             raise ValueError("probe_name must be non-empty")
+        overwrite_names: list[str] = []
+        for entry in self.eager_overwrites:
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 2
+                or not isinstance(entry[0], str)
+                or not entry[0]
+                or type(entry[1]) is not int
+                or entry[1] < 1
+            ):
+                raise ValueError(
+                    "eager_overwrites entries must be (name, positive count) pairs"
+                )
+            name = entry[0]
+            if name in overwrite_names:
+                raise ValueError("eager_overwrites observation names must be unique")
+            overwrite_names.append(name)
         if type(self.snapshot_index) is not int or self.snapshot_index < 0:
             raise ValueError("snapshot_index must be a non-negative integer")
         if type(self.replay_index) is not int or self.replay_index < 0:
@@ -78,6 +96,30 @@ class TensorProbeSnapshot:
         ):
             raise ValueError("timestamp must be finite")
         _validate_observation_sequence(self.observations, owner="tensor snapshot")
+
+        if overwrite_names and self.replay_index != 0:
+            raise ValueError(
+                "eager_overwrites require an eager snapshot with replay_index 0"
+            )
+        for name in overwrite_names:
+            matching_invocations = [
+                item.invocation_index for item in self.observations if item.name == name
+            ]
+            if matching_invocations != [0]:
+                raise ValueError(
+                    "eager_overwrites names must reference exactly one "
+                    "invocation-0 observation"
+                )
+
+    @cached_property
+    def eager_overwrite_counts(self) -> Mapping[str, int]:
+        """Times each eager observation was re-sampled in place.
+
+        A nonzero count means intermediate values were superseded before this
+        snapshot; the snapshot holds only the latest sample of that name.
+        """
+
+        return MappingProxyType(dict(self.eager_overwrites))
 
     @cached_property
     def by_key(self) -> Mapping[TensorObservationKey, TensorObservation]:

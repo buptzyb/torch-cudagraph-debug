@@ -1158,9 +1158,7 @@ def test_transient_in_cross_era_address_range_reports_unknown_pool() -> None:
     assert transient.pool_id == ("unknown",)
     # The surviving instance is refined from its snapshot block, which is
     # ground truth for the new era.
-    survivor = next(
-        cohort for cohort in report.cohorts if "new.py" in cohort.stack_key
-    )
+    survivor = next(cohort for cohort in report.cohorts if "new.py" in cohort.stack_key)
     assert survivor.pool_id == (0, 0)
 
 

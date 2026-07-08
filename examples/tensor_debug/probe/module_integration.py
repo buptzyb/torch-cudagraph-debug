@@ -49,6 +49,7 @@ def main() -> None:
             block(static_input)
         expected_hidden = block.debug_hidden(static_input).cpu()
 
+    graph: torch.cuda.CUDAGraph | None = None
     probe = TensorProbe(
         "block.hidden_after_fc1",
         [
@@ -82,6 +83,9 @@ def main() -> None:
             f"recorded {snapshot.probe_name} with shape {snapshot.observation().shape}"
         )
     finally:
+        if graph is not None:
+            del graph
+        block.hidden_probe = None
         probe.close()
 
 

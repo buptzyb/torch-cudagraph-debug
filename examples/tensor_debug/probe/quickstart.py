@@ -17,6 +17,7 @@ def main() -> None:
     static_x = torch.arange(8, device="cuda", dtype=torch.float32)
     first_expected = torch.arange(8, dtype=torch.float32) * 2
     expected = (first_expected, torch.relu(first_expected - 5))
+    graph: torch.cuda.CUDAGraph | None = None
     probe = TensorProbe("quickstart.hidden", [RecordAction()])
     try:
         graph = torch.cuda.CUDAGraph()
@@ -49,6 +50,8 @@ def main() -> None:
         assert second_hidden is second_source
         torch.testing.assert_close(output.cpu(), expected[1].square())
     finally:
+        if graph is not None:
+            del graph
         probe.close()
 
 

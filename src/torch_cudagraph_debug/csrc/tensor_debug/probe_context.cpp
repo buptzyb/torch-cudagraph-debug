@@ -30,6 +30,18 @@ void unregister_context(uint64_t id) {
     registry.erase(id);
 }
 
+void free_host_capture_relaxed_noexcept(void* ptr) noexcept {
+    if (ptr == nullptr) {
+        return;
+    }
+    cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
+    if (cudaThreadExchangeStreamCaptureMode(&mode) != cudaSuccess) {
+        return;
+    }
+    cudaFreeHost(ptr);
+    cudaThreadExchangeStreamCaptureMode(&mode);
+}
+
 int64_t tensor_nbytes(const torch::Tensor& tensor) {
     return tensor.numel() * tensor.element_size();
 }
@@ -139,6 +151,7 @@ torch::Tensor ProbeContext::enqueue(
     const torch::Tensor& tensor,
     const std::string& observation_name,
     uint64_t invocation_index) {
+    std::lock_guard<std::mutex> enqueue_guard(enqueue_mutex_);
     ensure_open();
     if (observation_name.empty()) {
         throw std::runtime_error("observation name must be non-empty");
@@ -166,7 +179,8 @@ torch::Tensor ProbeContext::enqueue(
         validate_eager_stream(stream);
     }
     const uint64_t capture_id = is_capturing ? capture_id_for_stream(stream) : 0;
-    const uint64_t order = peek_slot_index(is_capturing, capture_id);
+    const uint64_t order =
+        peek_slot_index(is_capturing, capture_id, observation_name);
 
     validate_tensor(tensor);
     validate_check_actions(
@@ -174,92 +188,145 @@ torch::Tensor ProbeContext::enqueue(
         order,
         observation_name,
         invocation_index);
-    // Consume the slot order and first-capture registration only after
-    // validation passed: a rejected call must not burn the order its retry
-    // needs, mis-bind positional expectations, or lose the order-0 replay
-    // counter capture.
-    commit_slot_index(is_capturing, capture_id);
 
-    torch::Tensor source = source_tensor_for_enqueue(tensor);
+    // Reserve the slot and prepare all fallible host state before any tool
+    // operation can submit work to the CUDA stream. In particular, a
+    // non-contiguous tensor's contiguous() copy belongs to the CUDA phase,
+    // not to this recoverable host transaction.
     const size_t nbytes = static_cast<size_t>(tensor_nbytes(tensor));
-
-    TensorSlot& slot =
-        ensure_slot(
+    SlotCommit slot_commit = commit_slot_index(
+        is_capturing,
+        capture_id,
+        order,
+        observation_name,
+        stream);
+    TensorSlot* slot_ptr = nullptr;
+    std::unique_ptr<CallbackPayload> payload;
+    try {
+        slot_ptr = &ensure_slot(
             tensor,
             nbytes,
             order,
             observation_name,
             invocation_index,
             is_capturing);
-    if (!tensor.is_contiguous() && is_capturing) {
-        slot.source_owners.push_back(source);
-    } else if (!tensor.is_contiguous()) {
-        c10::cuda::CUDACachingAllocator::recordStream(
-            source.storage().data_ptr(),
-            current_stream);
-    }
-
-    if (is_capturing && order == 0) {
-        launch_increment_replay_counter(
-            replay_index_.data_ptr<int64_t>(), stream);
+        if (!tensor.is_contiguous() && is_capturing) {
+            slot_ptr->source_owners.reserve(
+                slot_ptr->source_owners.size() + 1);
+        }
         if (has_callback_actions_) {
-            TCGD_CUDA_CHECK(cudaMemcpyAsync(
-                replay_index_staging_,
-                replay_index_.data_ptr<int64_t>(),
-                sizeof(*replay_index_staging_),
-                cudaMemcpyDeviceToHost,
-                stream));
-            TCGD_CUDA_CHECK(cudaEventRecord(replay_index_ready_event_, stream));
-        }
-    }
-
-    if (nbytes > 0) {
-        TCGD_CUDA_CHECK(cudaMemcpyAsync(
-            slot.staging,
-            source.data_ptr(),
-            nbytes,
-            cudaMemcpyDeviceToHost,
-            stream));
-    }
-    if (has_callback_actions_) {
-        if (is_capturing && order > 0) {
-            TCGD_CUDA_CHECK(cudaStreamWaitEvent(
-                stream, replay_index_ready_event_, 0));
-        }
-        std::unique_ptr<CallbackPayload> payload = make_payload(
-            tensor,
-            slot.staging,
-            nbytes,
-            order,
-            observation_name,
-            invocation_index,
-            is_capturing);
-        if (is_capturing) {
-            CallbackPayload* raw = payload.get();
-            TCGD_CUDA_CHECK(
-                cudaLaunchHostFunc(stream, &ProbeContext::host_callback, raw));
-            captured_payloads_.push_back(std::move(payload));
-        } else {
-            CallbackPayload* raw = payload.release();
-            eager_callbacks_in_flight_.fetch_add(1, std::memory_order_release);
-            const cudaError_t status =
-                cudaLaunchHostFunc(stream, &ProbeContext::host_callback, raw);
-            if (status != cudaSuccess) {
-                eager_callbacks_in_flight_.fetch_sub(1, std::memory_order_release);
-                payload.reset(raw);
-                TCGD_CUDA_CHECK(status);
+            payload = make_payload(
+                tensor,
+                slot_ptr->staging,
+                nbytes,
+                order,
+                observation_name,
+                invocation_index,
+                is_capturing);
+            if (is_capturing) {
+                captured_payloads_.reserve(captured_payloads_.size() + 1);
             }
         }
+        maybe_fail_debug_enqueue(DebugFailureStage::HostPreparation);
+    } catch (...) {
+        if (!rollback_slot_commit(slot_commit)) {
+            mark_poisoned("host-side enqueue preparation");
+        }
+        throw;
     }
-    if (!is_capturing && eager_work_event_ != nullptr) {
-        // Marks completion of every eager copy and callback issued so far on
-        // this stream; close and staging reclaim query it before freeing.
-        TCGD_CUDA_CHECK(cudaEventRecord(eager_work_event_, stream));
+    TensorSlot& slot = *slot_ptr;
+    finalize_slot_commit(slot_commit);
+
+    bool cuda_command_submitted = false;
+    auto note_cuda_submission = [&]() {
+        if (!cuda_command_submitted) {
+            cuda_command_submitted = true;
+            maybe_fail_debug_enqueue(DebugFailureStage::AfterCudaSubmission);
+        }
+    };
+    try {
+        torch::Tensor source = source_tensor_for_enqueue(tensor);
+        if (!tensor.is_contiguous()) {
+            if (is_capturing) {
+                // Capacity was reserved during host preparation. Retaining the
+                // temporary keeps the captured contiguous-copy destination
+                // alive for the graph lifetime.
+                slot.source_owners.push_back(source);
+            } else {
+                c10::cuda::CUDACachingAllocator::recordStream(
+                    source.storage().data_ptr(),
+                    current_stream);
+            }
+            note_cuda_submission();
+        }
+
+        if (is_capturing && order == 0) {
+            launch_increment_replay_counter(
+                replay_index_.data_ptr<int64_t>(), stream);
+            note_cuda_submission();
+            if (has_callback_actions_) {
+                TCGD_CUDA_CHECK(cudaMemcpyAsync(
+                    replay_index_staging_,
+                    replay_index_.data_ptr<int64_t>(),
+                    sizeof(*replay_index_staging_),
+                    cudaMemcpyDeviceToHost,
+                    stream));
+                TCGD_CUDA_CHECK(cudaEventRecord(replay_index_ready_event_, stream));
+            }
+        }
+
+        if (nbytes > 0) {
+            TCGD_CUDA_CHECK(cudaMemcpyAsync(
+                slot.staging,
+                source.data_ptr(),
+                nbytes,
+                cudaMemcpyDeviceToHost,
+                stream));
+            if (is_capturing) {
+                note_cuda_submission();
+            }
+        }
+        if (!is_capturing && eager_work_event_ != nullptr) {
+            // The event witnesses every eager D2H copy issued so far. Host
+            // callbacks have separate in-flight accounting.
+            TCGD_CUDA_CHECK(cudaEventRecord(eager_work_event_, stream));
+            note_cuda_submission();
+        }
+        if (has_callback_actions_) {
+            if (is_capturing && order > 0) {
+                TCGD_CUDA_CHECK(cudaStreamWaitEvent(
+                    stream, replay_index_ready_event_, 0));
+                note_cuda_submission();
+            }
+            if (is_capturing) {
+                CallbackPayload* raw = payload.get();
+                TCGD_CUDA_CHECK(
+                    cudaLaunchHostFunc(stream, &ProbeContext::host_callback, raw));
+                note_cuda_submission();
+                captured_payloads_.push_back(std::move(payload));
+            } else {
+                CallbackPayload* raw = payload.release();
+                eager_callbacks_in_flight_.fetch_add(1, std::memory_order_release);
+                const cudaError_t status =
+                    cudaLaunchHostFunc(stream, &ProbeContext::host_callback, raw);
+                if (status != cudaSuccess) {
+                    eager_callbacks_in_flight_.fetch_sub(1, std::memory_order_release);
+                    payload.reset(raw);
+                    TCGD_CUDA_CHECK(status);
+                }
+                note_cuda_submission();
+            }
+        }
+    } catch (...) {
+        mark_poisoned("CUDA enqueue");
+        throw;
     }
     return tensor;
 }
 
 pybind11::list ProbeContext::observations(std::optional<uint64_t> replay_index) {
+    std::lock_guard<std::mutex> enqueue_guard(enqueue_mutex_);
+    ensure_open();
     uint64_t resolved_replay_index = 0;
     if (replay_index.has_value()) {
         resolved_replay_index = *replay_index;
@@ -301,6 +368,7 @@ pybind11::list ProbeContext::observations(std::optional<uint64_t> replay_index) 
         item["invocation_index"] = observation.invocation_index;
         item["shape"] = observation.shape;
         item["device"] = observation.device;
+        item["eager_overwrites"] = observation.eager_overwrites;
         item["tensor"] = observation_to_tensor(observation);
         result.append(item);
     }
@@ -308,6 +376,8 @@ pybind11::list ProbeContext::observations(std::optional<uint64_t> replay_index) 
 }
 
 pybind11::dict ProbeContext::check_status() {
+    std::lock_guard<std::mutex> enqueue_guard(enqueue_mutex_);
+    ensure_open();
     std::lock_guard<std::mutex> guard(mutex_);
     pybind11::dict result;
     result["ok"] = !check_failed_;
@@ -324,6 +394,7 @@ pybind11::dict ProbeContext::check_status() {
 }
 
 pybind11::dict ProbeContext::debug_resource_counts() const {
+    std::lock_guard<std::mutex> enqueue_guard(enqueue_mutex_);
     std::lock_guard<std::mutex> guard(mutex_);
     size_t source_owner_count = 0;
     for (const TensorSlot& slot : slots_) {
@@ -339,15 +410,40 @@ pybind11::dict ProbeContext::debug_resource_counts() const {
     return result;
 }
 
+void ProbeContext::debug_fail_next_enqueue(const std::string& stage) {
+    std::lock_guard<std::mutex> enqueue_guard(enqueue_mutex_);
+    ensure_open();
+
+    DebugFailureStage selected;
+    if (stage == "host_preparation") {
+        selected = DebugFailureStage::HostPreparation;
+    } else if (stage == "after_cuda_submission") {
+        selected = DebugFailureStage::AfterCudaSubmission;
+    } else {
+        throw std::invalid_argument(
+            "debug enqueue failure stage must be host_preparation or "
+            "after_cuda_submission");
+    }
+
+    std::lock_guard<std::mutex> guard(mutex_);
+    debug_failure_stage_ = selected;
+}
+
 void ProbeContext::reclaim_retired_staging() {
+    std::lock_guard<std::mutex> enqueue_guard(enqueue_mutex_);
     // Reclaim is opportunistic: defer whenever a pending eager callback or
     // an unfinished eager copy could still target a retired buffer.
     if (eager_callbacks_in_flight_.load(std::memory_order_acquire) != 0) {
         return;
     }
-    if (eager_work_event_ != nullptr &&
-        cudaEventQuery(eager_work_event_) == cudaErrorNotReady) {
-        return;
+    if (eager_work_event_ != nullptr) {
+        const cudaError_t eager_state = cudaEventQuery(eager_work_event_);
+        if (eager_state == cudaErrorNotReady) {
+            return;
+        }
+        if (eager_state != cudaSuccess) {
+            TCGD_CUDA_CHECK(eager_state);
+        }
     }
     std::vector<void*> retired;
     {
@@ -362,6 +458,7 @@ void ProbeContext::reclaim_retired_staging() {
 }
 
 void ProbeContext::close() {
+    std::lock_guard<std::mutex> enqueue_guard(enqueue_mutex_);
     {
         std::lock_guard<std::mutex> guard(mutex_);
         if (closed_) {
@@ -396,6 +493,7 @@ void ProbeContext::close() {
     release_resources_noexcept();
     captured_payloads_.clear();
     slots_.clear();
+    eager_slot_by_name_.clear();
     replay_index_ = torch::Tensor();
     unregister_context(id_);
 }
@@ -516,6 +614,11 @@ void ProbeContext::ensure_open() const {
     if (closed_) {
         throw std::runtime_error("tensor debug probe is closed: " + name_);
     }
+    if (poisoned_) {
+        throw std::runtime_error(
+            "tensor debug probe " + name_ + " is unusable after a failed " +
+            poison_operation_ + "; close it and create a new probe");
+    }
 }
 
 void ProbeContext::validate_tensor(const torch::Tensor& tensor) const {
@@ -604,7 +707,6 @@ void ProbeContext::validate_eager_stream(cudaStream_t stream) {
             "capture are unsupported");
     }
     if (!eager_stream_.has_value()) {
-        eager_stream_ = stream;
         return;
     }
     if (*eager_stream_ != stream) {
@@ -616,11 +718,18 @@ void ProbeContext::validate_eager_stream(cudaStream_t stream) {
 }
 
 uint64_t ProbeContext::peek_slot_index(
-    bool is_capturing, uint64_t capture_id) const {
+    bool is_capturing,
+    uint64_t capture_id,
+    const std::string& observation_name) const {
     std::lock_guard<std::mutex> guard(mutex_);
 
     if (!is_capturing) {
-        return 0;
+        // Eager observations own one slot per name: the same name samples in
+        // place while a new name appends the next slot.
+        const auto it = eager_slot_by_name_.find(observation_name);
+        return it != eager_slot_by_name_.end()
+            ? it->second
+            : static_cast<uint64_t>(slots_.size());
     }
 
     if (captured_once_ && captured_capture_id_ != capture_id) {
@@ -634,19 +743,192 @@ uint64_t ProbeContext::peek_slot_index(
     return captured_once_ ? next_slot_index_ : 0;
 }
 
-void ProbeContext::commit_slot_index(bool is_capturing, uint64_t capture_id) {
+ProbeContext::SlotCommit ProbeContext::commit_slot_index(
+    bool is_capturing,
+    uint64_t capture_id,
+    uint64_t order,
+    const std::string& observation_name,
+    cudaStream_t stream) {
     std::lock_guard<std::mutex> guard(mutex_);
+    SlotCommit commit;
+    commit.is_capturing = is_capturing;
+    commit.order = order;
+    commit.observation_name = observation_name;
 
     if (!is_capturing) {
-        return;
+        const auto existing = eager_slot_by_name_.find(observation_name);
+        if (existing != eager_slot_by_name_.end()) {
+            if (existing->second != order) {
+                throw std::runtime_error(
+                    "eager tensor probe slot mapping changed during enqueue");
+            }
+            const TensorSlot& slot = slots_.at(static_cast<size_t>(order));
+            commit.updating_eager_slot = true;
+            commit.prior_staging = slot.staging;
+            commit.prior_staging_nbytes = slot.staging_nbytes;
+            commit.prior_retired_staging_size = retired_staging_.size();
+            commit.prior_observation = slot.observation;
+        } else {
+            if (order != static_cast<uint64_t>(slots_.size())) {
+                throw std::runtime_error(
+                    "eager tensor probe slot layout changed during enqueue");
+            }
+            const auto [inserted, added] =
+                eager_slot_by_name_.emplace(observation_name, order);
+            if (!added) {
+                throw std::runtime_error("could not reserve eager tensor probe slot");
+            }
+            try {
+                slots_.resize(static_cast<size_t>(order + 1));
+            } catch (...) {
+                eager_slot_by_name_.erase(inserted);
+                throw;
+            }
+            commit.inserted_eager_slot = true;
+        }
+        if (!eager_stream_.has_value()) {
+            eager_stream_ = stream;
+            commit.claimed_eager_stream = true;
+        }
+        return commit;
     }
 
     if (!captured_once_) {
+        // Reserve before changing any state so finalization cannot fail while
+        // transferring the old eager staging to retired ownership.
+        retired_staging_.reserve(retired_staging_.size() + slots_.size());
+        commit.began_capture = true;
+        commit.prior_eager_slots.swap(slots_);
+        commit.prior_eager_slot_by_name.swap(eager_slot_by_name_);
         captured_once_ = true;
         captured_capture_id_ = capture_id;
         next_slot_index_ = 0;
     }
     ++next_slot_index_;
+    return commit;
+}
+
+void ProbeContext::finalize_slot_commit(SlotCommit& commit) noexcept {
+    if (!commit.began_capture) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(mutex_);
+    // Capacity was reserved before the eager layout moved into the commit,
+    // so publishing retirement is non-throwing.
+    for (TensorSlot& slot : commit.prior_eager_slots) {
+        if (slot.staging != nullptr) {
+            retired_staging_.push_back(slot.staging);
+            slot.staging = nullptr;
+            slot.staging_nbytes = 0;
+        }
+        slot.source_owners.clear();
+    }
+    commit.prior_eager_slots.clear();
+    commit.prior_eager_slot_by_name.clear();
+}
+
+bool ProbeContext::rollback_slot_commit(SlotCommit& commit) noexcept {
+    void* staging = nullptr;
+    bool rolled_back = false;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        const size_t order = static_cast<size_t>(commit.order);
+        if (commit.is_capturing) {
+            if (next_slot_index_ != commit.order + 1 ||
+                slots_.size() < order ||
+                slots_.size() > order + 1) {
+                return false;
+            }
+            if (slots_.size() == order + 1) {
+                TensorSlot& slot = slots_.back();
+                staging = slot.staging;
+                slot.staging = nullptr;
+                slot.staging_nbytes = 0;
+                slot.source_owners.clear();
+                slots_.pop_back();
+            }
+            --next_slot_index_;
+            if (commit.began_capture) {
+                if (!slots_.empty()) {
+                    return false;
+                }
+                slots_.swap(commit.prior_eager_slots);
+                eager_slot_by_name_.swap(commit.prior_eager_slot_by_name);
+                captured_once_ = false;
+                captured_capture_id_ = 0;
+            }
+            rolled_back = true;
+        } else if (commit.inserted_eager_slot) {
+            const auto mapping = eager_slot_by_name_.find(commit.observation_name);
+            if (mapping == eager_slot_by_name_.end() ||
+                mapping->second != commit.order ||
+                slots_.size() != order + 1) {
+                return false;
+            }
+            TensorSlot& slot = slots_.back();
+            staging = slot.staging;
+            slot.staging = nullptr;
+            slot.staging_nbytes = 0;
+            slot.source_owners.clear();
+            slots_.pop_back();
+            eager_slot_by_name_.erase(mapping);
+            rolled_back = true;
+        } else if (commit.updating_eager_slot) {
+            if (slots_.size() <= order) {
+                return false;
+            }
+            TensorSlot& slot = slots_[order];
+            if (slot.staging != commit.prior_staging) {
+                if (commit.prior_staging != nullptr) {
+                    if (retired_staging_.size() !=
+                            commit.prior_retired_staging_size + 1 ||
+                        retired_staging_.back() != commit.prior_staging) {
+                        return false;
+                    }
+                    retired_staging_.pop_back();
+                } else if (retired_staging_.size() !=
+                           commit.prior_retired_staging_size) {
+                    return false;
+                }
+                staging = slot.staging;
+                slot.staging = commit.prior_staging;
+                slot.staging_nbytes = commit.prior_staging_nbytes;
+            } else if (
+                retired_staging_.size() !=
+                commit.prior_retired_staging_size) {
+                return false;
+            }
+            slot.observation = std::move(commit.prior_observation);
+            rolled_back = true;
+        }
+        if (rolled_back && commit.claimed_eager_stream) {
+            eager_stream_.reset();
+        }
+    }
+    free_host_capture_relaxed_noexcept(staging);
+    return rolled_back;
+}
+
+void ProbeContext::maybe_fail_debug_enqueue(DebugFailureStage stage) {
+    const char* label = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (debug_failure_stage_ != stage) {
+            return;
+        }
+        debug_failure_stage_ = DebugFailureStage::None;
+        label = stage == DebugFailureStage::HostPreparation
+            ? "host preparation"
+            : "CUDA submission";
+    }
+    throw std::runtime_error(
+        std::string("injected tensor debug ") + label + " failure");
+}
+
+void ProbeContext::mark_poisoned(const char* operation) noexcept {
+    std::lock_guard<std::mutex> guard(mutex_);
+    poisoned_ = true;
+    poison_operation_ = operation;
 }
 
 torch::Tensor ProbeContext::source_tensor_for_enqueue(const torch::Tensor& tensor) const {
@@ -669,14 +951,44 @@ TensorSlot& ProbeContext::ensure_slot(
     }
 
     TensorSlot& slot = slots_[index];
-    if (nbytes > slot.staging_nbytes) {
-        void* new_staging = nullptr;
-        {
+    void* new_staging = nullptr;
+    TensorObservationData observation;
+    try {
+        if (nbytes > slot.staging_nbytes) {
             CaptureModeGuard guard(cudaStreamCaptureModeRelaxed);
             TCGD_CUDA_CHECK(cudaMallocHost(&new_staging, nbytes));
+            std::memset(new_staging, 0, nbytes);
+            if (slot.staging != nullptr) {
+                retired_staging_.reserve(retired_staging_.size() + 1);
+            }
         }
-        std::memset(new_staging, 0, nbytes);
 
+        if (has_record_action_) {
+            observation.name = observation_name;
+            observation.replay_index = 0;
+            observation.order = order;
+            observation.invocation_index = invocation_index;
+            observation.shape = tensor.sizes().vec();
+            observation.dtype = tensor.scalar_type();
+            observation.device = tensor.device().str();
+            observation.nbytes = nbytes;
+            observation.valid = true;
+            observation.captured = is_capturing;
+            // Audit trail for in-place eager re-sampling: consumers must be
+            // able to tell a latest-value sample from a complete history.
+            observation.eager_overwrites =
+                (!is_capturing && slot.observation.valid)
+                    ? slot.observation.eager_overwrites + 1
+                    : 0;
+        }
+    } catch (...) {
+        free_host_capture_relaxed_noexcept(new_staging);
+        throw;
+    }
+
+    if (new_staging != nullptr) {
+        // Capacity was reserved above, so retiring the old pointer cannot
+        // throw after the replacement is published.
         if (slot.staging != nullptr) {
             retired_staging_.push_back(slot.staging);
         }
@@ -685,17 +997,7 @@ TensorSlot& ProbeContext::ensure_slot(
     }
 
     if (has_record_action_) {
-        slot.observation.name = observation_name;
-        slot.observation.replay_index = 0;
-        slot.observation.order = order;
-        slot.observation.invocation_index = invocation_index;
-        slot.observation.shape = tensor.sizes().vec();
-        slot.observation.dtype = tensor.scalar_type();
-        slot.observation.device = tensor.device().str();
-        slot.observation.nbytes = nbytes;
-        slot.observation.valid = true;
-        slot.observation.captured = is_capturing;
-        slot.observation.bytes.clear();
+        slot.observation = std::move(observation);
     }
     return slot;
 }

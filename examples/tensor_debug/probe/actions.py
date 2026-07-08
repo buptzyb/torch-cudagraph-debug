@@ -22,6 +22,7 @@ def main() -> None:
 
     static_x = torch.ones(4, device="cuda")
     expected = torch.full((4,), 3.0, device="cpu")
+    graph: torch.cuda.CUDAGraph | None = None
     probe = TensorProbe(
         "actions.hidden",
         [
@@ -63,6 +64,8 @@ def main() -> None:
         print(f"changed snapshot: {changed.tensor().tolist()}")
 
     finally:
+        if graph is not None:
+            del graph
         probe.close()
 
 

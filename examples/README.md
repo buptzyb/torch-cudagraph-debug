@@ -26,7 +26,7 @@ output details.
 | 3 | Which values changed between two replays of one graph? | [Replay comparison](tensor_debug/probe/replay_comparison.py) | `TensorProbe.compare()` |
 | 4 | How do online print, record, and expected-value checks behave? | [Probe actions](tensor_debug/probe/actions.py) | `PrintAction`, `RecordAction`, `CheckAction` |
 | 5 | What are an activation gradient and a final parameter gradient? | [Gradients](tensor_debug/probe/gradients.py) | `TensorProbe.watch_grad()` |
-| 6 | When does a probe run, and how are non-contiguous tensors handled? | [Capture modes](tensor_debug/probe/capture_modes.py) | `when`, `non_contiguous` |
+| 6 | How do eager names keep independent latest values, and when does a probe run? | [Capture modes](tensor_debug/probe/capture_modes.py) | `when`, eager name slots, `non_contiguous` |
 | 7 | Where should a probe be placed in a real module? | [Module integration](tensor_debug/probe/module_integration.py) | `TensorProbe` in `torch.nn.Module` |
 
 ### Recorder And Run Workflow

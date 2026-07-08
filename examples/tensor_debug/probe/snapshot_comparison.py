@@ -37,6 +37,7 @@ def main() -> None:
     finally:
         eager_probe.close()
 
+    graph: torch.cuda.CUDAGraph | None = None
     graph_probe = TensorProbe("cuda-graph-forward", [RecordAction()])
     try:
         graph = torch.cuda.CUDAGraph()
@@ -54,6 +55,8 @@ def main() -> None:
 
         print(comparison.to_text())
     finally:
+        if graph is not None:
+            del graph
         graph_probe.close()
 
 

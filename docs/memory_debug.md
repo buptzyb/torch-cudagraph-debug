@@ -247,12 +247,14 @@ comparison = run.compare("start", "end", attribution=options)
 Event and lifetime requests fail with typed errors instead of degrading:
 `MemoryHistoryDisabledError` when history was never recorded on an analyzed
 device, `MemoryHistoryBoundaryError` when either endpoint could not record its
-metadata boundary, and `MemoryHistoryTruncatedError` when a recorded boundary was
-overwritten in the bounded history ring buffer. Stack attribution returns exact framed rows plus an `<unattributed>` bucket when coverage is partial; it raises
-`MemoryHistoryDisabledError` only when nonempty active state has zero frame
-coverage. Invalid boundary order or complete history that cannot be reconciled with the
-allocator states raises `MemoryReconciliationError` unconditionally — that combination indicates corrupted input or a bug in this
-package, never a legitimate state.
+metadata boundary, and `MemoryHistoryTruncatedError` when a recorded boundary
+was overwritten in the bounded history ring buffer. Stack attribution returns
+exact framed rows plus an `<unattributed>` bucket when coverage is partial; it
+raises `MemoryHistoryDisabledError` only when nonempty active state has zero
+frame coverage. Invalid boundary order or complete history that cannot be
+reconciled with allocator states raises `MemoryReconciliationError`
+unconditionally. That combination indicates corrupted input or a package bug,
+never a legitimate state.
 
 Every successful comparison exposes `attribution_status`. `requested`
 distinguishes an analysis the caller asked for, and `available`/`complete`
@@ -260,9 +262,9 @@ describe the evidence that backed it.
 
 A block's `frames` are the allocation call stack for memory still active in a
 snapshot. Entries under `device_traces` are historical allocator events, and
-their `frames` are event call stacks. These are separate data sources. Recorder bundles remove cumulative
-`device_traces` from point state and preserve only each adjacent interval's raw
-event mappings.
+their `frames` are event call stacks. These are separate data sources.
+Recorder bundles remove cumulative `device_traces` from point state and
+preserve only each adjacent interval's raw event mappings.
 
 The normalized raw action vocabulary is `alloc`, `free_requested`,
 `free_completed`, `segment_alloc`, `segment_free`, `segment_map`,
@@ -333,11 +335,11 @@ A generation can occupy three relevant states:
   the allocator.
 
 Free request and completion are reported independently, each with its own
-stack table. Every transition is backed by an allocator event; a request whose
-trigger predates the analysis range (a block already awaiting free at the
-first point) is recorded with a `range_boundary` origin instead of a guessed
-interval. `free_completed` means allocator-reusable; it does not mean the
-segment was returned to CUDA or that pool `reserved_bytes` decreased.
+stack table. Transitions inside the analyzed range are backed by allocator
+events. When a block is already awaiting free at the first point, its earlier
+request is represented once with `origin="range_boundary"` rather than assigned
+to a guessed interval. `free_completed` means allocator-reusable; it does not
+mean the segment was returned to CUDA or that pool `reserved_bytes` decreased.
 
 Lifetime analysis requires complete allocator event history for the analyzed
 range and reconciles the event stream against every allocator state. When event
@@ -394,8 +396,8 @@ Cross-run rules are intentionally conservative:
 - Default pools on the same device match automatically.
 - Private pools remain reference-only/candidate-only even when raw IDs happen
   to be equal, unless `pool_mapping` explicitly pairs `MemoryPoolKey` objects.
-- Stream IDs are never matched across runs. Pool/stream observations remain
-  reference-only or candidate-only.
+- Stream IDs are process-local CUDA handles with no stable cross-run identity,
+  so pool/stream observations remain reference-only or candidate-only.
 - Address lifecycle and allocator events are unavailable across runs.
 
 The optional four-point helper separates start-state differences from phase

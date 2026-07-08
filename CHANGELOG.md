@@ -113,12 +113,27 @@
   prefix of the longest rank sequence (a crashed rank) with the existing
   incomplete-bundle warning instead of raising; a complete rank with fewer
   points or any non-prefix sequence still raises.
-- A tensor probe enqueue that fails validation no longer consumes its
-  invocation and slot order: keyed checks stay satisfiable on retry,
-  positional checks bind the intended expected entry, and a failed first
-  captured call no longer loses the replay-counter capture.
-- Eager (`when="always"`) probes reject a second distinct observation name
-  instead of silently overwriting the single native slot both names share.
+- A tensor probe enqueue that fails validation or host-side slot preparation no longer
+  consumes its invocation and slot order: keyed checks stay satisfiable on
+  retry, positional checks bind the intended expected entry, and a failed first
+  captured call no longer loses the replay-counter capture. Host-side slot
+  preparation is transactional: eager insert and replacement failures restore
+  the prior name layout and values, while capture failures restore the prior
+  layout and order. A
+  failure after CUDA command submission begins now makes the probe explicitly
+  unusable instead of exposing partially published state.
+- Eager (`when="always"`) probes keep one slot per observation name:
+  repeated names sample in place and new names append slots, so `snapshot()`
+  returns the latest value of every observed name. Previously every eager
+  call shared one slot and a second distinct name silently overwrote the
+  first. A later capture replaces the eager slot layout with its own and
+  retires the eager staging.
+- In-place eager re-samples are counted per name and disclosed as
+  `TensorProbeSnapshot.eager_overwrites`; snapshot comparisons warn when an
+  eager sample with a nonzero count is aligned against multi-invocation
+  observations, identify which side needs complete collection, and reject
+  malformed overwrite metadata instead of silently pairing or collapsing
+  non-corresponding occurrences.
 - Record-only `snapshot(synchronize=False)` during CUDA graph capture is
   rejected instead of issuing a blocking counter read that invalidates the
   capture; retired-staging reclaim is likewise deferred during capture and
@@ -134,9 +149,10 @@
 ### Changed
 
 - Allocation lifetime analysis requires complete allocator event history.
-  Snapshot-only lifetime analysis and all snapshot-inferred transitions were
-  removed; every reported transition is event-backed, and requests that
-  predate the analysis range carry a `range_boundary` origin.
+  Snapshot-only lifetime analysis and inferred in-range transitions were
+  removed. Transitions inside the analyzed range are event-backed; a free
+  request already in effect at the start is represented once with a
+  `range_boundary` origin.
 - Missing or incomplete event and lifetime evidence now raises typed errors:
   `MemoryHistoryDisabledError` (history never recorded),
   `MemoryHistoryBoundaryError` (point boundary unavailable), and

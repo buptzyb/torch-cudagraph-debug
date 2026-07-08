@@ -25,10 +25,7 @@ def main() -> None:
     capture_only = TensorProbe("mode.capture-only", [RecordAction()])
     eager = TensorProbe(
         "mode.always",
-        [
-            RecordAction(),
-            CheckAction(base.detach().cpu(), rtol=0.0, atol=0.0),
-        ],
+        [RecordAction()],
         when="always",
     )
     copying = TensorProbe(
@@ -44,14 +41,32 @@ def main() -> None:
         [RecordAction()],
         when="always",
     )
+    graph: torch.cuda.CUDAGraph | None = None
     try:
         assert capture_only(non_contiguous) is non_contiguous
         print("capture-only probe: eager call was a transparent no-op")
 
-        assert eager(base) is base
-        eager.assert_check_ok(synchronize=torch.cuda.current_stream())
-        assert len(eager.snapshot(synchronize=False).observations) == 1
-        print("always probe: eager call produced one snapshot")
+        shifted = base + 1
+        latest_base = base + 2
+        assert eager(base, name="base") is base
+        assert eager(shifted, name="shifted") is shifted
+        assert eager(latest_base, name="base") is latest_base
+        eager_snapshot = eager.snapshot(synchronize=torch.cuda.current_stream())
+        assert [item.name for item in eager_snapshot.observations] == [
+            "base",
+            "shifted",
+        ]
+        assert torch.equal(
+            eager_snapshot.observation("base").tensor(),
+            latest_base.detach().cpu(),
+        )
+        # Re-sampling "base" in place left an audit trail: the snapshot
+        # discloses how many earlier values the latest sample superseded.
+        assert dict(eager_snapshot.eager_overwrite_counts) == {"base": 1}
+        print(
+            "always probe: eager names kept independent latest-value slots "
+            f"(overwrites: {dict(eager_snapshot.eager_overwrite_counts)})"
+        )
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
@@ -73,6 +88,8 @@ def main() -> None:
         else:
             raise AssertionError("default non-contiguous policy should reject the view")
     finally:
+        if graph is not None:
+            del graph
         capture_only.close()
         eager.close()
         copying.close()

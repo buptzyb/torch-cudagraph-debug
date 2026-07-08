@@ -302,10 +302,10 @@ keyword-only `synchronize` argument:
   synchronized probe query or after the application has synchronized all
   relevant CUDA work.
 
-Omitting `synchronize` inherits the Probe or Recorder policy. Explicit overrides
-accept only `bool`, `torch.cuda.Stream`, or CUDA `torch.device`; strings,
-integer device indices, and CPU devices are rejected. A stream or device from
-another CUDA device is also an error. A synchronization-enabled query during
+Omitting `synchronize`, or passing `None`, inherits the Probe or Recorder
+policy. Explicit targets accept only `bool`, `torch.cuda.Stream`, or CUDA
+`torch.device`; strings, integer device indices, and CPU devices are rejected.
+A stream or device from another CUDA device is also an error. A synchronization-enabled query during
 CUDA Graph capture raises an error.
 Defer host queries until after capture; `False` skips synchronization
 but does not make in-capture host reads meaningful. Closing an enabled probe is
@@ -323,8 +323,24 @@ probe, every graph containing it must also be unable to replay again; otherwise
 a later replay accesses resources released by `close()`. The probe cannot verify
 either condition. An unsynchronized close reports pending eager callbacks and
 pending eager copies instead of freeing their staging. Eager (`when="always"`)
-probes record one observation name for their whole lifetime; a second distinct
-name is rejected instead of silently overwriting the first.
+probes keep one slot per observation name: repeated names sample in place
+(latest value) and new names append slots, so `snapshot()` returns the latest
+value of every name observed so far. In-place re-samples are counted per name
+and disclosed as `TensorProbeSnapshot.eager_overwrites`; snapshot comparisons
+warn when such a sample is aligned against multi-invocation observations from
+a capture and identify which side should instead be collected with
+`TensorRecorder`. Overwrite metadata is valid only for an eager snapshot;
+names are unique, and each entry must refer to the sole invocation-0 observation
+for that name. Treat observation names as a fixed vocabulary rather than
+per-iteration labels. Failed validation does not consume a name's first-use
+order or bind the probe to that call's eager stream.
+Failed host-side insertion or replacement restores the prior eager layout and
+value. Host-side capture preparation has the same rollback guarantee. A later
+successful capture replaces the eager slot layout with its own; pre-capture
+eager observations are dropped, while their staging remains retired until
+queued eager work has completed. If CUDA command submission fails after that
+transaction is published, the probe rejects further collection and queries;
+destroy the affected graph, close the probe, and create a new one.
 
 ## Replay And Invocation Indices
 
@@ -333,8 +349,8 @@ zero and a captured single-thread kernel increments it once per graph replay.
 The first replay is 1. Calling the same probe several times in one capture does
 not add more increments: those calls create globally ordered slots, and all
 slots from one replay share the same `replay_index`. Each slot also has a
-semantic `(name, invocation_index)` key; repeated calls increment only the
-counter for that name.
+semantic `(name, invocation_index)` key; repeated calls advance the
+invocation index independently for that name.
 
 The counter is per probe and monotonic for that probe's single capture. Eager
 calls under `when="always"` do not increment it and eager results use index 0.

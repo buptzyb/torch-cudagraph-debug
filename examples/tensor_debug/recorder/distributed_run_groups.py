@@ -93,13 +93,15 @@ def main() -> None:
     args = parse_args()
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group("nccl")
+    # Group coordination is CPU-only. Keeping it on Gloo avoids coupling the
+    # example's control flow to the CUDA streams being captured and replayed.
+    dist.init_process_group("gloo")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     output_dir = args.output_dir.resolve()
 
     try:
-        output_ok = torch.ones((), dtype=torch.int32, device="cuda")
+        output_ok = torch.ones((), dtype=torch.int32)
         if rank == 0:
             if output_dir.exists():
                 output_ok.zero_()
@@ -129,7 +131,7 @@ def main() -> None:
             rank=rank,
             world_size=world_size,
         )
-        dist.barrier(device_ids=[local_rank])
+        dist.barrier()
 
         if rank == 0 and not args.record_only:
             eager = TensorRunGroup.load(output_dir / "eager")
@@ -137,15 +139,11 @@ def main() -> None:
             eager.summary().write(output_dir / "eager-summary")
             comparison = compare_run_groups(eager, cuda_graph)
             comparison.write(output_dir / "group-comparison")
-            comparison_ok = torch.tensor(
-                int(comparison.ok),
-                dtype=torch.int32,
-                device="cuda",
-            )
+            comparison_ok = torch.tensor(int(comparison.ok), dtype=torch.int32)
             if not comparison.ok:
                 print(comparison.to_text())
         else:
-            comparison_ok = torch.ones((), dtype=torch.int32, device="cuda")
+            comparison_ok = torch.ones((), dtype=torch.int32)
         dist.broadcast(comparison_ok, src=0)
         if comparison_ok.item() != 1:
             raise RuntimeError("eager and CUDA Graph tensor groups differ")
