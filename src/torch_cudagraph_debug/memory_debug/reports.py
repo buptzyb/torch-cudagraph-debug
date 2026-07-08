@@ -294,11 +294,7 @@ class MemoryAllocationLifetimeAnalysis:
         visible = self._visible_cohorts(limit)
         depth = self._display_stack_depth(stack_depth)
         cohort_rows = self._display_cohort_rows(limit, stack_depth)
-        point_rows = [
-            item.to_row(cohort.cohort_id)
-            for cohort in visible
-            for item in cohort.points
-        ]
+        point_rows = self._display_point_rows(limit)
         size_rows = [
             item.to_row(cohort.cohort_id)
             for cohort in visible
@@ -425,6 +421,13 @@ class MemoryAllocationLifetimeAnalysis:
             rows.append(row)
         return rows
 
+    def _display_point_rows(self, limit: int | None = None) -> list[dict[str, object]]:
+        return [
+            item.to_row(cohort.cohort_id)
+            for cohort in self._visible_cohorts(limit)
+            for item in cohort.points
+        ]
+
     @staticmethod
     def _display_transition_rows(
         cohorts: Sequence[AllocationCohort],
@@ -461,6 +464,7 @@ class _MemoryStateComparison:
         default_factory=MemoryAttributionStatus
     )
     lifecycle_available: bool = False
+    lifecycle_confidence: Literal["unavailable", "approximate", "exact"] = "unavailable"
     warnings: tuple[str, ...] = ()
     display_stack_depth: int = 2
     display_limit: int = 20
@@ -633,6 +637,7 @@ class _MemoryStateComparison:
             f"Memory comparison {reference_label!r} -> {candidate_label!r} "
             f"({_state_scope(self.reference, self.candidate)})"
         ]
+        lines.append(f"  address lifecycle: {self.lifecycle_confidence}")
         lines.extend(f"  warning: {warning}" for warning in self.warnings)
         lines.append("  allocator totals:")
         selected_allocator_scopes = [
@@ -695,6 +700,7 @@ class _MemoryStateComparison:
             "kind": self._COMPARISON_KIND,
             "reference": self.reference.descriptor(),
             "candidate": self.candidate.descriptor(),
+            "lifecycle_confidence": self.lifecycle_confidence,
             "lifecycle_available": self.lifecycle_available,
             "attribution_status": self.attribution_status.to_dict(),
             "display_stack_depth": self.display_stack_depth,
@@ -1134,6 +1140,11 @@ class MemoryTimeline:
             if self.allocation_lifetimes is not None
             else []
         )
+        cohort_point_rows = (
+            self.allocation_lifetimes._display_point_rows(limit)
+            if self.allocation_lifetimes is not None
+            else []
+        )
         sections = [
             "<h2>Allocator Totals</h2>",
             _render_table(
@@ -1184,7 +1195,7 @@ class MemoryTimeline:
             sections.extend(
                 [
                     "<h2>Allocation Cohorts</h2>",
-                    _cohort_timeline_svg(self.allocation_lifetimes.point_rows()),
+                    _cohort_timeline_svg(cohort_point_rows),
                     _render_table(
                         cohort_rows,
                         "No allocation cohorts",

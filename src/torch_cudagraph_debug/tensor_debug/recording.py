@@ -192,6 +192,31 @@ class TensorValueSummary:
                 or not math.isfinite(float(value))
             ):
                 raise ValueError(f"tensor summary {name} must be finite or None")
+        if self.zero_count > self.finite_count:
+            raise ValueError("tensor summary zero_count exceeds finite_count")
+        statistics = (self.minimum, self.maximum, self.mean, self.std, self.l2_norm)
+        if self.finite_count == 0 and any(value is not None for value in statistics):
+            raise ValueError(
+                "tensor summary without finite values must not have statistics"
+            )
+        if self.finite_count > 0 and (self.minimum is None or self.maximum is None):
+            raise ValueError("tensor summary with finite values requires min and max")
+        if (
+            self.minimum is not None
+            and self.maximum is not None
+            and self.minimum > self.maximum
+        ):
+            raise ValueError("tensor summary minimum exceeds maximum")
+        if self.std is not None and self.std < 0:
+            raise ValueError("tensor summary std must be non-negative")
+        if self.l2_norm is not None and self.l2_norm < 0:
+            raise ValueError("tensor summary l2_norm must be non-negative")
+        if self.zero_count:
+            assert self.minimum is not None and self.maximum is not None
+            if self.minimum > 0 or self.maximum < 0:
+                raise ValueError(
+                    "tensor summary zero_count is inconsistent with min and max"
+                )
 
     def to_dict(self) -> dict[str, int | float | None]:
         return {
@@ -285,7 +310,7 @@ class TensorObservation:
             raise ValueError("tensor stride rank must equal shape rank")
         if self.dtype not in _DTYPE_NAMES:
             raise ValueError(f"unsupported tensor dtype {self.dtype}")
-        if not self.source_device:
+        if not isinstance(self.source_device, str) or not self.source_device:
             raise ValueError("source_device must be non-empty")
         if type(self.nbytes) is not int or self.nbytes < 0:
             raise ValueError("nbytes must be a non-negative integer")
@@ -295,7 +320,7 @@ class TensorObservation:
         if self.nbytes != expected_nbytes:
             raise ValueError(f"nbytes={self.nbytes}; expected {expected_nbytes}")
         validate_payload_kind(self.payload)
-        if not _SHA256_RE.fullmatch(self.sha256):
+        if not isinstance(self.sha256, str) or not _SHA256_RE.fullmatch(self.sha256):
             raise ValueError("sha256 must contain 64 lowercase hexadecimal digits")
         if self.summary.numel != math.prod(self.shape):
             raise ValueError("tensor summary numel does not match shape")
@@ -402,11 +427,11 @@ class TensorPoint:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", _freeze_json(dict(self.metadata)))
-        if not self.run_id:
+        if not isinstance(self.run_id, str) or not self.run_id:
             raise ValueError("run_id must be non-empty")
         if type(self.index) is not int or self.index < 0:
             raise ValueError("point index must be a non-negative integer")
-        if not self.label:
+        if not isinstance(self.label, str) or not self.label:
             raise ValueError("point label must be non-empty")
         if (
             isinstance(self.timestamp, bool)
@@ -479,7 +504,12 @@ class TensorRun:
             "run_metadata",
             _freeze_json(dict(self.run_metadata)),
         )
-        if not self.run_id or not self.name:
+        if (
+            not isinstance(self.run_id, str)
+            or not self.run_id
+            or not isinstance(self.name, str)
+            or not self.name
+        ):
             raise ValueError("run_id and name must be non-empty")
         validate_execution_mode(self.execution)
         validate_payload_kind(self.default_payload)
@@ -498,11 +528,23 @@ class TensorRun:
             or not math.isfinite(float(self.finished_at))
         ):
             raise ValueError("finished_at must be finite or None")
+        if self.complete and self.finished_at is None:
+            raise ValueError("a complete tensor run must have finished_at")
+        if self.finished_at is not None and self.finished_at < self.created_at:
+            raise ValueError("finished_at must not precede created_at")
+        previous_timestamp = float(self.created_at)
+
         labels: set[str] = set()
         last_replay = 0
         for expected_index, point in enumerate(self.points):
             if point.run_id != self.run_id or point.index != expected_index:
                 raise ValueError("run points must be owned, contiguous, and ordered")
+            if point.timestamp < previous_timestamp:
+                raise ValueError("tensor point timestamps must be monotonic")
+            if self.finished_at is not None and point.timestamp > self.finished_at:
+                raise ValueError("tensor point timestamp must not follow finished_at")
+            previous_timestamp = point.timestamp
+
             if point.label in labels:
                 raise ValueError(f"duplicate point label {point.label!r}")
             labels.add(point.label)
@@ -822,7 +864,7 @@ class TensorRecorder:
         world_size: int | None = None,
         run_metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        if not name:
+        if not isinstance(name, str) or not name:
             raise ValueError("name must be non-empty")
         self.execution = validate_execution_mode(execution)
         self.name = name
@@ -865,6 +907,7 @@ class TensorRecorder:
             _EagerTensorCollector() if self.execution == "eager" else None
         )
         self._last_point_replay_index: int | None = None
+        self._grad_handles: list[RemovableHandle] = []
 
         if self.execution == "cuda_graph":
             self._device = _resolve_cuda_device(device)
@@ -897,11 +940,6 @@ class TensorRecorder:
 
         self._ensure_open()
         name = validate_observation_name(name)
-        selected_payload = (
-            self.default_payload if payload is None else validate_payload_kind(payload)
-        )
-        if not isinstance(tensor, torch.Tensor):
-            raise TypeError("observe tensor must be a torch.Tensor")
 
         if self.execution == "eager":
             if self._active_point is None:
@@ -910,6 +948,13 @@ class TensorRecorder:
                         "eager observe() requires an active record_point() context"
                     )
                 return tensor
+            selected_payload = (
+                self.default_payload
+                if payload is None
+                else validate_payload_kind(payload)
+            )
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError("observe tensor must be a torch.Tensor")
             source = self._validate_tensor(tensor)
             invocation_index = self._next_eager_invocation(name)
             assert self._eager_collector is not None
@@ -931,7 +976,8 @@ class TensorRecorder:
             )
             return tensor
 
-        with torch.cuda.device(tensor.device):
+        assert self._device is not None
+        with torch.cuda.device(self._device):
             is_capturing = torch.cuda.is_current_stream_capturing()
         if not is_capturing:
             if self.strict_scope:
@@ -939,15 +985,20 @@ class TensorRecorder:
                     "cuda_graph observe() requires an active CUDA graph capture"
                 )
             return tensor
+        selected_payload = (
+            self.default_payload if payload is None else validate_payload_kind(payload)
+        )
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError("observe tensor must be a torch.Tensor")
         self._validate_tensor(tensor)
         assert self._collector is not None
         invocation_index = self._capture_invocation_counts.get(name, 0)
-        self._capture_invocation_counts[name] = invocation_index + 1
         result = self._collector.enqueue(
             tensor,
             name=name,
             invocation_index=invocation_index,
         )
+        self._capture_invocation_counts[name] = invocation_index + 1
         self._capture_slots.append(
             _CaptureSlot(
                 order=len(self._capture_slots),
@@ -987,7 +1038,9 @@ class TensorRecorder:
             self.observe(grad, name=name, payload=payload)
             return grad
 
-        return tensor.register_hook(hook)
+        handle = tensor.register_hook(hook)
+        self._grad_handles.append(handle)
+        return handle
 
     @contextmanager
     def record_point(
@@ -1000,7 +1053,7 @@ class TensorRecorder:
         """Record one eager execution or the latest values from one graph replay."""
 
         self._ensure_collecting()
-        if not label:
+        if not isinstance(label, str) or not label:
             raise ValueError("tensor point label must be non-empty")
         if any(point.label == label for point in self._points):
             raise ValueError(f"tensor point label {label!r} already exists")
@@ -1098,6 +1151,13 @@ class TensorRecorder:
         if self._collector is not None:
             self._collector.close(synchronize=selected)
             self._collector = None
+        # Remove gradient hooks only after every close check accepted: a
+        # rejected close must leave the recorder fully usable, while a hook
+        # that outlives a successful close would fire against the closed
+        # recorder inside a later backward pass.
+        for handle in self._grad_handles:
+            handle.remove()
+        self._grad_handles.clear()
         self._closed = True
 
     def __enter__(self) -> "TensorRecorder":

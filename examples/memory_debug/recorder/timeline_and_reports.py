@@ -101,6 +101,8 @@ def main() -> None:
             assert paths[name].is_file(), name
         assert static_state.numel() == 8 * MIB
         assert graph_state.numel() == 12 * MIB
+        # Explicitly verify every persisted payload before archiving the bundle.
+        loaded.validate_payloads()
 
         print(timeline.to_text(include_unchanged=False))
         print(f"after-capture segments: {len(capture_state['segments'])}")

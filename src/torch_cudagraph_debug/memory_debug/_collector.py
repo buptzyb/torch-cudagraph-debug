@@ -83,7 +83,7 @@ class _MemoryCollector:
         if self._snapshot_provider is not None:
             raw = self._snapshot_provider(boundary_marker)
             envelope = _snapshot_envelope(raw)
-            devices = self._resolve_devices(envelope)
+            devices = self._resolve_devices(envelope, warnings)
             boundary_recorded = True
         else:
             devices = self._resolve_devices(None)
@@ -93,7 +93,7 @@ class _MemoryCollector:
             )
             envelope = _snapshot_envelope(raw)
 
-        snapshot = _filter_snapshot_devices(envelope, devices)
+        snapshot = _filter_snapshot_devices(envelope, devices, warnings)
         segments = normalize_snapshot(snapshot, warnings=warnings)
         return _CollectedMemorySnapshot(
             timestamp=time.time(),
@@ -106,9 +106,32 @@ class _MemoryCollector:
         )
 
     def _resolve_devices(
-        self, snapshot: AllocatorSnapshotData | None
+        self,
+        snapshot: AllocatorSnapshotData | None,
+        warnings: list[str] | None = None,
     ) -> tuple[int, ...]:
         if self._resolved_devices is not None:
+            # Snapshot-derived selections (default and "all") stay open to
+            # devices that first appear after binding: a late device must
+            # join the selection instead of silently vanishing from every
+            # later capture.
+            if snapshot is not None and self._requested_devices in (None, "all"):
+                discovered = _snapshot_device_indices(snapshot)
+                added = tuple(
+                    device
+                    for device in discovered
+                    if device not in self._resolved_devices
+                )
+                if added:
+                    self._resolved_devices = tuple(
+                        sorted({*self._resolved_devices, *added})
+                    )
+                    if warnings is not None:
+                        warnings.append(
+                            f"memory collection adopted device(s) {list(added)} "
+                            "that first appeared after device binding; earlier "
+                            "captures do not cover them"
+                        )
             return self._resolved_devices
         if self._requested_devices == "all":
             if snapshot is not None:
@@ -229,7 +252,10 @@ def _normalize_device_selector(
         raise ValueError("devices must not be empty")
     if len(set(normalized)) != len(normalized):
         raise ValueError("devices must not contain duplicates")
-    return normalized
+    # Device order is an implementation detail everywhere downstream, and the
+    # bundle loader requires history rows in ascending device order — a
+    # caller-ordered selection must not produce an unloadable bundle.
+    return tuple(sorted(normalized))
 
 
 def _device_index(device: DeviceLike) -> int:
@@ -271,19 +297,34 @@ def _snapshot_device_indices(snapshot: AllocatorSnapshotData) -> tuple[int, ...]
 
 
 def _filter_snapshot_devices(
-    snapshot: Mapping[str, object], devices: tuple[int, ...]
+    snapshot: Mapping[str, object],
+    devices: tuple[int, ...],
+    warnings: list[str] | None = None,
 ) -> dict[str, object]:
     selected = set(devices)
     filtered = dict(snapshot)
     raw_segments = snapshot.get("segments", ())
     if not isinstance(raw_segments, Sequence):
         raise TypeError("allocator snapshot segments must be a sequence")
-    filtered["segments"] = [
-        segment
-        for segment in raw_segments
-        if isinstance(segment, Mapping)
-        and normalize_device_index(segment.get("device", 0)) in selected
-    ]
+    kept_segments = []
+    dropped_deviceless = 0
+    for segment in raw_segments:
+        if not isinstance(segment, Mapping):
+            continue
+        if normalize_device_index(segment.get("device", 0)) in selected:
+            kept_segments.append(segment)
+        elif "device" not in segment:
+            # Deviceless segments default to device 0; dropping them here
+            # would otherwise bypass the normalization-time missing-device
+            # warning entirely.
+            dropped_deviceless += 1
+    filtered["segments"] = kept_segments
+    if dropped_deviceless and warnings is not None:
+        warnings.append(
+            f"{dropped_deviceless} allocator segment(s) missing 'device' were"
+            " attributed to device 0 and excluded by the device selection;"
+            " their bytes are not represented in this snapshot"
+        )
     raw_traces = snapshot.get("device_traces", ())
     if not isinstance(raw_traces, Sequence):
         raise TypeError("allocator snapshot device_traces must be a sequence")

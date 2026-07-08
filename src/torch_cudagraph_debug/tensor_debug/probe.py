@@ -61,6 +61,7 @@ class TensorProbe:
         self.when = self._collector.when
         self._capture_invocation_counts: dict[str, int] = {}
         self._next_snapshot_index = 0
+        self._grad_handles: list[RemovableHandle] = []
 
     @property
     def replay_index(self) -> torch.Tensor | None:
@@ -116,7 +117,9 @@ class TensorProbe:
             self(grad, name=resolved_name)
             return grad
 
-        return tensor.register_hook(hook)
+        handle = tensor.register_hook(hook)
+        self._grad_handles.append(handle)
+        return handle
 
     def snapshot(
         self,
@@ -275,6 +278,13 @@ class TensorProbe:
         if not self._closed:
             selected = self.synchronize if synchronize is None else synchronize
             self._collector.close(synchronize=selected)
+            # Remove gradient hooks only after the collector accepted the
+            # close: a rejected close must leave the probe fully usable,
+            # while a hook that outlives a successful close would fire
+            # against the closed collector inside a later backward pass.
+            for handle in self._grad_handles:
+                handle.remove()
+            self._grad_handles.clear()
             self._closed = True
 
     def _classify_invocation(

@@ -92,7 +92,7 @@ class TensorObservationComparison:
     mismatch_count: int | None = None
     total_count: int | None = None
     mismatch_fraction: float | None = None
-    max_abs_error: float | None = None
+    max_abs_error: int | float | None = None
     max_relative_error: float | None = None
     mean_abs_error: float | None = None
     first_mismatch_index: tuple[int, ...] | None = None
@@ -991,9 +991,9 @@ def _compare_full_payloads(
     first_flat_index: int | None = None
     reference_value: bool | int | float | str | None = None
     candidate_value: bool | int | float | str | None = None
-    max_abs = 0.0
+    max_abs: int | float = 0
     max_relative = 0.0
-    total_abs = 0.0
+    total_abs: int | float = 0
     finite_error_count = 0
     nonfinite_error = False
 
@@ -1049,33 +1049,56 @@ def _compare_full_payloads(
             reference_value = _scalar_value(reference_chunk[local])
             candidate_value = _scalar_value(candidate_chunk[local])
 
-        reference_values = reference_chunk.to(torch.float64)
-        candidate_values = candidate_chunk.to(torch.float64)
-        absolute = torch.abs(candidate_values - reference_values)
-        finite = torch.isfinite(absolute)
-        if bool(finite.any()):
-            finite_values = absolute[finite]
-            max_abs = max(max_abs, float(finite_values.max().item()))
-            total_abs += float(finite_values.sum().item())
-            finite_error_count += finite_values.numel()
-        if not bool(finite.all()):
-            nonfinite_error = True
+        if (
+            not reference_chunk.is_floating_point()
+            and not candidate_chunk.is_floating_point()
+        ):
+            # float64 cannot distinguish adjacent int64 values above 2**53.
+            # Python integers preserve the exact subtraction without overflow.
+            for reference_item, candidate_item in zip(
+                reference_chunk.tolist(), candidate_chunk.tolist(), strict=True
+            ):
+                reference_integer = int(reference_item)
+                absolute_integer = abs(int(candidate_item) - reference_integer)
+                max_abs = max(max_abs, absolute_integer)
+                total_abs += absolute_integer
+                finite_error_count += 1
+                if reference_integer == 0:
+                    if absolute_integer:
+                        max_relative = math.inf
+                else:
+                    max_relative = max(
+                        max_relative,
+                        absolute_integer / abs(reference_integer),
+                    )
+        else:
+            reference_values = reference_chunk.to(torch.float64)
+            candidate_values = candidate_chunk.to(torch.float64)
+            absolute = torch.abs(candidate_values - reference_values)
+            finite = torch.isfinite(absolute)
+            if bool(finite.any()):
+                finite_values = absolute[finite]
+                max_abs = max(max_abs, float(finite_values.max().item()))
+                total_abs += float(finite_values.sum().item())
+                finite_error_count += finite_values.numel()
+            if not bool(finite.all()):
+                nonfinite_error = True
 
-        denominator = torch.abs(reference_values)
-        relative = torch.where(
-            denominator == 0,
-            torch.where(
-                absolute == 0,
-                torch.zeros_like(absolute),
-                torch.full_like(absolute, math.inf),
-            ),
-            absolute / denominator,
-        )
-        finite_relative = relative[torch.isfinite(relative)]
-        if finite_relative.numel():
-            max_relative = max(max_relative, float(finite_relative.max().item()))
-        if bool(torch.isinf(relative).any()):
-            max_relative = math.inf
+            denominator = torch.abs(reference_values)
+            relative = torch.where(
+                denominator == 0,
+                torch.where(
+                    absolute == 0,
+                    torch.zeros_like(absolute),
+                    torch.full_like(absolute, math.inf),
+                ),
+                absolute / denominator,
+            )
+            finite_relative = relative[torch.isfinite(relative)]
+            if finite_relative.numel():
+                max_relative = max(max_relative, float(finite_relative.max().item()))
+            if bool(torch.isinf(relative).any()):
+                max_relative = math.inf
 
     status: ComparisonStatus = "match" if mismatch_count == 0 else "mismatch"
     reason = (

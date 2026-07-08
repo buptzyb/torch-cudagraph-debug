@@ -345,7 +345,7 @@ def test_graph_pool_capture_and_json_bundle_round_trip(
             "after_replay",
         )
         assert during.label == "during_capture"
-        assert any(pool_id != (0, 0) for pool_id in after.pool_stats)
+        assert any(key.pool_id != (0, 0) for key in after.pool_stats)
         assert any(
             item.delta.reserved_bytes > 0
             for item in capture_comparison.pool_comparisons

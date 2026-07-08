@@ -24,6 +24,25 @@ double to_double(T value) {
 }
 
 template <typename T>
+uint64_t integer_abs_difference(T actual, T expected) {
+    if (actual >= expected) {
+        return static_cast<uint64_t>(actual) - static_cast<uint64_t>(expected);
+    }
+    return static_cast<uint64_t>(expected) - static_cast<uint64_t>(actual);
+}
+
+template <typename T>
+void append_integer(std::ostringstream& stream, T value) {
+    if constexpr (std::is_same_v<T, bool>) {
+        stream << (value ? 1 : 0);
+    } else if constexpr (std::is_signed_v<T>) {
+        stream << static_cast<int64_t>(value);
+    } else {
+        stream << static_cast<uint64_t>(value);
+    }
+}
+
+template <typename T>
 CheckResult check_typed(
     const void* actual_data,
     const void* expected_data,
@@ -54,10 +73,6 @@ CheckResult check_typed(
             CheckResult result;
             result.ok = false;
             result.mismatch_index = i;
-            result.actual = a;
-            result.expected = e;
-            result.abs_diff = abs_diff;
-            result.tolerance = tolerance;
             std::ostringstream oss;
             oss << "mismatch at flattened index " << i << ": actual=" << a
                 << " expected=" << e << " abs_diff=" << abs_diff
@@ -72,13 +87,13 @@ CheckResult check_typed(
             CheckResult result;
             result.ok = false;
             result.mismatch_index = i;
-            result.actual = to_double(actual[i]);
-            result.expected = to_double(expected[i]);
-            result.abs_diff = std::abs(result.actual - result.expected);
-            result.tolerance = 0.0;
+            const uint64_t abs_diff = integer_abs_difference(actual[i], expected[i]);
             std::ostringstream oss;
-            oss << "mismatch at flattened index " << i << ": actual=" << result.actual
-                << " expected=" << result.expected;
+            oss << "mismatch at flattened index " << i << ": actual=";
+            append_integer(oss, actual[i]);
+            oss << " expected=";
+            append_integer(oss, expected[i]);
+            oss << " abs_diff=" << abs_diff;
             result.message = oss.str();
             return result;
         }

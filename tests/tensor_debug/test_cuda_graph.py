@@ -225,6 +225,36 @@ def test_check_mismatch_is_sticky() -> None:
     probe.close()
 
 
+def test_check_int64_mismatch_message_preserves_full_range() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    actual = torch.tensor([-(2**63)], dtype=torch.int64, device="cuda")
+    expected = torch.tensor([2**63 - 1], dtype=torch.int64)
+    probe = TensorProbe(
+        "int64-diagnostic",
+        actions=[CheckAction(expected, rtol=0.0, atol=0.0)],
+    )
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probe(actual)
+
+    graph.replay()
+    torch.cuda.synchronize()
+
+    status = probe.check_status()
+    assert status.ok is False
+    assert (
+        "actual=-9223372036854775808"
+        " expected=9223372036854775807"
+        " abs_diff=18446744073709551615" in status.message
+    )
+
+    del graph
+    probe.close()
+
+
 def test_zero_element_tensor_record() -> None:
     if not torch.cuda.is_available() or not _native.extension_available():
         pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")

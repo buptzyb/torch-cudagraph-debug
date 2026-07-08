@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,20 @@ from torch_cudagraph_debug.memory_debug import (
 )
 
 from ._helpers import event, make_history_run, make_run, segment, snapshot
+
+
+def _refresh_payload_sha256(
+    bundle: Path,
+    point_index: int,
+    digest_field: str,
+    payload_path: Path,
+) -> None:
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["points"][point_index][digest_field] = hashlib.sha256(
+        payload_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def test_recorder_finish_is_idempotent_and_freezes_collection() -> None:
@@ -110,6 +126,16 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
     event_path = bundle / point_manifest["event_file"]
     assert state_path == bundle / "states" / "0001.json.gz"
     assert event_path == bundle / "events" / "0000-0001.json.gz"
+    assert (
+        point_manifest["state_sha256"]
+        == hashlib.sha256(state_path.read_bytes()).hexdigest()
+    )
+    assert (
+        point_manifest["event_sha256"]
+        == hashlib.sha256(event_path.read_bytes()).hexdigest()
+    )
+    assert manifest["points"][0]["event_sha256"] is None
+    assert manifest["points"][0]["event_file"] is None
     assert point_manifest["boundary_recorded"] is True
     assert point_manifest["history"][0]["status"] == "disabled"
     with gzip.open(state_path, "rt", encoding="utf-8") as handle:
@@ -135,6 +161,10 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
     assert loaded["after"].allocator_state()["segments"][1]["total_size"] == 32
     assert loaded["after"]._state_cache
     assert loaded["after"]._event_cache == {}
+    loaded.validate_payloads()
+    assert loaded["before"]._state_cache == {}
+    assert loaded["after"]._state_cache
+    assert loaded["after"]._event_cache == {}
     comparison = loaded.compare("before", "after")
     assert comparison.lifecycle_available is True
     assert any(
@@ -145,6 +175,67 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
         run.compare("before", "after").pool_comparison_rows()
         == comparison.pool_comparison_rows()
     )
+
+
+def test_validate_payloads_rejects_manifest_state_summary_mismatch(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "summary-mismatch.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=10))],
+        bundle_dir=bundle,
+        labels=("point",),
+    )
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["points"][0]["observations"][0]["requested_bytes"] = 9
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = MemoryRun.load(bundle, cache_snapshots=False)
+    assert loaded["point"].observations[0].stats.requested_bytes == 9
+    with pytest.raises(MemoryBundleError, match="does not match manifest observations"):
+        loaded.validate_payloads()
+
+
+def test_validate_payloads_rechecks_cached_files(tmp_path: Path) -> None:
+    bundle = tmp_path / "cached-corruption.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=10))],
+        bundle_dir=bundle,
+        labels=("point",),
+    )
+    loaded = MemoryRun.load(bundle, cache_snapshots=True)
+    state = loaded["point"].allocator_state()
+
+    payload = bundle / "states" / "0000.json.gz"
+    data = payload.read_bytes()
+    payload.write_bytes(data[: len(data) // 2])
+
+    assert loaded["point"].allocator_state() is state
+    with pytest.raises(MemoryBundleError, match="does not match its SHA-256"):
+        loaded.validate_payloads()
+
+
+def test_unsorted_device_selection_round_trips(tmp_path: Path) -> None:
+    def multi_device_snapshot() -> dict[str, object]:
+        device0 = segment(active=10, address=1000)
+        device1 = segment(active=20, address=2000, device=1)
+        return snapshot(device0, device1, traces=[[], []])
+
+    bundle = tmp_path / "unsorted-devices.tcgd-memory"
+    recorder = MemoryRecorder._from_snapshot_provider(
+        lambda marker: multi_device_snapshot(),
+        devices=(1, 0),
+        bundle_dir=bundle,
+    )
+    recorder.record_point("before")
+    recorder.record_point("after")
+    recorder.finish()
+
+    # A legitimately recorded bundle must load regardless of the order the
+    # caller listed the devices in.
+    loaded = MemoryRun.load(bundle)
+    assert [point.label for point in loaded.points] == ["before", "after"]
 
 
 def test_bundle_round_trips_group_identity_and_provenance(tmp_path: Path) -> None:
@@ -306,7 +397,7 @@ def test_truncated_state_payload_raises_bundle_error(tmp_path: Path) -> None:
     payload.write_bytes(data[: len(data) // 2])
 
     run = MemoryRun.load(bundle, cache_snapshots=False)
-    with pytest.raises(MemoryBundleError, match="could not load state"):
+    with pytest.raises(MemoryBundleError, match="does not match its SHA-256"):
         run.points[0].allocator_state()
 
 
@@ -320,6 +411,7 @@ def test_non_utf8_state_payload_raises_bundle_error(tmp_path: Path) -> None:
     payload = bundle / "states" / "0000.json.gz"
     with gzip.open(payload, "wb") as handle:
         handle.write(b"\xff\xfe{}")
+    _refresh_payload_sha256(bundle, 0, "state_sha256", payload)
 
     run = MemoryRun.load(bundle, cache_snapshots=False)
     with pytest.raises(MemoryBundleError, match="could not load state"):
@@ -356,6 +448,53 @@ def test_load_rejects_unknown_observation_fields(tmp_path: Path) -> None:
 
     with pytest.raises(MemoryBundleError, match=r"invalid fields.*unexpected_field"):
         MemoryRun.load(bundle)
+
+
+def test_memory_models_reject_unserializable_identity_and_time_states() -> None:
+    with pytest.raises(ValueError, match="name must be non-empty"):
+        MemoryRecorder(name=123)  # type: ignore[arg-type]
+
+    run = make_run(
+        [snapshot(segment(active=1))],
+        labels=("point",),
+    )
+    with pytest.raises(ValueError, match="run_id and name"):
+        replace(run, name=123)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="run_id and label"):
+        replace(run.points[0], label=123)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="complete memory run"):
+        replace(run, finished_at=None)
+    with pytest.raises(ValueError, match="precede created_at"):
+        replace(run, finished_at=run.created_at - 1)
+
+    before_creation = replace(run.points[0], timestamp=run.created_at - 1)
+    with pytest.raises(ValueError, match="timestamps must be monotonic"):
+        replace(run, points=(before_creation,))
+    assert run.finished_at is not None
+    after_finish = replace(run.points[0], timestamp=run.finished_at + 1)
+    with pytest.raises(ValueError, match="must not follow finished_at"):
+        replace(run, points=(after_finish,))
+
+
+def test_memory_point_payload_identity_is_complete(tmp_path: Path) -> None:
+    bundle = tmp_path / "point-payload-identity.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=1)), snapshot(segment(active=2))],
+        bundle_dir=bundle,
+        labels=("before", "after"),
+    )
+    loaded = MemoryRun.load(bundle)
+    before = loaded["before"]
+    after = loaded["after"]
+
+    with pytest.raises(ValueError, match="state path and sha256 must be paired"):
+        replace(before, _state_sha256=None)
+    with pytest.raises(ValueError, match="state sha256"):
+        replace(before, _state_sha256="x" * 64)
+    with pytest.raises(ValueError, match="event path and sha256 must be paired"):
+        replace(after, _event_sha256=None)
+    with pytest.raises(TypeError, match="state path"):
+        replace(before, _state_path="states/0000.json.gz")  # type: ignore[arg-type]
 
 
 def test_recorder_validates_group_identity_and_user_metadata() -> None:
@@ -520,6 +659,18 @@ def test_memory_bundle_load_rejects_lossy_scalar_coercions(tmp_path: Path) -> No
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(MemoryBundleError, match="non-finite"):
         MemoryRun.load(bundle)
+    manifest["created_at"] = 10**4000
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(MemoryBundleError, match="created_at must be finite"):
+        MemoryRun.load(bundle)
+
+    manifest["created_at"] = 1.0
+    encoded = json.dumps(manifest).replace(
+        '"name": "run"', '"name": "run", "name": "duplicate"', 1
+    )
+    manifest_path.write_text(encoded, encoding="utf-8")
+    with pytest.raises(MemoryBundleError, match="duplicate JSON object key 'name'"):
+        MemoryRun.load(bundle)
 
 
 def test_memory_recorder_rejects_bad_environment_identity(
@@ -583,7 +734,7 @@ def test_event_payload_is_preserved_and_loaded_independently(tmp_path: Path) -> 
     event_path.write_bytes(data[: len(data) // 2])
     run = MemoryRun.load(bundle, cache_snapshots=False)
     assert run.compare("before", "after").candidate.pool_stats
-    with pytest.raises(MemoryBundleError, match="could not load event evidence"):
+    with pytest.raises(MemoryBundleError, match="does not match its SHA-256"):
         run.compare(
             "before",
             "after",
@@ -612,6 +763,7 @@ def test_invalid_allocator_schema_in_payloads_raises_bundle_error(
     with gzip.open(state_path, "wt", encoding="utf-8") as handle:
         json.dump(state_payload, handle)
 
+    _refresh_payload_sha256(bundle, 1, "state_sha256", state_path)
     run = MemoryRun.load(bundle, cache_snapshots=False)
     with pytest.raises(MemoryBundleError, match="invalid allocator schema"):
         run["after"].allocator_state()
@@ -620,12 +772,14 @@ def test_invalid_allocator_schema_in_payloads_raises_bundle_error(
     with gzip.open(state_path, "wt", encoding="utf-8") as handle:
         json.dump(state_payload, handle)
     event_path = bundle / "events" / "0000-0001.json.gz"
+    _refresh_payload_sha256(bundle, 1, "state_sha256", state_path)
     with gzip.open(event_path, "rt", encoding="utf-8") as handle:
         event_payload = json.load(handle)
     event_payload["devices"][0]["entries"][0]["size"] = "invalid"
     with gzip.open(event_path, "wt", encoding="utf-8") as handle:
         json.dump(event_payload, handle)
 
+    _refresh_payload_sha256(bundle, 1, "event_sha256", event_path)
     run = MemoryRun.load(bundle, cache_snapshots=False)
     with pytest.raises(MemoryBundleError, match="invalid allocator schema"):
         run.compare(

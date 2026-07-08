@@ -247,8 +247,12 @@ comparison = run.compare("start", "end", attribution=options)
 Event and lifetime requests fail with typed errors instead of degrading:
 `MemoryHistoryDisabledError` when history was never recorded on an analyzed
 device, `MemoryHistoryBoundaryError` when either endpoint could not record its
-metadata boundary, and `MemoryHistoryTruncatedError` when a recorded boundary
-was overwritten in the bounded history ring buffer. Stack attribution returns
+metadata boundary, and `MemoryHistoryTruncatedError` when a required start
+marker is missing from the trace. The tool cannot distinguish bounded-ring
+overwrite from history enabled after that boundary. Recorder intervals use the
+ending snapshot's trace end because its own marker is normally absent, so a
+complete interval assumes history remained enabled between the points. Stack
+attribution returns
 exact framed rows plus an `<unattributed>` bucket when coverage is partial; it
 raises `MemoryHistoryDisabledError` only when nonempty active state has zero
 frame coverage. Invalid boundary order or complete history that cannot be
@@ -376,6 +380,11 @@ add allocator-event tables unless `events=True` is also requested.
 
 Same-run comparison can use allocator addresses for lifecycle observations such
 as new segments and blocks becoming active or inactive.
+The comparison reports `lifecycle_confidence="exact"` only when both states
+retain every segment and active-block address. Missing addresses produce an
+`approximate` result and warning because equal-size entries are matched by
+multiplicity. Independent runs report lifecycle as `unavailable` rather than
+claiming address identity across processes.
 
 For independent runs, use `compare_points()`:
 
@@ -495,6 +504,9 @@ and HTML only; in-memory results, JSON, and CSV retain every attribution row.
 Limited HTML tables state exactly how many rows or cohorts are shown. Invalid
 `limit` or `stack_depth` values raise before `write()` creates an output
 directory.
+Cohort charts apply `limit` to the selected cohort identities but retain every
+point for those cohorts, so lines are never bent by point filtering. Structured
+results and CSV continue to retain every cohort.
 
 `write()` always creates `report.txt`, `report.json`, and `report.html`.
 Report files are written atomically. `write()` rejects a nonempty directory
@@ -523,11 +535,14 @@ Bundles use the `torch-cudagraph-debug/memory-run` schema: `manifest.json`, one
 has no event file. State files omit cumulative `device_traces`; event files keep
 the raw mappings for only their interval. Manifest, point, and observation fields
 are canonical; derived awaiting-free, inactive, and fragmentation values are not
-stored. Loading a run reads only the manifest and compact summaries.
-`point.allocator_state()` loads the immutable state lazily. Event and state
-payloads use separate caches when the run was loaded with
-`cache_snapshots=True`, the `MemoryRun.load()` default. The
-CLI and `MemoryRunGroup.load()` use bounded-memory loading, retaining only
+stored. Each point manifest authenticates its state and event gzip payload with
+SHA-256. Loading a run still reads only the manifest and compact summaries.
+`point.allocator_state()` loads the immutable state lazily, verifies its digest,
+and rejects disagreement between recomputed state summaries and the manifest.
+`run.validate_payloads()` bypasses lazy caches and rereads every persisted state
+and event payload. Ordinary access uses separate state and event caches when
+the run was loaded with `cache_snapshots=True`, the `MemoryRun.load()` default.
+The CLI and `MemoryRunGroup.load()` use bounded-memory loading, retaining only
 current comparison payloads and compact indexes. The format is JSON-only. Use
 one bundle per process/rank and one writer per bundle.
 
@@ -595,9 +610,13 @@ change in a minor release. Snapshot summaries use
 ## Operational Constraints
 
 - PyTorch allocator history remains bounded by `max_entries` during collection.
-  If one point interval exceeds that ring, state remains usable but event and
-  lifetime queries crossing that interval raise `MemoryHistoryTruncatedError`;
-  increase `max_entries` or record real points more frequently.
+  If one point interval exceeds that ring or history starts after its first
+  boundary, state remains usable but event and lifetime queries crossing that
+  interval raise `MemoryHistoryTruncatedError`. Enable
+  `_record_memory_history()` before the first analyzed point and keep it
+  enabled: PyTorch does not expose a continuity signal that lets the recorder
+  detect a mid-interval stop. Increase `max_entries` or record real points more
+  frequently when the ring is too small.
 - Lifetime analysis is per process and rank and requires complete marker-bounded
   event history. `born_between` retains transient allocations that are active at
   neither endpoint snapshot.

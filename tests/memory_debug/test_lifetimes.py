@@ -32,6 +32,45 @@ def _set_device(value: dict[str, object], device: int) -> dict[str, object]:
     return value
 
 
+def test_idle_selected_device_does_not_block_event_analysis() -> None:
+    """A selected device with no allocations must not fail strict evidence."""
+
+    markers: list[str] = []
+
+    def provider(marker: str):
+        markers.append(marker)
+        if len(markers) == 1:
+            return snapshot(
+                segment(active=0, total=64),
+                traces=[[event("snapshot", marker=marker)], []],
+            )
+        return snapshot(
+            segment(active=64, total=64),
+            traces=[
+                [
+                    event("snapshot", marker=markers[0]),
+                    event("alloc", address=1000, size=64),
+                    event("snapshot", marker=marker),
+                ],
+                [],
+            ],
+        )
+
+    recorder = MemoryRecorder._from_snapshot_provider(provider, devices=(0, 1))
+    recorder.record_point("before")
+    recorder.record_point("after")
+    run = recorder.finish()
+
+    report = run.lifetimes()
+    assert report.history_complete is True
+    assert report.cohorts
+
+    comparison = run.compare(
+        "before", "after", attribution=MemoryAttributionOptions(events=True)
+    )
+    assert comparison.attribution_status.events.complete is True
+
+
 def test_lifetimes_require_event_history() -> None:
     run = make_run(
         [snapshot(segment(active=64, address=1000)), snapshot()],

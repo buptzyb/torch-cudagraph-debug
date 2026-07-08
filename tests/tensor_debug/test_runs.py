@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -187,6 +188,19 @@ def test_recorder_watch_grad_validates_observation_name_at_registration() -> Non
         recorder.watch_grad(tensor, name="")
 
     recorder.close()
+
+
+def test_recorder_close_removes_watch_grad_hooks() -> None:
+    recorder = TensorRecorder(execution="eager")
+    tensor = torch.ones(2, requires_grad=True)
+    assert recorder.watch_grad(tensor, name="grad.x") is not None
+    recorder.close()
+
+    # A hook surviving close() would fire against the closed recorder and
+    # blow up inside autograd; close() must remove every registered hook.
+    tensor.sum().backward()
+    assert tensor.grad is not None
+    assert torch.equal(tensor.grad, torch.ones(2))
 
 
 def test_summary_std_is_stable_for_large_mean_offsets(tmp_path: Path) -> None:
@@ -439,3 +453,48 @@ def test_recorder_close_inherits_configured_synchronization() -> None:
     recorder.close()
 
     assert calls == [False]
+
+
+def test_tensor_value_summary_rejects_impossible_statistics() -> None:
+    run = make_tensor_run([("point", [("x", torch.tensor([0.0, 1.0]), "full")])])
+    summary = run["point"].observation("x").summary
+
+    with pytest.raises(ValueError, match="zero_count exceeds"):
+        replace(summary, zero_count=summary.finite_count + 1)
+    with pytest.raises(ValueError, match="without finite values"):
+        replace(summary, finite_count=0, nan_count=2, zero_count=0)
+    with pytest.raises(ValueError, match="minimum exceeds"):
+        replace(summary, minimum=2.0, maximum=1.0)
+    with pytest.raises(ValueError, match="std must be non-negative"):
+        replace(summary, std=-1.0)
+    with pytest.raises(ValueError, match="l2_norm must be non-negative"):
+        replace(summary, l2_norm=-1.0)
+    with pytest.raises(ValueError, match="zero_count is inconsistent"):
+        replace(summary, minimum=0.5)
+
+
+def test_tensor_models_reject_unserializable_identity_and_time_states() -> None:
+    with pytest.raises(ValueError, match="name must be non-empty"):
+        TensorRecorder(execution="eager", name=123)  # type: ignore[arg-type]
+
+    run = make_tensor_run([("point", [("x", torch.ones(1), "full")])])
+    point = run["point"]
+    observation = point.observation("x")
+    with pytest.raises(ValueError, match="run_id and name"):
+        replace(run, name=123)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="point label"):
+        replace(point, label=123)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="source_device"):
+        replace(observation, source_device=123)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="complete tensor run"):
+        replace(run, finished_at=None)
+    with pytest.raises(ValueError, match="precede created_at"):
+        replace(run, finished_at=run.created_at - 1)
+
+    before_creation = replace(point, timestamp=run.created_at - 1)
+    with pytest.raises(ValueError, match="timestamps must be monotonic"):
+        replace(run, points=(before_creation,))
+    assert run.finished_at is not None
+    after_finish = replace(point, timestamp=run.finished_at + 1)
+    with pytest.raises(ValueError, match="must not follow finished_at"):
+        replace(run, points=(after_finish,))

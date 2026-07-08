@@ -576,3 +576,45 @@ def test_display_options_are_validated_before_render_or_write_side_effects(
     with pytest.raises(ValueError, match=message):
         result.write(output, **options)
     assert not output.exists()
+
+
+def test_timeline_cohort_chart_respects_display_limit() -> None:
+    run = make_history_run(
+        [
+            (
+                [
+                    segment(active=0, total=64, address=1000),
+                    segment(active=0, total=64, address=2000),
+                ],
+                [],
+            ),
+            (
+                [
+                    segment(active=64, address=1000, frame="first.py"),
+                    segment(active=64, address=2000, frame="second.py"),
+                ],
+                [
+                    event("alloc", address=1000, size=64, frame="first.py"),
+                    event("alloc", address=2000, size=64, frame="second.py"),
+                ],
+            ),
+        ],
+        labels=("before", "after"),
+    )
+    timeline = run.timeline(
+        attribution=MemoryAttributionOptions(
+            lifetimes=True,
+            display=MemoryDisplayOptions(limit=1),
+        )
+    )
+
+    analysis = timeline.allocation_lifetimes
+    assert analysis is not None
+    assert len(analysis.cohorts) == 2
+    first, second = (cohort.cohort_id for cohort in analysis.cohorts)
+    html = timeline.to_html()
+    assert first in html
+    assert second not in html
+    structured = timeline.to_dict()["allocation_lifetimes"]
+    assert first in json.dumps(structured)
+    assert second in json.dumps(structured)

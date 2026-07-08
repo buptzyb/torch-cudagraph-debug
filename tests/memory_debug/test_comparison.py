@@ -48,9 +48,15 @@ def test_events_and_lifetimes_share_loaded_event_evidence(
     original_read = recording_module._read_gzip_json
     read_names: list[str] = []
 
-    def tracked_read(path: Path, *, context: str) -> object:
+    def tracked_read(
+        path: Path, *, context: str, expected_sha256: str | None = None
+    ) -> object:
         read_names.append(path.name)
-        return original_read(path, context=context)
+        return original_read(
+            path,
+            context=context,
+            expected_sha256=expected_sha256,
+        )
 
     monkeypatch.setattr(recording_module, "_read_gzip_json", tracked_read)
     options = MemoryAttributionOptions(events=True, lifetimes=True)
@@ -81,6 +87,7 @@ def test_same_run_keeps_pool_totals_and_stream_deltas_separate() -> None:
     comparison = run.compare("before", "after")
 
     assert comparison.lifecycle_available is True
+    assert comparison.lifecycle_confidence == "exact"
     assert comparison.pool_comparisons[0].delta.active_bytes == 0
     by_stream = {
         item.reference_key.stream
@@ -211,12 +218,15 @@ def test_address_less_blocks_count_with_multiplicity() -> None:
         ],
         labels=("before", "after"),
     )
-    lifecycle = run.compare("before", "after").pool_comparisons[0].lifecycle
+    comparison = run.compare("before", "after")
+    lifecycle = comparison.pool_comparisons[0].lifecycle
 
     assert lifecycle is not None
     # Two distinct 100-byte blocks without addresses must count twice,
     # not collapse onto one identity key.
     assert lifecycle.newly_active_bytes == 200
+    assert comparison.lifecycle_confidence == "approximate"
+    assert any("addresses are missing" in warning for warning in comparison.warnings)
 
 
 def test_cross_era_address_reuse_yields_ambiguous_event_attribution() -> None:
@@ -297,6 +307,7 @@ def test_cross_run_matches_only_default_pool_without_mapping() -> None:
     )
     assert comparison.lifecycle_available is False
     assert any("private pools are unmatched" in item for item in comparison.warnings)
+    assert comparison.lifecycle_confidence == "unavailable"
 
 
 def test_cross_run_totals_include_unmatched_private_pools() -> None:
@@ -830,6 +841,47 @@ def test_event_history_overwritten_marker_raises_typed_error() -> None:
             "after",
             attribution=MemoryAttributionOptions(events=True),
         )
+
+
+def test_end_snapshot_without_own_marker_is_complete_evidence() -> None:
+    """The ending snapshot's trace terminates at the boundary that produced it.
+
+    On the real torch path the end marker enters history as the snapshot is
+    taken and is never visible in the snapshot's own trace; the end boundary
+    is attested by ``boundary_recorded``. A window that runs from the start
+    marker to the end of the trace is therefore complete — classifying it
+    truncated would fail every real recorder run.
+    """
+
+    markers: list[str] = []
+
+    def provider(marker: str):
+        markers.append(marker)
+        if len(markers) == 1:
+            traces = [[event("snapshot", marker=marker)]]
+        else:
+            traces = [
+                [
+                    event("snapshot", marker=markers[0]),
+                    event("alloc", address=9000, size=64, pool=(0, 5)),
+                ]
+            ]
+        active_segment = segment(active=64, pool=(0, 5), address=9000)
+        return snapshot(active_segment, traces=traces)
+
+    recorder = MemoryRecorder._from_snapshot_provider(provider)
+    recorder.record_point("before")
+    recorder.record_point("after")
+    run = recorder.finish()
+
+    comparison = run.compare(
+        "before",
+        "after",
+        attribution=MemoryAttributionOptions(events=True),
+    )
+    assert comparison.attribution_status.events.complete is True
+    assert len(comparison.allocator_events) == 1
+    assert comparison.allocator_events[0].action == "alloc"
 
 
 def test_event_history_boundary_order_raises_reconciliation_error() -> None:

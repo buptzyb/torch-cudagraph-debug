@@ -58,6 +58,44 @@ def test_allclose_reports_first_divergence_and_error_metrics() -> None:
     assert report.first_issue.candidate_value == 5.0
 
 
+def test_int64_error_metrics_preserve_differences_above_float64_precision() -> None:
+    reference = make_tensor_run(
+        [
+            (
+                "point",
+                [("x", torch.tensor([2**53, 0], dtype=torch.int64), "full")],
+            )
+        ]
+    )
+    candidate = make_tensor_run(
+        [
+            (
+                "point",
+                [("x", torch.tensor([2**53 + 1, 0], dtype=torch.int64), "full")],
+            )
+        ]
+    )
+
+    report = compare_points(reference["point"], candidate["point"])
+    issue = report.first_issue
+    assert issue is not None
+    assert issue.mismatch_count == 1
+    assert issue.max_abs_error == 1.0
+    assert issue.mean_abs_error == 0.5
+    assert issue.reference_value == 2**53
+    assert issue.candidate_value == 2**53 + 1
+
+    minimum = make_tensor_run(
+        [("point", [("x", torch.tensor([-(2**63)], dtype=torch.int64), "full")])]
+    )
+    maximum = make_tensor_run(
+        [("point", [("x", torch.tensor([2**63 - 1], dtype=torch.int64), "full")])]
+    )
+    extreme = compare_points(minimum["point"], maximum["point"]).first_issue
+    assert extreme is not None
+    assert extreme.max_abs_error == 2**64 - 1
+
+
 def test_summary_comparison_is_strictly_three_state() -> None:
     reference = make_tensor_run(
         [("point", [("x", torch.tensor([1.0, 2.0]), "summary")])]

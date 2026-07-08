@@ -87,6 +87,7 @@ def test_check_rejects_empty_expected_sequence() -> None:
         CheckAction([])._to_native()
 
 
+@pytest.mark.gpu
 def test_check_rejects_non_cpu_expected() -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")

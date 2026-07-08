@@ -135,6 +135,9 @@ sets `complete=True`. Exceptional context exit preserves collected points,
 sets `finished_at`, persists `complete=False`, and freezes further collection;
 it does not relabel a partial investigation as complete. `preview()` is a
 nonterminal view before exit and returns the terminal result afterward.
+Terminal Runs require `finished_at`; timestamps cannot precede creation, follow
+completion, or move backward across Points. Public constructors enforce the same
+identity and time contract as bundle loaders.
 
 Tensor collectors own CUDA-visible storage. `snapshot()`, status queries, and
 `close()` accept the same bool/stream/device synchronization contract.
@@ -151,6 +154,8 @@ state and is reclaimed only after its eager copy or callback completion is
 observed. A failure after CUDA submission begins makes the collector unusable
 for further collection or queries, while preserving `close()` for cleanup.
 Eager use is rejected after the collector has participated in capture.
+A Tensor Recorder commits its per-name invocation index only after the private
+collector accepts the slot, preserving retry identity after host-side failure.
 
 Memory collectors have no persistent native graph resources to close. Probe and
 Recorder semantics are expressed by immutable snapshots and terminal runs
@@ -180,17 +185,24 @@ chunks it crosses. Probe snapshots retain their complete in-memory raw snapshot
 for low-level local inspection and derive `allocator_state()` from it.
 
 Persisted runs mirror this ownership with `states/NNNN.json.gz` and
-`events/NNNN-NNNN.json.gz`. State and event payloads have separate lazy caches.
-State-only comparisons therefore load only endpoint states; event and lifetime
-analysis loads only the event chunks crossed by the requested range. Event
-entries remain raw until attribution normalizes them, preserving allocator fields
-that this package does not yet recognize.
+`events/NNNN-NNNN.json.gz`. Their SHA-256 values live in the point manifest,
+beside compact derived observations. Manifest-only summaries and timelines do
+not read payloads. First raw-state access verifies the digest and recomputes
+observations to reject cache/source disagreement; `MemoryRun.validate_payloads()`
+bypasses lazy caches and rereads every persisted state and event payload.
+Ordinary access keeps separate lazy caches, so state-only attribution loads
+only endpoint states and event or lifetime analysis loads only crossed event
+chunks. Event entries remain raw until attribution recognizes them.
 
 Per-device event evidence has one internal status: `complete`, `disabled`,
 `boundary_unavailable`, `truncated`, or `invalid_boundary_order`. The status is
 recorded at collection time, while public analysis raises the corresponding
 typed error only when the caller requests evidence crossing that interval. A
 truncated interval does not invalidate its point-in-time allocator states.
+Recorder intervals use the ending snapshot's trace end because that snapshot's
+own marker is normally absent from its returned trace. A `complete` interval
+therefore assumes the application kept allocator history enabled continuously;
+the metadata API confirms setup, not history continuity.
 
 ## Architectural Boundaries
 

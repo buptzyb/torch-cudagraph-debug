@@ -11,10 +11,6 @@ namespace torch_cudagraph_debug::tensor_debug {
 struct CheckResult {
     bool ok = true;
     int64_t mismatch_index = -1;
-    double actual = 0.0;
-    double expected = 0.0;
-    double abs_diff = 0.0;
-    double tolerance = 0.0;
     std::string message;
 };
 

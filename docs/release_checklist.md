@@ -19,7 +19,8 @@
   three-state comparison, raw blob format, and CPU-only offline loading are
   documented.
 - Confirm memory ownership, history policy, cross-run matching, JSON bundle
-  format, and one-bundle-per-rank rule are documented.
+  authentication and validation, lifecycle confidence, display-limit semantics,
+  and one-bundle-per-rank rule are documented.
 - Confirm stack/event JSON contains structured `stack_frames`, CSV contains
   parseable `stack_frames_json`, FX metadata is readable in text/HTML, and
   limited HTML tables state shown and total row counts.
@@ -51,8 +52,10 @@ no runtime output or cache directories.
 ## GPU Gate
 
 Source builds require CUDA-enabled PyTorch, a compatible CUDA development
-toolkit, and a C++17 compiler. Start in the source checkout and keep the same
-shell for the complete GPU gate:
+toolkit, and a C++17 compiler. The complete GPU gate — including this first
+suite run — requires a node with at least two GPUs: `TCGD_FAIL_ON_SKIP=1`
+turns every skip into a failure, and parts of the suite skip below two
+devices. Start in the source checkout and keep the same shell:
 
 ```bash
 TCGD_REPO_ROOT="$(pwd)"
@@ -103,6 +106,7 @@ Tensor coverage must include:
 - full and summary bundles, content-addressed deduplication, every supported
   dtype, scalars, empty tensors, lazy loading, corruption rejection, and
   payload digest verification;
+- exact full-range integer diagnostics in Python comparison and native checks;
 - point, run, and point-series comparison, first divergence, worst errors,
   strict and promoted dtypes, three-state summary results, reports, and the
   `tcgd-tensor` CLI;
@@ -122,7 +126,11 @@ Memory coverage must include:
 - device-aware identities for one, multiple, and all visible devices;
 - allocated, reserved, active, requested, awaiting-free, inactive,
   fragmentation, segment, block, and expandable-segment metrics;
-- gzip JSON persistence and `MemoryRun.load()` round trip.
+- gzip JSON persistence and `MemoryRun.load()` round trip;
+- payload digest verification, state/manifest cross-validation, and explicit
+  cache-independent full-bundle validation;
+- exact, approximate, and unavailable address-lifecycle confidence;
+- bounded cohort charts that retain complete structured timeline data.
 
 Run every supported single-GPU example from the installed package:
 
@@ -171,7 +179,7 @@ python "${TCGD_REPO_ROOT}/examples/integrations/tensorboard_export.py" \
   --logdir "${EXAMPLE_ROOT}/tensorboard"
 ```
 
-On a node with at least two GPUs, rerun the complete installed-package suite with
+Still on the two-GPU node, rerun the complete installed-package suite with
 zero skips, then cover rank-local run groups and the remaining CLI commands:
 
 ```bash

@@ -69,6 +69,19 @@ from .stats import MemoryStats, MemoryStatsDelta
 _MemoryState = MemoryPoint | MemoryProbeSnapshot
 
 
+def _lifecycle_identity_is_exact(segments: Sequence[Mapping[str, Any]]) -> bool:
+    for segment in segments:
+        if segment.get("address") is None:
+            return False
+        for block in segment.get("blocks", ()):
+            if (
+                str(block.get("state")).startswith("active_")
+                and block.get("address") is None
+            ):
+                return False
+    return True
+
+
 @dataclass(frozen=True)
 class _MemoryStateView:
     state: _MemoryState
@@ -298,6 +311,7 @@ def _compare_independent_states(
             allocation_lifetimes=None,
         ),
         lifecycle_available=False,
+        lifecycle_confidence="unavailable",
         display_stack_depth=options.display.stack_depth,
         display_limit=options.display.limit,
         warnings=tuple(dict.fromkeys(warnings)),
@@ -534,6 +548,16 @@ def _compare_same_identity_views(
     )
 
     warnings = [*reference.warnings, *candidate.warnings]
+    lifecycle_confidence: Literal["approximate", "exact"] = (
+        "exact"
+        if _lifecycle_identity_is_exact(reference_segments)
+        and _lifecycle_identity_is_exact(candidate_segments)
+        else "approximate"
+    )
+    if lifecycle_confidence == "approximate":
+        warnings.append(
+            "address lifecycle is approximate because allocator addresses are missing"
+        )
     reference_coverage: AllocationStackCoverage | None = None
     candidate_coverage: AllocationStackCoverage | None = None
     stack_deltas: tuple[AllocationStackDelta, ...] = ()
@@ -640,8 +664,10 @@ def _compare_same_identity_views(
         if "truncated" in event_causes or not events_complete:
             raise MemoryHistoryTruncatedError(
                 "allocator event history was truncated for the compared "
-                "interval; raise _record_memory_history(max_entries=...) or "
-                "record points more frequently"
+                "interval; enable _record_memory_history() before the first "
+                "analyzed point and keep it enabled, raise "
+                "_record_memory_history(max_entries=...), or record points "
+                "more frequently"
             )
         allocator_events = summarize_allocator_events(
             entries,
@@ -701,6 +727,7 @@ def _compare_same_identity_views(
             allocation_lifetimes=allocation_lifetimes,
         ),
         lifecycle_available=True,
+        lifecycle_confidence=lifecycle_confidence,
         display_stack_depth=options.display.stack_depth,
         display_limit=options.display.limit,
         warnings=tuple(dict.fromkeys(warnings)),

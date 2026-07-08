@@ -6,9 +6,6 @@ from pathlib import Path
 
 import pytest
 
-# tomllib is stdlib only on Python >= 3.11; the package floor is 3.10.
-tomllib = pytest.importorskip("tomllib")
-
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / ".agents" / "skills" / "tcgd-case-study"
 SKILL = SKILL_ROOT / "SKILL.md"
@@ -96,6 +93,9 @@ def test_source_distribution_manifest_includes_agent_assets() -> None:
 
 
 def test_codex_agent_uses_the_shared_skill_contract() -> None:
+    # tomllib is stdlib only on Python >= 3.11; the package floor is 3.10.
+    # Only this test needs it — the other asset gates must keep running.
+    tomllib = pytest.importorskip("tomllib")
     with CODEX_AGENT.open("rb") as file:
         agent = tomllib.load(file)
 

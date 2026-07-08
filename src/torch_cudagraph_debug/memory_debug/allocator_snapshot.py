@@ -140,8 +140,10 @@ def normalize_snapshot(
                     "frames": _frames_field(block, block_context),
                 }
             )
-            if block_address is not None:
-                block_address += size
+            if current_address is None:
+                block_address = None
+            else:
+                block_address = current_address + size
         normalized.append(
             {
                 "address": address,

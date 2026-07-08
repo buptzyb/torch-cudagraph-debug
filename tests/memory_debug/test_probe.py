@@ -262,6 +262,44 @@ def test_default_probe_delays_device_binding_after_empty_provider_snapshot() -> 
     assert set(second.pool_stats) == {MemoryPoolKey(1, (0, 0))}
 
 
+def test_filtered_deviceless_segments_are_reported() -> None:
+    orphan = segment(active=64, address=1000)
+    del orphan["device"]
+    kept = segment(active=128, address=2000, device=1)
+    probe = MemoryProbe._from_snapshot_provider(
+        lambda marker: snapshot(orphan, kept),
+        devices=[1],
+    )
+
+    captured = probe.snapshot()
+
+    assert set(captured.pool_stats) == {MemoryPoolKey(1, (0, 0))}
+    # The dropped segment lacked a device field; its exclusion must be
+    # disclosed, not silent.
+    assert any("missing 'device'" in warning for warning in captured.warnings)
+
+
+def test_provider_probe_adopts_devices_that_appear_later() -> None:
+    device1 = segment(active=4096, address=2000, device=1)
+    values = iter(
+        (
+            snapshot(segment(active=100, address=1000)),
+            snapshot(segment(active=100, address=1000), device1),
+        )
+    )
+    probe = MemoryProbe._from_snapshot_provider(lambda marker: next(values))
+
+    first = probe.snapshot()
+    second = probe.snapshot()
+
+    assert set(first.pool_stats) == {MemoryPoolKey(0, (0, 0))}
+    # A device first touched after binding must join the selection instead
+    # of silently disappearing from every later capture.
+    assert MemoryPoolKey(1, (0, 0)) in second.pool_stats
+    assert second.pool_stats[MemoryPoolKey(1, (0, 0))].allocated_bytes == 4096
+    assert any("device" in warning for warning in second.warnings)
+
+
 def test_all_devices_probe_delays_binding_after_empty_provider_snapshot() -> None:
     device1 = segment(active=20, address=2000)
     device1["device"] = 1

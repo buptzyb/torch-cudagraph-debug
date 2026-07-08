@@ -8,7 +8,9 @@ from torch_cudagraph_debug.memory_debug import MemoryPoolKey
 from torch_cudagraph_debug.memory_debug._pool_ranges import build_pool_range_index
 from torch_cudagraph_debug.memory_debug.advanced import (
     compare_allocation_stacks,
+    extract_event_window,
     mutable_snapshot,
+    normalize_snapshot,
     normalize_trace_entries,
     pool_id_label,
     stack_key_from_frames,
@@ -17,7 +19,7 @@ from torch_cudagraph_debug.memory_debug.advanced import (
     summarize_snapshot,
 )
 
-from ._helpers import make_run, segment, snapshot
+from ._helpers import event, make_run, segment, snapshot
 
 
 def test_snapshot_summary_groups_every_observed_pool_and_stream() -> None:
@@ -75,6 +77,45 @@ def test_allocation_stacks_aggregate_streams_by_default() -> None:
     assert deltas[0].delta_size_bytes == 10
 
 
+def test_extract_event_window_distinguishes_missing_end_marker() -> None:
+    value = snapshot(
+        segment(active=64),
+        traces=[
+            [
+                event("snapshot", marker="start"),
+                event("alloc", address=9000, size=64),
+            ]
+        ],
+    )
+    entries = normalize_trace_entries(value)
+
+    # No end marker requested: the window intentionally stays open through
+    # the end of the trace.
+    open_window = extract_event_window(
+        entries,
+        start_marker="start",
+        end_marker=None,
+        start_label="start",
+    )
+    assert open_window.complete is True
+    assert len(open_window.entries) == 1
+
+    # An end marker was requested but never found: the window must not claim
+    # complete coverage.
+    missing_end = extract_event_window(
+        entries,
+        start_marker="start",
+        end_marker="end",
+        start_label="start",
+    )
+    assert missing_end.complete is False
+    assert missing_end.cause == "truncated"
+    # The warning must not assert a specific cause (the natural torch shape
+    # never contains the ending snapshot's own marker) and must point at
+    # the end_marker=None escape hatch.
+    assert any("end_marker=None" in warning for warning in missing_end.warnings)
+
+
 def test_pool_range_prefers_exact_device_over_device_fallback() -> None:
     index = build_pool_range_index(
         (
@@ -122,6 +163,29 @@ def test_snapshot_normalization_rejects_invalid_present_fields(
 
     with pytest.raises(error):
         summarize_snapshot(snapshot(malformed))
+
+
+def test_block_address_inference_resynchronizes_after_explicit_address() -> None:
+    value = segment(active=200, address=1000)
+    value.pop("address")
+    value["blocks"] = [
+        {
+            "address": 1100,
+            "size": 100,
+            "requested_size": 100,
+            "state": "active_allocated",
+            "frames": [],
+        },
+        {
+            "size": 100,
+            "requested_size": 100,
+            "state": "active_allocated",
+            "frames": [],
+        },
+    ]
+
+    normalized = normalize_snapshot(snapshot(value))
+    assert [block["address"] for block in normalized[0]["blocks"]] == [1100, 1200]
 
 
 def test_stack_normalization_rejects_invalid_frame_fields() -> None:

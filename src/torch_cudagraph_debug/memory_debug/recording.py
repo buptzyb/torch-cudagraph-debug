@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import math
 import time
 import uuid
 import warnings
 import zlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from functools import cached_property
 from pathlib import Path
@@ -57,7 +58,11 @@ from ._pool_identity import (
     normalize_stream,
 )
 from .aggregation import summarize_allocator_scopes, summarize_pools
-from .allocator_snapshot import normalize_snapshot
+from .allocator_snapshot import (
+    normalize_snapshot,
+    summarize_segments,
+    trace_device_indices,
+)
 from .errors import MemoryBundleError, MemoryDebugError, MemoryOwnershipError
 from .events import (
     HISTORY_WINDOW_STATUSES,
@@ -79,6 +84,16 @@ if TYPE_CHECKING:
 BUNDLE_SCHEMA = "torch-cudagraph-debug/memory-run"
 BUNDLE_FORMAT_VERSION = 1
 _MEMORY_STATS_FIELDS = tuple(item.name for item in fields(MemoryStats))
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 _MANIFEST_FIELDS = frozenset(
     {
         "schema",
@@ -106,6 +121,8 @@ _POINT_FIELDS = frozenset(
         "boundary_recorded",
         "state_file",
         "event_file",
+        "state_sha256",
+        "event_sha256",
         "history",
         "warnings",
         "observations",
@@ -183,6 +200,8 @@ class MemoryPoint:
     )
     _state_path: Path | None = field(default=None, repr=False, compare=False)
     _event_path: Path | None = field(default=None, repr=False, compare=False)
+    _state_sha256: str | None = field(default=None, repr=False, compare=False)
+    _event_sha256: str | None = field(default=None, repr=False, compare=False)
     _state_cache: dict[str, FrozenJSONValue] = field(
         default_factory=dict, repr=False, compare=False
     )
@@ -192,7 +211,12 @@ class MemoryPoint:
     _cache_snapshots: bool = field(default=True, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not self.run_id or not self.label:
+        if (
+            not isinstance(self.run_id, str)
+            or not self.run_id
+            or not isinstance(self.label, str)
+            or not self.label
+        ):
             raise ValueError("memory point run_id and label must be non-empty")
         if type(self.index) is not int or self.index < 0:
             raise ValueError("memory point index must be non-negative")
@@ -202,10 +226,31 @@ class MemoryPoint:
             or not math.isfinite(float(self.timestamp))
         ):
             raise ValueError("memory point timestamp must be finite")
-        if not self.boundary_marker:
+        if not isinstance(self.boundary_marker, str) or not self.boundary_marker:
             raise ValueError("memory point boundary_marker must be non-empty")
         if type(self._boundary_recorded) is not bool:
             raise TypeError("memory point boundary status must be boolean")
+        if type(self._cache_snapshots) is not bool:
+            raise TypeError("memory point cache_snapshots must be boolean")
+        for payload_name, path, digest in (
+            ("state", self._state_path, self._state_sha256),
+            ("event", self._event_path, self._event_sha256),
+        ):
+            if path is not None and not isinstance(path, Path):
+                raise TypeError(
+                    f"memory point {payload_name} path must be a pathlib.Path or None"
+                )
+            if (path is None) != (digest is None):
+                raise ValueError(
+                    f"memory point {payload_name} path and sha256 must be paired"
+                )
+            if digest is not None and not _is_sha256(digest):
+                raise ValueError(
+                    f"memory point {payload_name} sha256 must be 64 lowercase "
+                    "hexadecimal digits"
+                )
+        if self._state_path is None and "state" not in self._state_cache:
+            raise ValueError("memory point must own allocator state")
         if [item.order for item in self.observations] != list(
             range(len(self.observations))
         ):
@@ -216,8 +261,18 @@ class MemoryPoint:
         history_devices = [item.device_index for item in self._history_statuses]
         if len(history_devices) != len(set(history_devices)):
             raise ValueError("memory history statuses must have unique devices")
-        if self.index == 0 and self._history_statuses:
+        if self.index == 0 and (
+            self._history_statuses or self._event_path is not None or self._event_cache
+        ):
             raise ValueError("the first memory point cannot own event history")
+        if (
+            self.index > 0
+            and self._event_path is None
+            and "event" not in self._event_cache
+        ):
+            raise ValueError(
+                "every memory point after the first must own event evidence"
+            )
         object.__setattr__(
             self,
             "metadata",
@@ -271,11 +326,21 @@ class MemoryPoint:
         cached = self._state_cache.get("state") if self._cache_snapshots else None
         if cached is not None:
             return cast(Mapping[str, FrozenJSONValue], cached)
+        frozen = self._load_allocator_state()
+        if self._cache_snapshots:
+            self._state_cache["state"] = frozen
+        return frozen
+
+    def _load_allocator_state(self) -> Mapping[str, FrozenJSONValue]:
         if self._state_path is None:
-            raise MemoryBundleError(f"point {self.label!r} has no state payload")
+            cached = self._state_cache.get("state")
+            if cached is None:
+                raise MemoryBundleError(f"point {self.label!r} has no state payload")
+            return cast(Mapping[str, FrozenJSONValue], cached)
         state = _read_gzip_json(
             self._state_path,
             context=f"state for point {self.label!r}",
+            expected_sha256=self._state_sha256,
         )
         if not isinstance(state, Mapping):
             raise MemoryBundleError(
@@ -286,14 +351,17 @@ class MemoryPoint:
                 f"state for point {self.label!r} must not contain device_traces"
             )
         try:
-            normalize_snapshot(state)
+            normalized = normalize_snapshot(state)
+            if summarize_segments(normalized) != dict(self.observation_stats):
+                raise MemoryBundleError(
+                    f"state for point {self.label!r} does not match manifest "
+                    "observations"
+                )
         except (TypeError, ValueError) as exc:
             raise MemoryBundleError(
                 f"state for point {self.label!r} has invalid allocator schema: {exc}"
             ) from exc
         frozen = _freeze_json(cast(JSONValue, state))
-        if self._cache_snapshots:
-            self._state_cache["state"] = frozen
         return cast(Mapping[str, FrozenJSONValue], frozen)
 
     def _event_evidence(self) -> _PointEventEvidence | None:
@@ -302,16 +370,23 @@ class MemoryPoint:
         cached = self._event_cache.get("event")
         if cached is not None:
             return cached
-        if self._event_path is None:
-            raise MemoryBundleError(f"point {self.label!r} has no event payload")
-        payload = _read_gzip_json(
-            self._event_path,
-            context=f"event evidence for point {self.label!r}",
-        )
-        evidence = _event_evidence_from_payload(payload, point=self)
+        evidence = self._load_event_evidence()
         if self._cache_snapshots:
             self._event_cache["event"] = evidence
         return evidence
+
+    def _load_event_evidence(self) -> _PointEventEvidence:
+        if self._event_path is None:
+            cached = self._event_cache.get("event")
+            if cached is None:
+                raise MemoryBundleError(f"point {self.label!r} has no event payload")
+            return cached
+        payload = _read_gzip_json(
+            self._event_path,
+            context=f"event evidence for point {self.label!r}",
+            expected_sha256=self._event_sha256,
+        )
+        return _event_evidence_from_payload(payload, point=self)
 
     def _event_windows(self) -> tuple[Any, ...]:
         evidence = self._event_evidence()
@@ -400,7 +475,12 @@ class MemoryRun:
     bundle_dir: Path | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
-        if not self.run_id or not self.name:
+        if (
+            not isinstance(self.run_id, str)
+            or not self.run_id
+            or not isinstance(self.name, str)
+            or not self.name
+        ):
             raise ValueError("memory run run_id and name must be non-empty")
         validate_group_identity(self.rank, self.group_id, self.world_size)
         if type(self.complete) is not bool:
@@ -417,6 +497,12 @@ class MemoryRun:
             or not math.isfinite(float(self.finished_at))
         ):
             raise ValueError("finished_at must be finite or None")
+        if self.complete and self.finished_at is None:
+            raise ValueError("a complete memory run must have finished_at")
+        if self.finished_at is not None and self.finished_at < self.created_at:
+            raise ValueError("finished_at must not precede created_at")
+        previous_timestamp = float(self.created_at)
+
         object.__setattr__(
             self,
             "provenance",
@@ -431,6 +517,12 @@ class MemoryRun:
         for expected_index, point in enumerate(self.points):
             if point.run_id != self.run_id or point.index != expected_index:
                 raise ValueError("memory run points must be owned and ordered")
+            if point.timestamp < previous_timestamp:
+                raise ValueError("memory point timestamps must be monotonic")
+            if self.finished_at is not None and point.timestamp > self.finished_at:
+                raise ValueError("memory point timestamp must not follow finished_at")
+            previous_timestamp = point.timestamp
+
             if point.label in labels:
                 raise ValueError(f"duplicate memory point label {point.label!r}")
             labels.add(point.label)
@@ -448,6 +540,14 @@ class MemoryRun:
             "provenance": _thaw_json(cast(FrozenJSONValue, self.provenance)),
             "run_metadata": _thaw_json(cast(FrozenJSONValue, self.run_metadata)),
         }
+
+    def validate_payloads(self) -> None:
+        """Validate every state and event payload against the manifest."""
+
+        for point in self.points:
+            point._load_allocator_state()
+            if point.index > 0:
+                point._load_event_evidence()
 
     def point(self, ref: str | int | MemoryPoint) -> MemoryPoint:
         if isinstance(ref, MemoryPoint):
@@ -641,13 +741,21 @@ class MemoryRun:
                 raise MemoryBundleError(
                     f"state file for point {label!r} does not exist"
                 )
+            state_sha256 = _require_sha256(
+                raw["state_sha256"], context=f"state for point {label!r}"
+            )
             if expected_index == 0:
-                if raw["event_file"] is not None or raw["history"] is not None:
+                if (
+                    raw["event_file"] is not None
+                    or raw["event_sha256"] is not None
+                    or raw["history"] is not None
+                ):
                     raise MemoryBundleError(
                         "the first memory point must not have event evidence"
                     )
                 event_path = None
                 history_statuses: tuple[_DeviceHistoryStatus, ...] = ()
+                event_sha256 = None
             else:
                 event_path = _safe_bundle_payload_path(
                     root,
@@ -659,6 +767,9 @@ class MemoryRun:
                     raise MemoryBundleError(
                         f"event file for point {label!r} does not exist"
                     )
+                event_sha256 = _require_sha256(
+                    raw["event_sha256"], context=f"event evidence for point {label!r}"
+                )
                 history_statuses = _history_statuses_from_manifest(
                     raw["history"], point_label=label
                 )
@@ -720,6 +831,8 @@ class MemoryRun:
                     _state_path=state_path,
                     _event_path=event_path,
                     _cache_snapshots=cache_snapshots,
+                    _state_sha256=state_sha256,
+                    _event_sha256=event_sha256,
                 )
             except (TypeError, ValueError) as exc:
                 raise MemoryBundleError(
@@ -813,7 +926,7 @@ class MemoryRecorder:
         world_size: int | None = None,
         run_metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        if not name:
+        if not isinstance(name, str) or not name:
             raise ValueError("name must be non-empty")
         self.name = name
         self.bundle_dir = Path(bundle_dir).resolve() if bundle_dir is not None else None
@@ -879,7 +992,7 @@ class MemoryRecorder:
             raise MemoryDebugError(
                 "cannot record a point on a finished memory recorder"
             )
-        if not label:
+        if not isinstance(label, str) or not label:
             raise ValueError("memory point label must be non-empty")
         if any(point.label == label for point in self._points):
             raise ValueError(f"memory point label {label!r} already exists")
@@ -907,7 +1020,9 @@ class MemoryRecorder:
             previous = self._points[-1]
             event_evidence = _extract_point_event_evidence(
                 snapshot,
-                devices=capture.devices,
+                devices=_evidence_devices(
+                    snapshot, capture.devices, previous.observations
+                ),
                 previous_boundary_recorded=previous._boundary_recorded,
                 current_boundary_recorded=capture.boundary_recorded,
                 start_marker=previous.boundary_marker,
@@ -940,12 +1055,14 @@ class MemoryRecorder:
         )
         state_path: Path | None = None
         event_path: Path | None = None
+        state_sha256: str | None = None
+        event_sha256: str | None = None
         state_cache: dict[str, FrozenJSONValue] = {}
         event_cache: dict[str, _PointEventEvidence] = {}
         if self.bundle_dir is not None:
-            state_path = self._write_state(index, state_payload)
+            state_path, state_sha256 = self._write_state(index, state_payload)
             if event_evidence is not None:
-                event_path = self._write_event(event_evidence)
+                event_path, event_sha256 = self._write_event(event_evidence)
         else:
             state_cache["state"] = _freeze_json(state_payload)
             if event_evidence is not None:
@@ -967,6 +1084,8 @@ class MemoryRecorder:
             _history_statuses=history_statuses,
             _state_path=state_path,
             _event_path=event_path,
+            _state_sha256=state_sha256,
+            _event_sha256=event_sha256,
             _state_cache=state_cache,
             _event_cache=event_cache,
         )
@@ -1067,32 +1186,34 @@ class MemoryRecorder:
         finally:
             self._context_active = False
 
-    def _write_state(self, index: int, state: Mapping[str, Any]) -> Path:
+    def _write_state(self, index: int, state: Mapping[str, Any]) -> tuple[Path, str]:
         assert self.bundle_dir is not None
         path = self.bundle_dir / "states" / f"{index:04d}.json.gz"
-        self._write_gzip_payload(path, state, context=f"allocator state {index}")
-        return path
+        digest = self._write_gzip_payload(
+            path, state, context=f"allocator state {index}"
+        )
+        return path, digest
 
-    def _write_event(self, evidence: _PointEventEvidence) -> Path:
+    def _write_event(self, evidence: _PointEventEvidence) -> tuple[Path, str]:
         assert self.bundle_dir is not None
         path = (
             self.bundle_dir
             / "events"
             / f"{evidence.start_index:04d}-{evidence.end_index:04d}.json.gz"
         )
-        self._write_gzip_payload(
+        digest = self._write_gzip_payload(
             path,
             _event_evidence_payload(evidence),
             context=(
                 f"allocator event evidence {evidence.start_index}-{evidence.end_index}"
             ),
         )
-        return path
+        return path, digest
 
     @staticmethod
     def _write_gzip_payload(
         path: Path, payload: Mapping[str, Any], *, context: str
-    ) -> None:
+    ) -> str:
         temporary = path.with_name(path.name + ".tmp")
         try:
             with gzip.open(
@@ -1108,6 +1229,7 @@ class MemoryRecorder:
                     allow_nan=False,
                 )
             temporary.replace(path)
+            return hashlib.sha256(path.read_bytes()).hexdigest()
         except (OSError, TypeError, ValueError) as exc:
             raise MemoryBundleError(f"could not persist {context}: {exc}") from exc
         finally:
@@ -1168,9 +1290,9 @@ class MemoryRecorder:
 
 
 def _point_manifest(point: MemoryPoint, root: Path) -> dict[str, object]:
-    if point._state_path is None:
+    if point._state_path is None or point._state_sha256 is None:
         raise MemoryBundleError(f"point {point.label!r} is not persisted")
-    if point.index > 0 and point._event_path is None:
+    if point.index > 0 and (point._event_path is None or point._event_sha256 is None):
         raise MemoryBundleError(
             f"point {point.label!r} has no persisted event evidence"
         )
@@ -1182,11 +1304,13 @@ def _point_manifest(point: MemoryPoint, root: Path) -> dict[str, object]:
         "boundary_marker": point.boundary_marker,
         "boundary_recorded": point._boundary_recorded,
         "state_file": str(point._state_path.relative_to(root)),
+        "state_sha256": point._state_sha256,
         "event_file": (
             str(point._event_path.relative_to(root))
             if point._event_path is not None
             else None
         ),
+        "event_sha256": point._event_sha256,
         "history": (
             [
                 {
@@ -1423,10 +1547,52 @@ def _event_evidence_from_payload(
     )
 
 
-def _read_gzip_json(path: Path, *, context: str) -> Any:
+def _require_sha256(raw: Any, *, context: str) -> str:
+    value = require_nonempty_string(
+        raw, f"{context} sha256", error_type=MemoryBundleError
+    )
+    if not _is_sha256(value):
+        raise MemoryBundleError(f"{context} sha256 must be 64 lowercase hex characters")
+    return value
+
+
+def _evidence_devices(
+    snapshot: object,
+    selected: tuple[int, ...],
+    previous_observations: tuple[MemoryObservation, ...],
+) -> tuple[int, ...]:
+    """Return the selected devices that carry allocator data for one interval.
+
+    A selected device that is completely idle (no segments at either
+    endpoint and no trace entries) has no history to demand: excluding it
+    keeps strict evidence checks from failing on untouched GPUs.
+    """
+
+    active = {item.device_index for item in previous_observations}
+    if isinstance(snapshot, Mapping):
+        segments = snapshot.get("segments", ())
+        if isinstance(segments, Sequence):
+            for segment in segments:
+                if isinstance(segment, Mapping):
+                    active.add(normalize_device_index(segment.get("device", 0)))
+    active.update(trace_device_indices(snapshot))
+    return tuple(device for device in selected if device in active)
+
+
+def _read_gzip_json(
+    path: Path, *, context: str, expected_sha256: str | None = None
+) -> Any:
     try:
-        with gzip.open(path, "rt", encoding="utf-8") as handle:
-            text = handle.read()
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise MemoryBundleError(f"could not load {context}: {exc}") from exc
+    if (
+        expected_sha256 is not None
+        and hashlib.sha256(payload).hexdigest() != expected_sha256
+    ):
+        raise MemoryBundleError(f"{context} does not match its SHA-256")
+    try:
+        text = gzip.decompress(payload).decode("utf-8")
     except (OSError, EOFError, zlib.error, UnicodeDecodeError) as exc:
         raise MemoryBundleError(f"could not load {context}: {exc}") from exc
     return strict_json_loads(

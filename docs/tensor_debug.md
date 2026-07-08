@@ -153,11 +153,18 @@ its fixed slot layout, and reads those slots when a later `record_point()` wraps
 `graph.replay()`. All named CUDA Graph observations owned by one recorder share
 one internal `RecordAction` session, one replay counter, and one counter
 increment kernel. Tensor payload copies still occur once per observed slot.
+Capture invocation identity is committed only after the private collector
+accepts the slot. A recoverable host-side enqueue failure therefore leaves the
+same `(name, invocation_index)` available for a retry.
 
 Set `strict_scope=True` when an instrumentation call outside the active eager
 point or CUDA Graph capture should be treated as a bug. The default leaves such
 calls as transparent no-ops so one instrumented function can serve warmup and
 collection.
+
+The CUDA Graph scope check uses the recorder's configured device before input
+validation, so a CPU or otherwise unsupported warmup value outside capture is
+still a no-op; the same value is rejected when capture is active.
 
 `record_point()` applies the same synchronization policy as quick Probe queries.
 Pass the replay or eager execution stream when it is known. `False` is valid
@@ -214,6 +221,10 @@ and dtype, then compares values using allclose by default. Missing observations
 and invocations are mismatches. Set `mode="exact"` for raw-value identity or
 `dtype_policy="promote"` to explicitly compare different numeric dtypes after
 promotion.
+Integer and bool comparisons remain exact. Their diagnostic differences are
+computed as integers, so mismatch values and maximum absolute error preserve
+adjacent `int64` values above `2**53` and differences spanning the signed
+range. Mean and relative errors remain floating-point metrics.
 
 Source stride is part of tensor metadata. The default
 `layout_policy="strict"` reports a stride difference as a mismatch; use
@@ -433,6 +444,10 @@ handle = weight_grad_probe.watch_grad(module.weight, name="weight.grad", strict=
 # Later, after the hook is no longer needed:
 handle.remove()
 ```
+
+`close()` removes every hook the probe registered, so gradients computed
+after close flow through untouched. Removing a handle yourself earlier is
+still safe; the close-time removal is idempotent.
 
 The optional name defaults to `probe.name`. The hook calls the probe for its side
 effect and returns the original gradient. Invocation indices are assigned when

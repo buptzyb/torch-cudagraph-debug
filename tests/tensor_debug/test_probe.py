@@ -347,6 +347,67 @@ def test_probe_uses_opaque_native_handle(monkeypatch: pytest.MonkeyPatch) -> Non
         probe.snapshot()
 
 
+def test_rejected_close_keeps_watch_grad_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeHandle:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def enqueue(
+            self,
+            tensor: torch.Tensor,
+            name: str,
+            invocation_index: int,
+        ) -> torch.Tensor:
+            self.calls += 1
+            return tensor
+
+        def _reclaim_retired_staging(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    handle = FakeHandle()
+    _install_fake_native(monkeypatch, handle)
+
+    probe = TensorProbe("grads", [RecordAction()], when="always")
+    source = torch.tensor([1.0, 2.0], requires_grad=True)
+    assert probe.watch_grad(source) is not None
+
+    with pytest.raises(TypeError):
+        probe.close(synchronize=123)
+
+    # A rejected close must leave the probe fully open: the gradient hooks
+    # must keep firing, not silently vanish.
+    assert probe._closed is False
+    source.sum().backward()
+    assert handle.calls == 1
+
+
+def test_close_removes_watch_grad_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeHandle:
+        def _reclaim_retired_staging(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    _install_fake_native(monkeypatch, FakeHandle())
+
+    probe = TensorProbe("grads", [RecordAction()], when="always")
+    source = torch.tensor([1.0, 2.0], requires_grad=True)
+    assert probe.watch_grad(source) is not None
+    probe.close(synchronize=False)
+
+    # A hook surviving close() would fire against the closed collector and
+    # blow up inside autograd; close() must remove every registered hook.
+    source.sum().backward()
+    assert source.grad is not None
+    assert torch.equal(source.grad, torch.ones(2))
+
+
 def test_first_capture_replaces_eager_stride_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -557,6 +618,7 @@ def test_watch_grad_probes_but_returns_original_grad() -> None:
         def __init__(self) -> None:
             self.name = "grad"
             self._closed = False
+            self._grad_handles = []
             self.calls: list[tuple[str | None, torch.Tensor]] = []
 
         def __call__(
@@ -587,6 +649,7 @@ def test_watch_grad_returned_handle_can_remove_hook() -> None:
         def __init__(self) -> None:
             self.name = "grad"
             self._closed = False
+            self._grad_handles = []
             self.calls = 0
 
         def __call__(

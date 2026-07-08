@@ -1049,8 +1049,10 @@ def _raise_for_history_gaps(histories: Sequence[_IntervalHistory]) -> None:
         raise MemoryHistoryTruncatedError(
             "allocator event history was truncated for interval(s): "
             + ", ".join(dict.fromkeys(truncated))
-            + "; raise _record_memory_history(max_entries=...) or record "
-            "points more frequently so each interval fits the ring buffer"
+            + "; enable _record_memory_history() before the first analyzed "
+            "point and keep it enabled, raise "
+            "_record_memory_history(max_entries=...), or record points more "
+            "frequently so each interval fits the ring buffer"
         )
 
 

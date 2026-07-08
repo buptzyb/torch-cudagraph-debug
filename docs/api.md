@@ -280,7 +280,10 @@ actually fire, so repeated same-name hooks follow backward execution order.
 It obeys the probe's `when`
 policy, so default capture-only probes do no work during eager backward. The
 method returns a removable hook handle. If `tensor.requires_grad` is false, it
-returns `None`; with `strict=True`, it raises `RuntimeError`.
+returns `None`; with `strict=True`, it raises `RuntimeError`. Every registered
+hook is removed by `close()`, so a backward pass after close never fires a
+hook against the closed probe; removing a handle earlier yourself remains
+safe.
 
 `close()` first performs the requested synchronization, reclaims retired host
 staging, and releases native resources. An unsynchronized close verifies
@@ -453,8 +456,9 @@ Interrupted contexts do not append a point.
 
 `finish()` is idempotent, writes `complete=True`, and rejects later points. It
 does not release captured native storage. `close()` releases that storage after
-the requested bool/stream/device synchronization and requires that the graph
-can no longer replay. A normal context-manager exit calls `finish()` and then
+the requested bool/stream/device synchronization, removes every gradient hook
+registered through `watch_grad()`, and requires that the graph can no longer
+replay. A normal context-manager exit calls `finish()` and then
 `close()` with the recorder's configured synchronization target. If the block
 raises, the recorder instead freezes and persists its partial result with
 `complete=False`, blocks later collection, closes resources, and does not
@@ -566,6 +570,9 @@ values with `equal_nan` honored, so bit distinctions that promotion erases
 descriptors, mismatch count and fraction, max absolute and relative error, mean
 absolute error, and the first mismatching coordinate and values when full
 payloads make those metrics available.
+Integer diagnostics subtract integer values without floating-point conversion.
+Mismatch values and maximum absolute error remain exact across the full `int64`
+range; mean and relative errors remain floating-point metrics.
 
 `TensorSnapshotComparison`, `TensorPointComparison`, `TensorRunComparison`,
 `TensorPointSeriesComparison`, and `TensorRunGroupComparison` expose `status`,
@@ -906,6 +913,7 @@ returns an editable deep copy.
 ```python
 MemoryRun.load(bundle_dir, *, cache_snapshots=True) -> MemoryRun
 run.descriptor() -> dict
+run.validate_payloads() -> None
 run.point(label_or_index_or_point) -> MemoryPoint
 run[label_or_index] -> MemoryPoint
 run.between(start, end) -> MemoryRange
@@ -932,6 +940,12 @@ observations:
 - new and removed segment bytes;
 - bytes that became active;
 - bytes that became inactive and allocator-reusable.
+`lifecycle_available` indicates whether address lifecycle was computed.
+`lifecycle_confidence` is `exact` when both states retain every segment and
+active-block address, `approximate` when missing addresses require size-based
+multiset matching, and `unavailable` for independent states. Approximate results
+remain visible but carry a warning because equal-size allocation churn can
+cancel without stable addresses.
 
 Allocator events and allocation lifetimes are separate optional attribution
 results controlled by `MemoryAttributionOptions`.
@@ -975,12 +989,16 @@ package never enables it. State totals never require history. Stack
 attribution uses live block frames:
 partial frame coverage returns exact attributed rows plus an `<unattributed>`
 bucket, while zero coverage for nonempty active state raises
-`MemoryHistoryDisabledError`. Events and lifetime transitions require complete
-allocator event history. Missing event history raises
-`MemoryHistoryDisabledError`; an unavailable metadata boundary raises
-`MemoryHistoryBoundaryError`; and a previous boundary overwritten by the bounded
-history ring raises `MemoryHistoryTruncatedError`. Invalid boundary order or
-complete history that cannot be reconciled with allocator state raises
+`MemoryHistoryDisabledError`. Events and lifetime transitions require the
+application to keep complete allocator event history enabled throughout every
+analyzed interval. Missing event history raises `MemoryHistoryDisabledError`;
+an unavailable metadata boundary raises `MemoryHistoryBoundaryError`; and a
+missing start marker raises `MemoryHistoryTruncatedError` because the tool
+cannot distinguish ring-buffer overwrite from history enabled late. Recorder
+intervals use the ending snapshot's trace end because its own marker is normally
+absent; PyTorch does not expose a signal that verifies history stayed enabled
+between the points. Invalid boundary order or complete history that cannot be
+reconciled with allocator state raises
 `MemoryReconciliationError` unconditionally. Display limits affect only text
 and HTML, never structured result tuples, JSON, or CSV.
 
@@ -1194,8 +1212,8 @@ and serialization. Their main programmatic fields are:
 
 - `MemorySnapshotComparison` and `MemoryPointComparison`: sibling result types
   with `reference`, `candidate`, `allocator_scope_comparisons`,
-  `pool_comparisons`, `observation_comparisons`, optional attribution fields, and
-  `warnings`.
+  `pool_comparisons`, `observation_comparisons`, `lifecycle_available`,
+  `lifecycle_confidence`, optional attribution fields, and `warnings`.
 - `MemoryTimeline`: `run`, `allocator_scope_entries`, `pool_entries`,
   `observation_entries`, optional `point_comparisons` and allocation lifetimes,
   and derived `warnings`.
@@ -1292,7 +1310,8 @@ run.tcgd-memory/
 Every point owns one state file. Point zero has no event file; each later point
 owns the raw allocator events from the previous point through itself. State files
 preserve the `_snapshot()` envelope except `device_traces`; event entries preserve
-unknown allocator fields. Every payload and manifest write uses a temporary file
+unknown allocator fields. Point manifests store the SHA-256 of every state and
+event gzip payload. Every payload and manifest write uses a temporary file
 followed by atomic replacement, and every path is validated to remain inside the
 bundle.
 
@@ -1301,10 +1320,14 @@ Observation rows persist the ten base `MemoryStats` fields. `awaiting_free_bytes
 `inactive_bytes`, and `internal_fragmentation_bytes` are derived after loading.
 Missing or unknown fields are rejected.
 
-Loading reads only manifest summaries and never executes pickle. Allocator state
-and event evidence have separate lazy caches, so state-only analysis never reads
-event files. A bundle has one writer; distributed users create one bundle per
-rank.
+Loading reads only manifest summaries and never executes pickle. On first raw
+payload access, the loader verifies its SHA-256; state access also recomputes the
+device/pool/stream summaries and rejects disagreement with the manifest cache.
+`run.validate_payloads()` explicitly bypasses those caches, rereads every
+persisted state and event payload, and performs the same checks. Allocator state
+and event evidence have separate lazy caches for ordinary access, so manifest-only
+analysis never reads payload files. A bundle has one writer;
+distributed users create one bundle per rank.
 
 ### CLI
 
@@ -1447,6 +1470,14 @@ advanced.summarize_allocator_events(
 Allocator-event rows use the same structured-frame, location-key, fingerprint,
 JSON, and CSV contracts as allocation-stack rows.
 
+`extract_event_window` bounds the window by the last occurrence of each
+requested marker. Pass `end_marker=None` to read from the start marker
+through the end of the trace — this is the correct call when the end
+boundary is the snapshot that produced the trace, because a snapshot's own
+boundary marker is never visible in its own trace. A non-`None` end marker
+that is not found classifies the window as truncated rather than silently
+reading to the end of the trace.
+
 Identity, stack-key, and formatting helpers:
 
 ```python
@@ -1472,8 +1503,8 @@ advanced.format_comparison(reference, candidate, delta)
 - `MemoryHistoryError`: requested history unavailable or incomplete.
 - `MemoryHistoryDisabledError`: history never recorded on an analyzed device.
 - `MemoryHistoryBoundaryError`: a point boundary could not be recorded.
-- `MemoryHistoryTruncatedError`: a boundary marker was overwritten in the
-  history ring buffer.
+- `MemoryHistoryTruncatedError`: a required marker is missing from the trace;
+  ring-buffer overwrite and history enabled late are not always distinguishable.
 - `MemoryReconciliationError`: boundary order is invalid or complete history
   contradicts allocator state, indicating corrupted input or a package bug.
 - `MemoryBundleError`: malformed, unsupported, or unreadable bundle.

@@ -19,8 +19,20 @@ def strict_json_loads(text: str, *, error_type: type[ErrorT], context: str) -> A
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON number {value}")
 
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key {key!r}")
+            result[key] = value
+        return result
+
     try:
-        return json.loads(text, parse_constant=reject_constant)
+        return json.loads(
+            text,
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
+        )
     except (json.JSONDecodeError, ValueError) as exc:
         raise error_type(f"could not decode {context}: {exc}") from exc
 
@@ -71,7 +83,10 @@ def require_finite_number(
 ) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise error_type(f"{context} must be a finite JSON number")
-    result = float(value)
+    try:
+        result = float(value)
+    except OverflowError as exc:
+        raise error_type(f"{context} must be finite") from exc
     if not math.isfinite(result):
         raise error_type(f"{context} must be finite")
     return result

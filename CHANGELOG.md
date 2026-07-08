@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- Tensor comparison and native `CheckAction` now preserve exact integer
+  differences and values across the full `int64` range instead of converting
+  operands to `float64` before subtraction or formatting.
+- `TensorRecorder` commits a capture invocation only after the private
+  collector accepts it, and capture-external calls determine scope from the
+  recorder device before validating the input tensor.
+- Memory bundles now authenticate state and event payloads with SHA-256 and
+  validate raw state summaries against manifest observations on lazy access;
+  `MemoryRun.validate_payloads()` performs an explicit full-bundle check that
+  rereads persisted payloads instead of trusting prior lazy-load caches.
+- Strict persisted models reject duplicate JSON keys, overflowing numeric
+  coercions, impossible tensor summaries, non-string identities, and invalid
+  Run completion or timestamp order before those states can be written.
+- Block-address inference now resumes from every explicit block address.
+  Same-identity memory comparisons report address lifecycle confidence as
+  `exact` or `approximate`; independent comparisons report `unavailable`.
+- Timeline cohort charts honor the display cohort limit while retaining every
+  selected cohort's complete point series and every cohort in JSON and CSV.
+
 - Structural segment and block sizes (`total_size`, `allocated_size`,
   `active_size`, block `size`) are required: absent fields raise instead of
   defaulting to invariant-breaking zeros. Absent `requested_size` falls back
@@ -34,15 +53,44 @@
   duplicate birth) whenever it survived a point boundary.
 - A missing start marker no longer silently replays the entire history ring
   buffer as event evidence; the affected interval is excluded and reported.
+- The advanced `extract_event_window` helpers no longer classify a window as
+  complete when an explicitly requested end marker is absent from the trace;
+  the window is reported truncated. An explicitly open window
+  (`end_marker=None`) still extends through the end of the trace, and
+  recorder point evidence keeps treating the ending snapshot's trace end as
+  the interval boundary (the end marker enters history as the snapshot is
+  taken and is never visible in its own trace). A missing start-boundary
+  message lists ring-buffer overwrite and history enabled late as possible
+  causes; it cannot distinguish them. Truncated errors recommend enabling
+  `_record_memory_history()` before the first analyzed point.
+- Memory device selections are normalized to ascending order at binding.
+  Previously an unsorted explicit selection such as `devices=(1, 0)` was
+  honored verbatim, and the recorder wrote bundles whose device order
+  `MemoryRun.load()` rejects.
+- A selected device that stayed completely idle across an interval (no
+  segments at either endpoint and no trace entries) no longer fails event
+  and lifetime analysis with `MemoryHistoryDisabledError`; evidence is
+  demanded only from devices with observed activity.
+- Snapshot-provider collection with the default or `"all"` device selection
+  adopts devices that first appear after binding and warns that earlier
+  captures do not cover them, instead of silently dropping every later
+  allocation on those devices.
+- Segments without a `device` field that are excluded because device 0 is
+  not selected are now disclosed with a warning instead of being dropped
+  silently before normalization could report the missing field.
+- `TensorProbe.close()` and `TensorRecorder.close()` remove every gradient
+  hook registered through `watch_grad`; previously a surviving hook fired
+  against the closed object inside a later backward pass.
 - `event_owner_peak_bytes` no longer subtracts the free request of a block
   that was already awaiting free at the range start. Such blocks never enter
   the owner-active running sum, so the unbalanced subtraction underreported
   cohort owner peaks (down to zero) whenever a range began with pending
   cross-stream frees.
-- Snapshot normalization reports absent identity and size fields (`device`,
-  `segment_pool_id`, segment and block sizes, block `state`) through the
-  point warnings channel, aggregated per field, instead of substituting
-  defaults silently. Present-but-invalid fields still raise.
+- Snapshot normalization reports absent defaultable fields (`device`,
+  `segment_pool_id`, segment/block `requested_size`, and block `state`) through
+  the point warnings channel, aggregated per field, instead of substituting
+  defaults silently. Structural sizes remain required, and present-but-invalid
+  fields still raise.
 - `became_inactive_bytes` now mirrors the newly-active rule: a
   reference-active block whose `(address, size)` key is gone in the
   candidate (freed and coalesced, re-split, or in a freed segment) counts as
@@ -78,8 +126,9 @@
 - The `tcgd-memory` CLI can be invoked with `python -m
   torch_cudagraph_debug.memory_debug.cli`; previously module invocation was a
   silent no-op.
-- The test suite runs on the declared Python 3.10 floor (agent-asset tests
-  skip where `tomllib` is unavailable instead of aborting collection).
+- The test suite runs on the declared Python 3.10 floor (only the single
+  agent-asset test that parses TOML skips where `tomllib` is unavailable;
+  the remaining asset gates keep running instead of aborting collection).
 - Persisted tensor summaries compute `std` with a chunked Welford merge. The
   one-pass sum-of-squares formula catastrophically cancelled when the mean
   dominated the spread (mean 1e12 with unit spread reported std ~11585).
@@ -156,11 +205,13 @@
 - Missing or incomplete event and lifetime evidence now raises typed errors:
   `MemoryHistoryDisabledError` (history never recorded),
   `MemoryHistoryBoundaryError` (point boundary unavailable), and
-  `MemoryHistoryTruncatedError` (marker overwritten in the ring buffer). Stack
-  attribution retains exact partial results with explicit coverage and raises
-  only when nonempty active state has zero frame coverage. The `on_missing`
-  policy, `MissingPolicy`, and the CLI `--on-missing`/`--no-events` flags were
-  removed; lifetime evidence and event-table output are independent requests.
+  `MemoryHistoryTruncatedError` (a required marker is missing from the trace).
+  Ring-buffer overwrite and history enabled late are not distinguishable.
+  Stack attribution retains exact partial results with explicit coverage and
+  raises only when nonempty active state has zero frame coverage. The
+  `on_missing` policy, `MissingPolicy`, and the CLI
+  `--on-missing`/`--no-events` flags were removed; lifetime evidence and
+  event-table output are independent requests.
 - Complete event history that cannot be reconciled with the snapshots raises
   `MemoryReconciliationError` unconditionally, aggregating every
   contradiction with per-device counts and example addresses.

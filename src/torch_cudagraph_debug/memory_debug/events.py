@@ -149,12 +149,22 @@ def _extract_point_event_evidence(
                 warnings = (
                     f"event boundary for record {start_label!r} was not found in "
                     "the device trace; the history ring buffer has overwritten it "
-                    "and the interval is excluded from event analysis",
+                    "or history recording was enabled after the boundary, and the "
+                    "interval is excluded from event analysis",
                 )
             elif end is not None and end < start:
                 status = "invalid_boundary_order"
                 warnings = ("allocator event boundary order is inconsistent",)
             else:
+                # The ending snapshot's trace terminates at the boundary that
+                # produced it: on the real torch path the end marker enters
+                # history as the snapshot is taken and is not visible in the
+                # snapshot's own trace. Recorder semantics therefore use the
+                # trace end as this interval's endpoint when metadata setup
+                # succeeded. This assumes the application kept allocator
+                # history enabled throughout the interval; PyTorch exposes no
+                # continuity signal here. A present end marker supplied by a
+                # provider trims the window instead.
                 upper = len(raw_entries) if end is None else end
                 trace_index_offset = start + 1
                 selected_rows = []
@@ -286,6 +296,7 @@ def extract_event_window(
         start=_last_marker_index(entries, start_marker),
         end=_last_marker_index(entries, end_marker),
         start_label=start_label,
+        end_marker_expected=bool(end_marker),
     )
     return EventWindow(
         entries=(
@@ -316,6 +327,7 @@ def extract_event_window_from_snapshot(
         start=_last_raw_marker_index(raw_entries, start_marker),
         end=_last_raw_marker_index(raw_entries, end_marker),
         start_label=start_label,
+        end_marker_expected=bool(end_marker),
     )
     return EventWindow(
         entries=(
@@ -351,16 +363,19 @@ def _window_bounds(
     start: int | None,
     end: int | None,
     start_label: str,
+    end_marker_expected: bool = False,
 ) -> _WindowBounds:
     warnings: list[str] = []
     if start is None:
-        # The marker was overwritten in the bounded history ring buffer. The
-        # remaining trace cannot be trusted to cover the interval, so the
-        # window is excluded from event analysis instead of replaying the
-        # whole ring from its truncated start.
+        # The marker was overwritten in the bounded history ring buffer, or
+        # history recording started after it. The remaining trace cannot be
+        # trusted to cover the interval, so the window is excluded from event
+        # analysis instead of replaying the whole ring from its truncated
+        # start.
         warnings.append(
             f"event boundary for record {start_label!r} was not found in the "
-            "device trace; the history ring buffer has overwritten it and the "
+            "device trace; the history ring buffer has overwritten it or "
+            "history recording was enabled after the boundary, and the "
             "interval is excluded from event analysis"
         )
         return _WindowBounds(
@@ -372,6 +387,30 @@ def _window_bounds(
             cause="truncated",
         )
     if end is None:
+        if end_marker_expected:
+            # A requested end boundary is absent from this trace. On the
+            # real torch path a snapshot's own boundary marker is never
+            # visible in that snapshot's trace, so this is the expected
+            # shape when the caller passes the ending snapshot's marker —
+            # pass end_marker=None to read through the end of the trace.
+            # It can also mean history recording stopped before the
+            # boundary. Either way the window cannot claim the requested
+            # coverage.
+            warnings.append(
+                "the requested end boundary was not found in the device "
+                "trace, so the window cannot claim the requested coverage "
+                "and is excluded from event analysis; if the end boundary "
+                "is the snapshot that produced this trace, pass "
+                "end_marker=None to read through the end of the trace"
+            )
+            return _WindowBounds(
+                start=start,
+                end=start,
+                complete=False,
+                ordered=False,
+                warnings=tuple(warnings),
+                cause="truncated",
+            )
         end = length
     elif end < start:
         warnings.append("allocator event boundary order is inconsistent")
