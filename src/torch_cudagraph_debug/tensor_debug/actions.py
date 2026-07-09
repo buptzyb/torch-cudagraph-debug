@@ -1,4 +1,4 @@
-"""Action configuration objects for CUDA Graph tensor probes."""
+"""Action configuration objects for eager and CUDA Graph tensor probes."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def validate_non_contiguous_policy(policy: str) -> NonContiguousPolicy:
 
 @dataclass(frozen=True)
 class PrintAction:
-    """Print a compact tensor summary from a CUDA Graph host callback."""
+    """Print a compact tensor summary through a CUDA host callback."""
 
     max_items: int = 16
     every: int = 1
@@ -66,7 +66,7 @@ class PrintAction:
 
 @dataclass(frozen=True)
 class RecordAction:
-    """Record the latest replay snapshot without a CUDA host callback."""
+    """Stage the latest eligible tensor values without a CUDA host callback."""
 
     enabled: bool = True
 
@@ -83,11 +83,11 @@ class RecordAction:
 
 @dataclass(frozen=True)
 class CheckAction:
-    """Check replay snapshots against CPU or NumPy ground truth.
+    """Check eligible eager or replay values against CPU or NumPy ground truth.
 
-    Positional expected entries bind by global capture order (a single value
-    is never broadcast); a ``TensorObservationKey`` mapping binds by
-    ``(name, invocation_index)``.
+    Positional entries bind eager slots by first-use name order and captured
+    slots by global capture order; a single value is never broadcast. A
+    ``TensorObservationKey`` mapping binds by ``(name, invocation_index)``.
     """
 
     expected: TensorExpected

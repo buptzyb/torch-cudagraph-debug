@@ -28,6 +28,8 @@ from .recording import ExecutionMode, TensorRun
 
 @dataclass(frozen=True)
 class TensorRankPointSummary:
+    """Payload inventory for one rank and point in a tensor run group."""
+
     rank: int
     point_index: int
     point_label: str
@@ -267,6 +269,8 @@ class TensorRunGroup:
 
 @dataclass(frozen=True)
 class TensorRunGroupSummary:
+    """Per-rank point inventory for one validated tensor run group."""
+
     run_group: TensorRunGroup
     rank_points: tuple[TensorRankPointSummary, ...]
     warnings: tuple[str, ...] = ()
@@ -313,6 +317,8 @@ class TensorRunGroupSummary:
 
 @dataclass(frozen=True)
 class TensorRankRunComparison:
+    """One rank-aligned tensor run comparison."""
+
     rank: int
     comparison: TensorRunComparison
 
@@ -330,6 +336,8 @@ class TensorRankRunComparison:
 
 @dataclass(frozen=True)
 class TensorRunGroupComparison:
+    """Rank-aligned comparison between two tensor run groups."""
+
     reference_group: TensorRunGroup
     candidate_group: TensorRunGroup
     rank_comparisons: tuple[TensorRankRunComparison, ...]

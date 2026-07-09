@@ -35,8 +35,10 @@ mode required by its analysis and disables it during cleanup:
 | `distributed_run_groups.py` | disabled | rank-local bundles, group extrema, group phase comparison |
 
 Complete event history must cover intervals used for event or lifetime analysis.
-An unavailable point boundary, disabled history, and a boundary overwritten by the
-PyTorch ring buffer fail with distinct typed errors.
+An unavailable point boundary, unavailable event history, and a missing required
+marker fail with distinct typed errors. A missing marker may mean that the
+PyTorch ring buffer overwrote it or that history was enabled after the
+boundary; the tool cannot distinguish those causes.
 Stack attribution reports partial frame coverage and fails only when nonempty
 active state has no frames. Probe and Recorder never enable or disable allocator
 history on the application's behalf.

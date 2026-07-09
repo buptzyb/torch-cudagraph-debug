@@ -647,12 +647,12 @@ def _compare_same_identity_views(
         if "invalid_boundary_order" in event_causes:
             raise MemoryReconciliationError(
                 "allocator event boundary order is inconsistent for the compared "
-                "interval; the recorded markers or input snapshots are corrupted"
+                "interval; the recorded markers were interleaved or the input snapshots are corrupted"
             )
         if "boundary_unavailable" in event_causes:
             raise MemoryHistoryBoundaryError(
                 "an allocator event boundary could not be recorded for the compared "
-                "interval; record points outside CUDA graph capture or use a PyTorch "
+                "interval; record points outside CUDA Graph capture or use a PyTorch "
                 "build with memory metadata support"
             )
         if "disabled" in event_causes or not events_available:

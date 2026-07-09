@@ -167,7 +167,11 @@ class MemoryAllocatorScopeComparison:
 
 @dataclass(frozen=True)
 class MemoryLifecycleDelta:
-    """Address-based observations from ordered snapshots with shared identity."""
+    """Lifecycle changes between ordered snapshots with shared identity.
+
+    Complete addresses provide exact identity; missing addresses fall back to
+    size-based multiset matching and make the enclosing result approximate.
+    """
 
     new_segment_bytes: int = 0
     removed_segment_bytes: int = 0

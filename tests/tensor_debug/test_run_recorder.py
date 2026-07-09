@@ -129,7 +129,7 @@ def test_cuda_graph_recorder_out_of_scope_cpu_tensor_is_a_noop() -> None:
     recorder.close()
 
     strict = TensorRecorder(execution="cuda_graph", name="strict", strict_scope=True)
-    with pytest.raises(TensorDebugError, match="active CUDA graph capture"):
+    with pytest.raises(TensorDebugError, match="active CUDA Graph capture"):
         strict.observe(cpu_tensor, name="ignored")
     strict.close()
 

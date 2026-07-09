@@ -151,12 +151,10 @@ capture installs the copy nodes but does not execute them, so query only
 after a replay.
 
 `observe()` returns the exact tensor object. Within one eager point, repeated
-calls
-with the same name become invocation 0, 1, and so on; for a cuda_graph
+calls with the same name become invocation 0, 1, and so on. For a CUDA Graph
 recorder, invocation indices are assigned per capture call. The stable
-cross-run key
-is `(name, invocation_index)`; replay index is evidence rather than
-identity.
+cross-run key is `(name, invocation_index)`; replay index is evidence rather
+than identity.
 
 An eager recorder observes calls only inside `record_point()`. A CUDA Graph
 recorder ignores eager warmup, uses calls made during graph capture to establish

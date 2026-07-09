@@ -53,8 +53,12 @@ class TensorCheckStatus:
 
 @dataclass(frozen=True)
 class TensorProbeSnapshot:
-    """All tensor observations from one query point: the values of one CUDA
-    Graph replay, or the latest eager sample per name (replay index 0)."""
+    """All observations returned by one query point.
+
+    The snapshot contains one CUDA Graph replay, the latest eager sample per
+    name, or zero-filled captured slots before the first replay. Eager and
+    pre-replay snapshots use replay index 0.
+    """
 
     probe_id: str
     probe_name: str

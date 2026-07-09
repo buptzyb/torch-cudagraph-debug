@@ -73,8 +73,8 @@ class MemoryProbe:
 
         ``synchronize`` overrides the probe default for this call only;
         requested synchronization is skipped with a warning during CUDA
-        stream capture. Device binding is resolved lazily by the first
-        snapshot that observes any allocation.
+        stream capture. Real PyTorch collection resolves device binding on the
+        first snapshot, even when that snapshot contains no allocations.
         """
 
         snapshot_index = self._next_snapshot_index

@@ -893,7 +893,7 @@ def test_synchronize_tensor_results_rejects_capture(
         lambda device: pytest.fail("capture must be rejected before synchronization"),
     )
 
-    with pytest.raises(RuntimeError, match="during CUDA graph capture"):
+    with pytest.raises(RuntimeError, match="during CUDA Graph capture"):
         collector_module.synchronize_tensor_results(torch.device("cuda:0"), True)
 
     collector_module.synchronize_tensor_results(torch.device("cuda:0"), False)

@@ -97,7 +97,7 @@ def synchronize_tensor_results(
         )
     if _is_capturing_on_device(target_device):
         raise RuntimeError(
-            "cannot synchronize tensor collector results during CUDA graph "
+            "cannot synchronize tensor collector results during CUDA Graph "
             "capture; query after capture or pass synchronize=False"
         )
 
@@ -369,7 +369,7 @@ class _TensorCollector:
             assert self._device is not None
             if _is_capturing_on_device(self._device):
                 raise RuntimeError(
-                    "cannot close tensor collector during CUDA graph capture"
+                    "cannot close tensor collector during CUDA Graph capture"
                 )
             self.synchronize(synchronize)
             self._handle.close()

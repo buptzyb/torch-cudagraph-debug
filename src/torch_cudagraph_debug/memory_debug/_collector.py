@@ -176,14 +176,14 @@ class _MemoryCollector:
         capture_state = _current_stream_capture_state()
         if capture_state is None:
             warnings.append(
-                "could not determine CUDA graph capture state; requested allocator "
+                "could not determine CUDA Graph capture state; requested allocator "
                 "synchronization was skipped"
             )
             return
         if capture_state:
             warnings.append(
                 "requested allocator synchronization was skipped during "
-                "CUDA graph capture"
+                "CUDA Graph capture"
             )
             return
         if isinstance(synchronize, torch.cuda.Stream):

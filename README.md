@@ -249,7 +249,7 @@ Beyond two-point comparison, Memory Debug can:
 - compare points and phases across runs, and summarize multi-rank run groups;
 - save `.tcgd-memory` bundles for offline reports and the `tcgd-memory` CLI.
 
-Event and lifetime attribution require complete allocator history for the
+Event and lifetime attribution require complete allocator event history for the
 analyzed interval. Stack attribution uses available live-block frames and
 reports partial coverage explicitly. State comparison, timelines, and phase
 totals do not require history.

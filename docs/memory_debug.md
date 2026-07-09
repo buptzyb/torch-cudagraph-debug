@@ -256,10 +256,10 @@ comparison = run.compare("start", "end", attribution=options)
 ```
 
 Event and lifetime requests fail with typed errors instead of degrading:
-`MemoryHistoryDisabledError` when history was never recorded on an analyzed
-device, `MemoryHistoryBoundaryError` when either endpoint could not record its
-metadata boundary, and `MemoryHistoryTruncatedError` when a required start
-marker is missing from the trace. The tool cannot distinguish bounded-ring
+`MemoryHistoryDisabledError` when required history evidence is unavailable on
+an analyzed device, `MemoryHistoryBoundaryError` when either endpoint could not
+record its metadata boundary, and `MemoryHistoryTruncatedError` when a required
+start marker is missing from the trace. The tool cannot distinguish bounded-ring
 overwrite from history enabled after that boundary. Recorder intervals use the
 ending snapshot's trace end because its own marker is normally absent, so a
 complete interval assumes history remained enabled between the points. Stack
@@ -268,8 +268,9 @@ exact framed rows plus an `<unattributed>` bucket when coverage is partial; it
 raises `MemoryHistoryDisabledError` only when nonempty active state has zero
 frame coverage. Invalid boundary order or complete history that cannot be
 reconciled with allocator states raises `MemoryReconciliationError`
-unconditionally. That combination indicates corrupted input or a package bug,
-never a legitimate state.
+unconditionally. Possible causes include overlapping marker-bearing collection,
+allocator activity during the non-atomic marker/snapshot window, corrupted
+input, or an implementation defect.
 
 Every successful comparison exposes `attribution_status`. `requested`
 distinguishes an analysis the caller asked for, and `available`/`complete`
@@ -488,10 +489,10 @@ and conflicting non-null group IDs or world sizes are errors; missing
 group IDs or world sizes, declared-but-missing ranks,
 incomplete bundles, provenance differences, and metadata differences are
 warnings. `rank` and `world_size` default from the `RANK`/`WORLD_SIZE`
-environment variables or initialized `torch.distributed`, so torchrun
-processes usually need no explicit identity arguments. `group.missing_ranks` and `group.complete` expose rank coverage
-programmatically. Reports preserve per-rank values and show min, max, spread,
-and the worst rank; GPU memory is deliberately not summed across ranks.
+environment variables or initialized `torch.distributed`, so torchrun processes
+usually need no explicit identity arguments. `group.missing_ranks` and
+`group.complete` expose rank coverage programmatically. Reports preserve
+per-rank values and show min, max, spread, and the worst rank; GPU memory is deliberately not summed across ranks.
 `pool_mappings` is keyed by rank because private-pool identity is rank-local.
 Group loading defaults to `cache_snapshots=False`; use `True` only when repeated
 allocator-state or event-payload access is worth the additional host memory.
@@ -641,10 +642,12 @@ change in a minor release. Their snapshot summaries (`summarize_snapshot`,
   event history. `born_between` retains transient allocations that are active at
   neither endpoint snapshot.
 - Boundary markers use the process-global allocator metadata
-  (`torch.cuda.memory._set_memory_metadata`). Run at most one collector at a
-  time and do not call `_set_memory_metadata` from the application while a
-  Probe or Recorder is active: interleaved markers misclassify event windows
-  and can leave a stale marker in the global metadata.
+  (`torch.cuda.memory._set_memory_metadata`). Multiple Probe and Recorder
+  objects may coexist, but marker-bearing `snapshot()` and `record_point()`
+  calls must not overlap across threads or collectors. The application must not
+  call `_set_memory_metadata` while either operation is taking a snapshot:
+  interleaved markers misclassify event windows and can leave a stale marker in
+  the global metadata.
 - Marker placement is not atomic with the snapshot. Allocator events issued by
   other threads in the instant between taking a snapshot and restoring the
   metadata can fall outside both adjacent event windows; net-visible effects

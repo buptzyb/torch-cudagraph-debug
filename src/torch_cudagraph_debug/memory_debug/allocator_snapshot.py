@@ -84,10 +84,10 @@ def normalize_snapshot(
 ) -> tuple[Mapping[str, Any], ...]:
     """Return normalized segment dictionaries from a PyTorch snapshot shape.
 
-    Absent identity and size fields keep their documented default values but
-    are reported through ``warnings`` (aggregated per field) instead of being
-    substituted silently; a field that is present with an invalid type or
-    value still raises.
+    Absent defaultable identity, requested-size, and state fields use their
+    documented substitutes and are reported through ``warnings`` (aggregated
+    per field). Structural segment sizes and block ``size`` are required; any
+    field that is present with an invalid type or value raises.
     """
 
     segments = _segments_from_snapshot(snapshot)

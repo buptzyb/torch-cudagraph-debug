@@ -282,9 +282,9 @@ most once; it raises `TensorCheckError` when the sticky check state is not OK.
 same default as `probe()`. The hook probes the gradient for its side effect and
 returns the original gradient. Invocation indices are assigned when hooks
 actually fire, so repeated same-name hooks follow backward execution order.
-It obeys the probe's `when`
-policy, so default capture-only probes do no work during eager backward. The
-method returns a removable hook handle. If `tensor.requires_grad` is false, it
+It obeys the probe's `when` policy, so default capture-only probes do no
+work during eager backward. The method returns a removable hook handle. If
+`tensor.requires_grad` is false, it
 returns `None`; with `strict=True`, it raises `RuntimeError`. Every registered
 hook is removed by `close()`, so a backward pass after close never fires a
 hook against the closed probe; removing a handle earlier yourself remains
@@ -453,8 +453,8 @@ one capture session to define slots and reads their latest values when
 `record_point()` later wraps a replay. Calls outside those active paths are
 transparent no-ops by default; `strict_scope=True` turns them into errors.
 `preview()` returns an immutable view without finishing; once the recorder
-is finished or aborted it returns the terminal result. A cuda_graph
-`record_point()` raises during capture, when the recorder captured no
+is finished or aborted it returns the terminal result. For
+`execution="cuda_graph"`, `record_point()` raises during capture, when the recorder captured no
 observations, and when its region does not observe a new replay (replay
 index at least one and strictly greater than the previous point's).
 
@@ -877,9 +877,11 @@ immediately.
 
 The recorder temporarily sets a PyTorch allocator metadata marker around each
 snapshot when those private APIs are available. The marker uses process-global
-allocator state: run at most one Probe or Recorder at a time and do not call
-`_set_memory_metadata` from the application while one is active (see the
-guide's operational constraints). Each ending point stores only the
+allocator state. Multiple Probe and Recorder objects may coexist, but
+marker-bearing `snapshot()` and `record_point()` calls must not overlap across
+threads or collectors. The application must not call `_set_memory_metadata`
+while either operation is taking a snapshot (see the guide's operational
+constraints). Each ending point stores only the
 raw event entries between the previous boundary and itself. Marker failures and
 history gaps are recorded per device and become typed errors only when an analysis
 requests the affected event evidence.
@@ -1035,8 +1037,10 @@ intervals use the ending snapshot's trace end because its own marker is normally
 absent; PyTorch does not expose a signal that verifies history stayed enabled
 between the points. Invalid boundary order or complete history that cannot be
 reconciled with allocator state raises
-`MemoryReconciliationError` unconditionally. Display limits affect only text
-and HTML, never structured result tuples, JSON, or CSV.
+`MemoryReconciliationError` unconditionally. Causes include overlapping
+marker-bearing collection, allocator activity during the non-atomic
+marker/snapshot window, corrupted input, or an implementation defect. Display
+limits affect only text and HTML, never structured result tuples, JSON, or CSV.
 
 ```python
 MemoryEvidenceStatus(requested: bool, available: bool, complete: bool)
@@ -1106,7 +1110,8 @@ unrelated unattributed sizes are not merged. Each cohort retains:
 - snapshot peaks plus event-derived owner-active and unreusable peaks;
 - owner-active and awaiting-free terminal totals.
 
-Full allocator history must be enabled before the allocations of interest.
+Complete allocator event history must be enabled before the allocations of
+interest.
 Lifetime analysis rejects unavailable or truncated event windows rather than
 inferring transitions from snapshot disappearance. Replay contradictions are
 summarized by reason and device with a total count and up to three example
@@ -1152,7 +1157,8 @@ compare_points(
 ```
 
 The points must have different `run_id` values. Without `stacks=True`, the
-comparison uses compact manifest state and never reads allocator-state files. Cross-run
+comparison uses compact manifest state and never reads allocator-state files.
+Cross-run
 matching is conservative:
 
 1. Default `(0,0)` pools match automatically when present in both runs.
@@ -1303,6 +1309,7 @@ results:
 ```python
 result.to_text(limit=None, stack_depth=None) -> str
 result.to_dict() -> dict
+result.to_html(limit=None, stack_depth=None) -> str
 result.write(output_dir, limit=None, stack_depth=None, overwrite=False) -> dict[str, Path]
 ```
 Run-group summaries have no unchanged-row filter and use `to_text()`,
@@ -1552,11 +1559,13 @@ advanced.mutable_snapshot(source)
 - `TensorPayloadUnavailableError`: full values requested from a summary observation.
 - `MemoryDebugError`: memory domain base.
 - `MemoryHistoryError`: requested history unavailable or incomplete.
-- `MemoryHistoryDisabledError`: history never recorded on an analyzed device.
+- `MemoryHistoryDisabledError`: required history evidence is unavailable on an
+  analyzed device.
 - `MemoryHistoryBoundaryError`: a point boundary could not be recorded.
 - `MemoryHistoryTruncatedError`: a required marker is missing from the trace;
   ring-buffer overwrite and history enabled late are not always distinguishable.
 - `MemoryReconciliationError`: boundary order is invalid or complete history
-  contradicts allocator state, indicating corrupted input or a package bug.
+  contradicts allocator state; possible causes include overlapping collection,
+  concurrent allocator activity, corrupted input, or a package bug.
 - `MemoryBundleError`: malformed, unsupported, or unreadable bundle.
 - `MemoryOwnershipError`: point used with a run that does not own it.

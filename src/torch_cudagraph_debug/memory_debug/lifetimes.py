@@ -212,7 +212,12 @@ class CohortFreeCompletion(_CohortTransition):
 
 @dataclass(frozen=True)
 class AllocationCohort:
-    """Allocation instances sharing a device, pool, and allocation stack."""
+    """Allocation instances sharing a device, pool, and allocation identity.
+
+    Framed allocations group by their complete normalized allocation stack.
+    Unframed allocations also include block and requested sizes in the identity
+    so unrelated same-pool allocations are not merged.
+    """
 
     cohort_id: str
     display_rank: int
@@ -494,8 +499,11 @@ def _analyze_allocation_lifetimes(
             "allocator event history is complete but could not be reconciled "
             "with the snapshots:\n- "
             + "\n- ".join(contradictions)
-            + "\nThis indicates corrupted input data or a torch-cudagraph-debug "
-            "bug; please report it together with this message."
+            + "\nPossible causes include allocator activity during the "
+            "non-atomic marker/snapshot window, corrupted input data, or a "
+            "torch-cudagraph-debug bug. Quiesce concurrent allocator activity "
+            "around collection; if the error persists, please report it together "
+            "with this message."
         )
     if active_at is not None:
         instances = [
@@ -1029,13 +1037,13 @@ def _raise_for_history_gaps(histories: Sequence[_IntervalHistory]) -> None:
         raise MemoryReconciliationError(
             "allocator event boundary order is inconsistent for interval(s): "
             + ", ".join(dict.fromkeys(inconsistent))
-            + "; the recorded markers or input snapshots are corrupted"
+            + "; the recorded markers were interleaved or the input snapshots are corrupted"
         )
     if boundary_unavailable:
         raise MemoryHistoryBoundaryError(
             "allocator event boundaries could not be recorded for interval(s): "
             + ", ".join(dict.fromkeys(boundary_unavailable))
-            + "; record points outside CUDA graph capture or use a PyTorch build "
+            + "; record points outside CUDA Graph capture or use a PyTorch build "
             "with memory metadata support"
         )
     if disabled:

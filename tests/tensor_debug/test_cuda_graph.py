@@ -1372,7 +1372,7 @@ def test_close_is_rejected_during_capture() -> None:
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         probe(value)
-        with pytest.raises(RuntimeError, match="during CUDA graph capture"):
+        with pytest.raises(RuntimeError, match="during CUDA Graph capture"):
             probe.close(synchronize=False)
 
     torch.cuda.synchronize()

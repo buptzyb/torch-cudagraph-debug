@@ -12,10 +12,10 @@ class MemoryHistoryError(MemoryDebugError):
 
 
 class MemoryHistoryDisabledError(MemoryHistoryError):
-    """Required allocator history was never recorded.
+    """Required allocator history evidence is unavailable.
 
-    A device in the analyzed range has no allocator event history, or — for
-    stack attribution — nonempty active state has zero allocation-frame
+    A device in the analyzed range has no usable allocator event history, or —
+    for stack attribution — nonempty active state has zero allocation-frame
     coverage at a compared endpoint. Enable
     ``torch.cuda.memory._record_memory_history()`` (with stack context for
     stack attribution) before the allocations of interest are made on every
@@ -40,12 +40,13 @@ class MemoryHistoryTruncatedError(MemoryHistoryError):
 
 
 class MemoryReconciliationError(MemoryDebugError):
-    """Complete event history could not be reconciled with a snapshot.
+    """Allocator event boundaries or events disagree with snapshot state.
 
-    The event stream and the allocator snapshots disagree without an
-    identifiable recording gap. This indicates corrupted input data or a bug
-    in torch-cudagraph-debug itself; please report it with the message
-    details.
+    The recorded boundary order is invalid, or the event stream and allocator
+    snapshots disagree without an identifiable recording gap. Possible causes
+    include overlapping marker-bearing collection, allocator activity during
+    the non-atomic marker/snapshot window, corrupted input, or a bug in
+    torch-cudagraph-debug.
     """
 
 

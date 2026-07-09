@@ -1,4 +1,4 @@
-"""Object API for CUDA Graph tensor probes."""
+"""Object API for eager and CUDA Graph tensor probes."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 class TensorProbe:
-    """Transparent tensor probe that injects CUDA Graph debug side effects."""
+    """Transparent tensor probe for eager execution or CUDA Graph capture and replay."""
 
     def __init__(
         self,
@@ -128,7 +128,7 @@ class TensorProbe:
     ) -> TensorProbeSnapshot:
         """Return the latest recorded value of every slot as one aggregate
         snapshot. Requires an enabled RecordAction; a record-only probe
-        rejects queries during CUDA graph capture."""
+        rejects queries during CUDA Graph capture."""
 
         self._ensure_open()
         if not self._collector.record_enabled:

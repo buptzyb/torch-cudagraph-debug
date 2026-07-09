@@ -986,7 +986,8 @@ class TensorRecorder:
         if not is_capturing:
             if self.strict_scope:
                 raise TensorDebugError(
-                    "cuda_graph observe() requires an active CUDA graph capture"
+                    "TensorRecorder.observe() with execution='cuda_graph' requires "
+                    "an active CUDA Graph capture"
                 )
             return tensor
         selected_payload = (
@@ -1067,7 +1068,7 @@ class TensorRecorder:
             with torch.cuda.device(self._device):
                 if torch.cuda.is_current_stream_capturing():
                     raise RuntimeError(
-                        "TensorRecorder.record_point() cannot run during CUDA graph "
+                        "TensorRecorder.record_point() cannot run during CUDA Graph "
                         "capture; capture observe() calls first, then wrap graph.replay()"
                     )
         target = self.synchronize if synchronize is None else synchronize

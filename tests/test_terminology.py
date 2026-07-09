@@ -162,3 +162,17 @@ def test_memory_attribution_models_own_structured_frames() -> None:
         names = _field_names(model)
         assert "stack_frames" in names
         assert "stack_key" not in names
+
+
+def test_public_classes_have_semantic_docstrings() -> None:
+    for domain in (tensor_debug, memory_debug):
+        for name in domain.__all__:
+            value = getattr(domain, name)
+            if not isinstance(value, type):
+                continue
+            doc = value.__doc__ or ""
+            assert doc.strip(), f"{domain.__name__}.{name} has no docstring"
+            assert not doc.startswith(f"{value.__name__}("), (
+                f"{domain.__name__}.{name} exposes only an auto-generated "
+                "constructor signature"
+            )
