@@ -21,6 +21,7 @@ MemoryStatMetric = Literal[
     "largest_inactive_block_bytes",
     "expandable_segment_count",
     "expandable_reserved_bytes",
+    "expandable_inactive_bytes",
 ]
 
 MEMORY_STAT_METRICS: tuple[MemoryStatMetric, ...] = (
@@ -37,6 +38,7 @@ MEMORY_STAT_METRICS: tuple[MemoryStatMetric, ...] = (
     "largest_inactive_block_bytes",
     "expandable_segment_count",
     "expandable_reserved_bytes",
+    "expandable_inactive_bytes",
 )
 
 
@@ -54,6 +56,7 @@ class MemoryStats:
     largest_inactive_block_bytes: int = 0
     expandable_segment_count: int = 0
     expandable_reserved_bytes: int = 0
+    expandable_inactive_bytes: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -67,6 +70,7 @@ class MemoryStats:
             "largest_inactive_block_bytes",
             "expandable_segment_count",
             "expandable_reserved_bytes",
+            "expandable_inactive_bytes",
         ):
             value = getattr(self, name)
             if type(value) is not int or value < 0:
@@ -83,6 +87,12 @@ class MemoryStats:
             raise ValueError("expandable_segment_count must not exceed segment_count")
         if self.expandable_reserved_bytes > self.reserved_bytes:
             raise ValueError("expandable_reserved_bytes must not exceed reserved_bytes")
+        if self.expandable_inactive_bytes > self.expandable_reserved_bytes:
+            raise ValueError(
+                "expandable_inactive_bytes must not exceed expandable_reserved_bytes"
+            )
+        if self.expandable_inactive_bytes > self.reserved_bytes - self.active_bytes:
+            raise ValueError("expandable_inactive_bytes must not exceed inactive bytes")
         if self.largest_inactive_block_bytes > self.reserved_bytes - self.active_bytes:
             raise ValueError(
                 "largest_inactive_block_bytes must not exceed inactive bytes"
@@ -113,6 +123,7 @@ class MemoryStats:
             "largest_inactive_block_bytes",
             "expandable_segment_count",
             "expandable_reserved_bytes",
+            "expandable_inactive_bytes",
         )
         values = {}
         for name in fields:
@@ -145,6 +156,9 @@ class MemoryStats:
             expandable_reserved_bytes=sum(
                 item.expandable_reserved_bytes for item in items
             ),
+            expandable_inactive_bytes=sum(
+                item.expandable_inactive_bytes for item in items
+            ),
         )
 
     def to_dict(self) -> dict[str, int]:
@@ -161,6 +175,7 @@ class MemoryStats:
             "largest_inactive_block_bytes": self.largest_inactive_block_bytes,
             "expandable_segment_count": self.expandable_segment_count,
             "expandable_reserved_bytes": self.expandable_reserved_bytes,
+            "expandable_inactive_bytes": self.expandable_inactive_bytes,
             "internal_fragmentation_bytes": self.internal_fragmentation_bytes,
         }
 
@@ -181,6 +196,7 @@ class MemoryStatsDelta:
     largest_inactive_block_bytes: int
     expandable_segment_count: int
     expandable_reserved_bytes: int
+    expandable_inactive_bytes: int
     internal_fragmentation_bytes: int
 
     def __post_init__(self) -> None:

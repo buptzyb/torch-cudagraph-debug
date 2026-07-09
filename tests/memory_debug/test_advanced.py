@@ -415,3 +415,40 @@ def test_summary_separates_awaiting_free_from_inactive_memory() -> None:
     assert stats.requested_bytes == 52
     assert stats.internal_fragmentation_bytes == 12
     assert stats.to_dict()["awaiting_free_bytes"] == 24
+
+
+def test_expandable_inactive_bytes_separate_expandable_capacity() -> None:
+    from torch_cudagraph_debug.memory_debug import MemoryStats
+
+    expandable = segment(active=50, total=200, address=1000)
+    expandable["is_expandable"] = True
+    native = segment(active=50, total=100, address=4000)
+
+    rows = summarize_snapshot(snapshot(expandable, native))
+    stats = MemoryStats.combine(rows.values())
+
+    # Inactive capacity is partitioned by expandable versus native ownership.
+    assert stats.inactive_bytes == 200
+    assert stats.expandable_inactive_bytes == 150
+    assert stats.expandable_reserved_bytes == 200
+    assert stats.inactive_bytes - stats.expandable_inactive_bytes == 50
+
+
+def test_expandable_inactive_bytes_invariants() -> None:
+    from torch_cudagraph_debug.memory_debug import MemoryStats
+
+    with pytest.raises(ValueError, match="expandable_reserved_bytes"):
+        MemoryStats(
+            reserved_bytes=100,
+            expandable_reserved_bytes=10,
+            expandable_inactive_bytes=20,
+        )
+    with pytest.raises(ValueError, match="inactive bytes"):
+        MemoryStats(
+            reserved_bytes=100,
+            active_bytes=90,
+            allocated_bytes=90,
+            requested_bytes=90,
+            expandable_reserved_bytes=100,
+            expandable_inactive_bytes=20,
+        )

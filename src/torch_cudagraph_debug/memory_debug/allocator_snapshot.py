@@ -333,6 +333,58 @@ def summarize_segments(
     return {key: _summarize_group(items) for key, items in grouped.items()}
 
 
+def _partition_lifecycle_segments(
+    segments: Sequence[Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], dict[MemoryObservationKey, list[tuple[int, int]]]]:
+    """Split segments into identity-matched and mapped-range-matched groups.
+
+    Expandable segments resize, split, and heal in place, so identity-based
+    matching would fabricate churn; their lifecycle compares mapped address
+    ranges instead. Expandable segments without an address stay on the
+    identity path, which is already approximate.
+    """
+
+    legacy: list[Mapping[str, Any]] = []
+    mapped: dict[MemoryObservationKey, list[tuple[int, int]]] = {}
+    for segment in segments:
+        address = _optional_int(segment.get("address"))
+        if not bool(segment.get("is_expandable", False)) or address is None:
+            legacy.append(segment)
+            continue
+        key = _segment_key(segment)[0]
+        mapped.setdefault(key, []).append(
+            (address, address + _int(segment.get("total_size")))
+        )
+    return legacy, mapped
+
+
+def _interval_difference_bytes(
+    minuend: Sequence[tuple[int, int]],
+    subtrahend: Sequence[tuple[int, int]],
+) -> int:
+    """Bytes covered by ``minuend`` ranges but not by ``subtrahend``.
+
+    Both inputs are sets of disjoint half-open ranges.
+    """
+
+    total = 0
+    others = sorted(subtrahend)
+    index = 0
+    for start, end in sorted(minuend):
+        while index > 0 and others[index - 1][1] > start:
+            index -= 1
+        covered = 0
+        probe = index
+        while probe < len(others) and others[probe][0] < end:
+            overlap = min(end, others[probe][1]) - max(start, others[probe][0])
+            if overlap > 0:
+                covered += overlap
+            probe += 1
+        index = probe
+        total += (end - start) - covered
+    return total
+
+
 def compare_observation_lifecycle(
     reference_segments: Sequence[Mapping[str, Any]],
     candidate_segments: Sequence[Mapping[str, Any]],
@@ -348,11 +400,28 @@ def compare_observation_lifecycle(
     # (address, size) key left the active multiset (turned inactive in
     # place, coalesced, re-split, or in a freed segment) stopped being
     # active; the newly-active side is the exact mirror.
+    reference_legacy, reference_mapped = _partition_lifecycle_segments(
+        reference_segments
+    )
+    candidate_legacy, candidate_mapped = _partition_lifecycle_segments(
+        candidate_segments
+    )
+    # Expandable lifecycle is mapped-address-range arithmetic: new/removed
+    # bytes are exactly the bytes mapped in or unmapped out, regardless of
+    # how the snapshot splits contiguous runs into segment entries.
+    for key in set(reference_mapped) | set(candidate_mapped):
+        counters[key][0] += _interval_difference_bytes(
+            candidate_mapped.get(key, ()), reference_mapped.get(key, ())
+        )
+        counters[key][1] += _interval_difference_bytes(
+            reference_mapped.get(key, ()), candidate_mapped.get(key, ())
+        )
+
     reference_segment_keys = Counter(
-        _segment_key(segment) for segment in reference_segments
+        _segment_key(segment) for segment in reference_legacy
     )
     candidate_segment_keys = Counter(
-        _segment_key(segment) for segment in candidate_segments
+        _segment_key(segment) for segment in candidate_legacy
     )
     for key, count in (candidate_segment_keys - reference_segment_keys).items():
         counters[key[0]][0] += key[2] * count
@@ -434,7 +503,7 @@ def _summarize_group(
 ) -> MemoryStats:
     reserved = allocated = active = requested = block_count = 0
     inactive_block_count = largest_inactive = 0
-    expandable_segment_count = expandable_reserved = 0
+    expandable_segment_count = expandable_reserved = expandable_inactive = 0
     for segment in segments:
         segment_reserved = _int(segment.get("total_size"))
         reserved += segment_reserved
@@ -443,6 +512,7 @@ def _summarize_group(
         if bool(segment.get("is_expandable", False)):
             expandable_segment_count += 1
             expandable_reserved += segment_reserved
+            expandable_inactive += segment_reserved - _int(segment.get("active_size"))
         for block in segment.get("blocks", []) or []:
             state = str(block.get("state", "unknown"))
             size = _int(block.get("size"))
@@ -463,6 +533,7 @@ def _summarize_group(
         largest_inactive_block_bytes=largest_inactive,
         expandable_segment_count=expandable_segment_count,
         expandable_reserved_bytes=expandable_reserved,
+        expandable_inactive_bytes=expandable_inactive,
     )
 
 

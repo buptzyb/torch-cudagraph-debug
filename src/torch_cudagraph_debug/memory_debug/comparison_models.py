@@ -28,6 +28,7 @@ PhaseMetric = Literal[
     "requested_bytes",
     "internal_fragmentation_bytes",
     "expandable_reserved_bytes",
+    "expandable_inactive_bytes",
 ]
 
 PHASE_METRICS: tuple[PhaseMetric, ...] = (
@@ -39,6 +40,7 @@ PHASE_METRICS: tuple[PhaseMetric, ...] = (
     "requested_bytes",
     "internal_fragmentation_bytes",
     "expandable_reserved_bytes",
+    "expandable_inactive_bytes",
 )
 
 
@@ -171,6 +173,8 @@ class MemoryLifecycleDelta:
 
     Complete addresses provide exact identity; missing addresses fall back to
     size-based multiset matching and make the enclosing result approximate.
+    Expandable segments compare by mapped address ranges, so their new and
+    removed bytes are the bytes mapped in or unmapped out.
     """
 
     new_segment_bytes: int = 0

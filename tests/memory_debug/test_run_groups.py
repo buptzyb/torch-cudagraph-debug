@@ -202,7 +202,7 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
     )
 
     assert tuple(report.rank_comparisons) == (0, 1)
-    assert len(report.rank_decomposition) == 48
+    assert len(report.rank_decomposition) == 54
     active = next(
         item
         for item in report.phase_aggregates

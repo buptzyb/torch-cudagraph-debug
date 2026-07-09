@@ -120,6 +120,7 @@ def test_bundle_is_gzip_json_and_load_is_lazy(tmp_path: Path) -> None:
         "largest_inactive_block_bytes",
         "expandable_segment_count",
         "expandable_reserved_bytes",
+        "expandable_inactive_bytes",
     }
     point_manifest = manifest["points"][1]
     state_path = bundle / point_manifest["state_file"]

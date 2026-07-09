@@ -1051,3 +1051,82 @@ def test_lifetimes_attribution_requires_history() -> None:
             "after",
             attribution=MemoryAttributionOptions(lifetimes=True),
         )
+
+
+def _expandable(
+    *, active: int, total: int, address: int, device: int = 0
+) -> dict[str, object]:
+    value = segment(active=active, total=total, address=address, device=device)
+    value["is_expandable"] = True
+    return value
+
+
+def _lifecycle_between(before: list, after: list):
+    run = make_run(
+        [snapshot(*before), snapshot(*after)],
+        labels=("before", "after"),
+    )
+    comparison = run.compare("before", "after")
+    assert comparison.lifecycle_confidence == "exact"
+    lifecycle = comparison.pool_comparisons[0].lifecycle
+    assert lifecycle is not None
+    return lifecycle
+
+
+def test_expandable_growth_counts_only_newly_mapped_bytes() -> None:
+    """In-place growth maps new pages; nothing was removed."""
+
+    lifecycle = _lifecycle_between(
+        [_expandable(active=100, total=100, address=1000)],
+        [_expandable(active=200, total=200, address=1000)],
+    )
+    assert lifecycle.new_segment_bytes == 100
+    assert lifecycle.removed_segment_bytes == 0
+
+
+def test_expandable_shrink_counts_only_unmapped_bytes() -> None:
+    lifecycle = _lifecycle_between(
+        [_expandable(active=200, total=200, address=1000)],
+        [_expandable(active=100, total=100, address=1000)],
+    )
+    assert lifecycle.new_segment_bytes == 0
+    assert lifecycle.removed_segment_bytes == 100
+
+
+def test_expandable_hole_punch_counts_only_the_hole() -> None:
+    """One mapped run splitting into two removes only the unmapped middle."""
+
+    lifecycle = _lifecycle_between(
+        [_expandable(active=300, total=300, address=1000)],
+        [
+            _expandable(active=100, total=100, address=1000),
+            _expandable(active=100, total=100, address=1200),
+        ],
+    )
+    assert lifecycle.new_segment_bytes == 0
+    assert lifecycle.removed_segment_bytes == 100
+
+
+def test_expandable_heal_and_grow_counts_only_newly_mapped_bytes() -> None:
+    """One candidate run covering two reference runs maps only the gaps."""
+
+    lifecycle = _lifecycle_between(
+        [
+            _expandable(active=100, total=100, address=1000),
+            _expandable(active=100, total=100, address=1200),
+        ],
+        [_expandable(active=400, total=400, address=1000)],
+    )
+    assert lifecycle.new_segment_bytes == 200
+    assert lifecycle.removed_segment_bytes == 0
+
+
+def test_non_expandable_same_address_resize_stays_full_churn() -> None:
+    """Native segments cannot resize; same-address size change is churn."""
+
+    lifecycle = _lifecycle_between(
+        [segment(active=100, total=100, address=1000)],
+        [segment(active=200, total=200, address=1000)],
+    )
+    assert lifecycle.new_segment_bytes == 200
+    assert lifecycle.removed_segment_bytes == 100

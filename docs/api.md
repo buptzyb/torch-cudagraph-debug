@@ -994,6 +994,15 @@ observations:
 - bytes that became active;
 - bytes that became inactive and allocator-reusable.
 
+Non-expandable segments match by identity (pool, address, size); a
+same-address size change is genuine churn. Expandable segments match by
+mapped address ranges instead, so their new and removed bytes are exactly
+the bytes mapped in or unmapped out — in-place growth, shrink, hole
+punching, and healing never fabricate whole-segment churn. In reports a
+"segment" is one contiguous mapped range (the snapshot convention), so an
+unmapped hole raises `segment_count` while `removed_segment_bytes` reports
+only the hole.
+
 `lifecycle_available` indicates whether address lifecycle was computed.
 `lifecycle_confidence` is `exact` when both states retain every segment and
 active-block address, `approximate` when missing addresses require size-based

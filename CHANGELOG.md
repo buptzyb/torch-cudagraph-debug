@@ -38,7 +38,10 @@ memory-debug domain.
   recorded points, with explicit ownership on their containing objects.
 - Standalone snapshot, same-run point, cross-run point, timeline, and four-point
   phase comparison modes with allocator-wide `all`, `default`, and `private`
-  totals. Snapshot and Point comparisons are sibling result types and direct
+  totals. Same-identity lifecycle deltas match expandable segments by mapped
+  address ranges, so in-place growth, shrink, and hole punching report only
+  the mapped or unmapped bytes instead of whole-segment churn. Snapshot and
+  Point comparisons are sibling result types and direct
   Probe analysis never constructs a synthetic Point or Run.
 - Automatic discovery of every `segment_pool_id` across explicit single-device,
   device-set, and all-visible-device collection, with device-aware pool and raw
@@ -57,7 +60,9 @@ memory-debug domain.
   identity, lossless structured output, explicit transition origin, and `run`
   or `probe` source metadata.
 - Strict allocator-state invariants plus explicit awaiting-free, inactive,
-  fragmentation, segment, block, and expandable-segment metrics.
+  fragmentation, segment, block, and expandable-segment metrics, including
+  `expandable_inactive_bytes` to distinguish inactive capacity in expandable
+  segments from inactive capacity in native segments.
 - Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
   summary and rank-paired phase analysis without summing memory across GPUs.
 - Canonical gzip JSON run bundles with atomic writes, exact manifest fields,

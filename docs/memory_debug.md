@@ -87,6 +87,14 @@ metrics:
   live allocations but cannot yet be reused.
 - `inactive_bytes = reserved_bytes - active_bytes` is currently reusable under
   that pool's allocator rules.
+- `expandable_inactive_bytes` is the inactive capacity residing in expandable
+  segments. The allocator may return completely unused pages from that
+  capacity under memory pressure, but the metric is not an exact count of
+  currently releasable pages. Inactive capacity in regular segments returns
+  to the driver only when a whole unsplit segment is released. With
+  `expandable_segments:True`, `largest_inactive_block_bytes` also loses its
+  fragmentation-verdict power: an allocation that fits no hole can still be
+  served by growing the segment in place.
 - `internal_fragmentation_bytes = active_bytes - requested_bytes` is allocator
   rounding inside active or awaiting-free blocks.
 

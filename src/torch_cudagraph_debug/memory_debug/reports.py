@@ -2187,6 +2187,7 @@ def _comparison_stats_text(
         ("largest inactive block", "largest_inactive_block_bytes", True),
         ("expandable segments", "expandable_segment_count", False),
         ("expandable reserved", "expandable_reserved_bytes", True),
+        ("expandable inactive", "expandable_inactive_bytes", True),
     ):
         change = int(getattr(delta, name))
         if not change:
@@ -2266,6 +2267,7 @@ def _timeline_stats_text(
         ("largest inactive block", "largest_inactive_block_bytes", True),
         ("expandable segments", "expandable_segment_count", False),
         ("expandable reserved", "expandable_reserved_bytes", True),
+        ("expandable inactive", "expandable_inactive_bytes", True),
     ):
         current = int(getattr(stats, name))
         if delta is None:
