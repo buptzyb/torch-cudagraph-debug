@@ -8,7 +8,7 @@
     {
       "name": "tcgd",
       "source": "./plugins/tcgd",
-      "description": "Evidence-backed PyTorch CUDA Graph tensor and allocator-memory investigations: the tcgd-case-study skill and the tcgd-debugger agent."
+      "description": "Evidence-backed PyTorch CUDA Graph tensor and allocator-memory investigations: the tcgd-investigate skill and the tcgd-debugger agent."
     }
   ]
 }

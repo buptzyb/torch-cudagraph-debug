@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL_ROOT = ROOT / ".agents" / "skills" / "tcgd-case-study"
+SKILL_ROOT = ROOT / ".agents" / "skills" / "tcgd-investigate"
 SKILL = SKILL_ROOT / "SKILL.md"
-CLAUDE_SKILL = ROOT / ".claude" / "skills" / "tcgd-case-study"
+CLAUDE_SKILL = ROOT / ".claude" / "skills" / "tcgd-investigate"
 CODEX_AGENT = ROOT / ".codex" / "agents" / "tcgd-debugger.toml"
 CLAUDE_AGENT = ROOT / ".claude" / "agents" / "tcgd-debugger.md"
 PLUGIN_ROOT = ROOT / "plugins" / "tcgd"
@@ -49,14 +49,14 @@ def test_shared_repository_instructions_are_discoverable() -> None:
 
     assert claude.strip() == "@AGENTS.md"
     assert "Tool-First Investigation Contract" in agents
-    assert "tcgd-case-study" in agents
+    assert "tcgd-investigate" in agents
     assert "tcgd-debugger" in agents
 
 
 def test_canonical_skill_has_required_metadata_and_support_files() -> None:
     metadata = _frontmatter(SKILL)
 
-    assert metadata["name"] == "tcgd-case-study"
+    assert metadata["name"] == "tcgd-investigate"
     description = metadata["description"]
     assert isinstance(description, str)
     assert "PyTorch CUDA Graph" in description
@@ -102,7 +102,7 @@ def test_codex_agent_uses_the_shared_skill_contract() -> None:
     assert agent["name"] == "tcgd-debugger"
     assert "torch-cudagraph-debug" in agent["description"]
     instructions = agent["developer_instructions"]
-    assert ".agents/skills/tcgd-case-study/SKILL.md" in instructions
+    assert ".agents/skills/tcgd-investigate/SKILL.md" in instructions
     assert "Do not\nmodify the torch-cudagraph-debug library" in instructions
     assert "model" not in agent
     assert "sandbox_mode" not in agent
@@ -113,7 +113,7 @@ def test_claude_agent_preloads_the_canonical_skill() -> None:
 
     assert agent["name"] == "tcgd-debugger"
     assert agent["model"] == "inherit"
-    assert agent["skills"] == ["tcgd-case-study"]
+    assert agent["skills"] == ["tcgd-investigate"]
     assert "torch-cudagraph-debug" in str(agent["description"])
 
 
@@ -133,8 +133,8 @@ def test_agent_workflow_documentation_is_linked() -> None:
     guide = (ROOT / "docs" / "agent_workflows.md").read_text(encoding="utf-8")
 
     assert "](docs/agent_workflows.md)" in readme
-    assert "$tcgd-case-study" in guide
-    assert "/tcgd-case-study" in guide
+    assert "$tcgd-investigate" in guide
+    assert "/tcgd-investigate" in guide
     assert "tcgd-debugger" in guide
 
 
@@ -152,7 +152,7 @@ def test_plugin_wraps_canonical_assets_through_marketplace_links() -> None:
     assert manifest["name"] == "tcgd"
     assert manifest["license"] == "Apache-2.0"
 
-    skill_link = PLUGIN_ROOT / "skills" / "tcgd-case-study"
+    skill_link = PLUGIN_ROOT / "skills" / "tcgd-investigate"
     agent_link = PLUGIN_ROOT / "agents" / "tcgd-debugger.md"
     assert skill_link.is_symlink(), "plugin skill must link to the canonical skill"
     assert skill_link.resolve() == SKILL_ROOT.resolve()

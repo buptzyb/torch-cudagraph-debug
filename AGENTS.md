@@ -39,16 +39,16 @@ When investigating tensor or memory behavior in an application:
    inference, and product gaps. Never describe supplemental raw-snapshot work
    as output produced by this package.
 
-Use the `tcgd-case-study` skill for the complete investigation procedure. Use
-the `tcgd-debugger` custom agent when the case benefits from an isolated agent
-that owns reproduction, collection, analysis, and reporting end to end.
+Use the `tcgd-investigate` skill for the complete investigation procedure. Use
+the `tcgd-debugger` custom agent when the investigation benefits from an
+isolated agent that owns reproduction, collection, analysis, and reporting end to end.
 
 ## Development Rules
 
 - Read `docs/architecture.md` and the relevant domain guide before changing
   package behavior.
 - Keep Probe and Recorder as sibling public workflows over private collectors.
-- Keep generated case-study artifacts outside the source checkout, under a
+- Keep generated investigation artifacts outside the source checkout, under a
   user-provided directory or `/tmp` by default.
 - Fix validation failures at their source. Do not bypass checks, suppress test
   failures, or use destructive Git commands to make a run pass.

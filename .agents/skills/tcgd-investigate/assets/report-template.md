@@ -1,4 +1,4 @@
-# TCGD Case Study: <title>
+# TCGD Investigation: <title>
 
 ## Question
 

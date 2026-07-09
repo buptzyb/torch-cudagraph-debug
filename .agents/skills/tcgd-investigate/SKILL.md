@@ -1,9 +1,9 @@
 ---
-name: tcgd-case-study
-description: Investigate real PyTorch CUDA Graph tensor mismatches, replay drift, NaNs, gradients, allocator growth, pool behavior, or eager-versus-graph differences with torch-cudagraph-debug. Use for fresh application case studies and persisted bundle analysis. Do not use for implementing the debug library itself or for generic CUDA questions that do not require its public APIs.
+name: tcgd-investigate
+description: Investigate real PyTorch CUDA Graph tensor mismatches, replay drift, NaNs, gradients, allocator growth, pool behavior, or eager-versus-graph differences with torch-cudagraph-debug. Use when debugging CUDA Graph accuracy or GPU memory issues in an application workload, conducting a fresh investigation, or analyzing persisted bundles. Do not use for implementing the debug library itself or for generic CUDA questions that do not require its public APIs.
 ---
 
-# TCGD Case Study
+# TCGD Investigation
 
 Own one tensor or memory investigation from reproduction through a saved,
 evidence-backed report. Start with the public `torch_cudagraph_debug` API and
@@ -20,7 +20,7 @@ Establish these values from the request or discover them from the environment:
 - the output root.
 
 If the user does not provide an output root, create
-`/tmp/tcgd-case-study-YYYYMMDD-HHMMSS`. Do not reuse an existing directory.
+`/tmp/tcgd-investigation-YYYYMMDD-HHMMSS`. Do not reuse an existing directory.
 Do not stop for values that can be discovered from the workload, repository, or
 runtime.
 
@@ -57,7 +57,7 @@ Start with the smallest measurement that answers the question:
 Use this artifact layout:
 
 ```text
-<case-root>/
+<investigation-root>/
 ├── metadata.json
 ├── runs/
 │   ├── <baseline>/
@@ -83,8 +83,8 @@ Record at least:
 - the requested question and selected measurement points.
 
 Do not copy old bundles into a fresh evidence root. Existing bundles may be
-analyzed only when the user explicitly asks for offline analysis; label that
-case as existing-artifact analysis in `metadata.json`.
+analyzed only when the user explicitly asks for offline analysis; record the
+mode as existing-artifact analysis in `metadata.json`.
 
 ## 3. Acquire A Suitable GPU Environment
 

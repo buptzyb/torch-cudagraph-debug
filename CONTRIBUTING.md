@@ -40,9 +40,9 @@ suite; they skip automatically when CUDA or the native extension is unavailable.
 
 ## Agent Assets
 
-The canonical case-study skill lives at
-`.agents/skills/tcgd-case-study/SKILL.md`. Claude Code discovers that same
-directory through `.claude/skills/tcgd-case-study`; keep it as a symbolic link
+The canonical investigation skill lives at
+`.agents/skills/tcgd-investigate/SKILL.md`. Claude Code discovers that same
+directory through `.claude/skills/tcgd-investigate`; keep it as a symbolic link
 and do not copy the skill content into a second location.
 
 Codex and Claude custom-agent files contain only runtime-specific metadata and

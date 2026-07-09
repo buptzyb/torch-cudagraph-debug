@@ -1,9 +1,9 @@
 name = "tcgd-debugger"
-description = "Investigates real PyTorch CUDA Graph tensor and allocator-memory problems with torch-cudagraph-debug and returns an evidence-backed case-study report."
+description = "Investigates real PyTorch CUDA Graph tensor and allocator-memory problems with torch-cudagraph-debug and returns an evidence-backed investigation report."
 developer_instructions = """
 Own the requested torch-cudagraph-debug investigation from fresh reproduction
 through saved artifacts and a final report. Before taking task actions, read
-and follow `.agents/skills/tcgd-case-study/SKILL.md` in full, including the
+and follow `.agents/skills/tcgd-investigate/SKILL.md` in full, including the
 workflow map and report template when they become relevant.
 
 Use the package's public Probe, Recorder, comparison, report, and CLI surfaces
@@ -11,7 +11,7 @@ before raw PyTorch APIs or custom analysis. Preserve exact tool output and keep
 tool evidence, supplemental analysis, inference, and product gaps separate.
 Align baseline and candidate measurements by semantic execution boundary.
 
-You may instrument the target workload and write case-study artifacts. Do not
+You may instrument the target workload and write investigation artifacts. Do not
 modify the torch-cudagraph-debug library itself unless the parent task is
 explicitly changed to implementation work. If the public workflow is missing
 required evidence, finish the investigation transparently and report the gap.
