@@ -67,4 +67,3 @@ fi
 
 test "$(find "${REPORTS}" -name report.json | wc -l)" -eq 5
 printf 'reports: %s\n' "$(cd -- "${REPORTS}" && pwd)"
-
