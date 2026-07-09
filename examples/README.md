@@ -56,7 +56,8 @@ allocator history in a long-running process.
 |---:|---|---|---|
 | 1 | Which pools and streams grew around graph capture and replay? | [Quickstart](memory_debug/probe/quickstart.py) | `MemoryProbe`, `snapshot()`, `compare()` |
 | 2 | Why can a graph private pool be mostly inactive but remain reserved? | [Private-pool inactive memory](memory_debug/probe/private_pool_inactive.py) | `MemoryStats.inactive_bytes` |
-| 3 | How are independently collected allocator endpoints compared? | [Snapshot comparison](memory_debug/probe/snapshot_comparison.py) | `compare_snapshots()` |
+| 3 | What changes when expandable capacity is cached and then unmapped? | [Expandable segments](memory_debug/probe/expandable_segments.py) | `expandable_inactive_bytes`, address lifecycle |
+| 4 | How are independently collected allocator endpoints compared? | [Snapshot comparison](memory_debug/probe/snapshot_comparison.py) | `compare_snapshots()` |
 
 ### Recorder And Run Workflow
 

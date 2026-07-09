@@ -15,10 +15,20 @@ state with one `MemoryProbe`. It discovers all pools present in
 shows why the graph private pool remains reserved even though most of its
 capacity is inactive.
 
+`probe/expandable_segments.py` keeps two allocations alive around a released
+middle allocation. It separates inactive expandable capacity retained in the
+cache from the mapped bytes that `empty_cache()` later unmaps. Run it in a new
+process with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+
 `probe/snapshot_comparison.py` compares endpoints from independent probes. Use
 this pattern when the two snapshots do not share one Probe lifecycle.
 
 None of the Probe examples require allocator history.
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python examples/memory_debug/probe/expandable_segments.py
+```
 
 ## Recorder And Run Workflow
 

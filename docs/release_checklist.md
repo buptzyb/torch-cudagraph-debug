@@ -138,7 +138,8 @@ Memory coverage must include:
 - same-probe and cross-probe standalone snapshot comparison;
 - device-aware identities for one, multiple, and all visible devices;
 - allocated, reserved, active, requested, awaiting-free, inactive,
-  fragmentation, segment, block, and expandable-segment metrics;
+  fragmentation, segment, block, expandable reserved, and expandable inactive
+  metrics;
 - gzip JSON persistence and `MemoryRun.load()` round trip;
 - payload digest verification, state/manifest cross-validation, and explicit
   cache-independent full-bundle validation;
@@ -171,6 +172,8 @@ bash "${TCGD_REPO_ROOT}/examples/tensor_debug/cli/workflows.sh" \
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/quickstart.py"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/private_pool_inactive.py"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/snapshot_comparison.py"
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/expandable_segments.py"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/timeline_and_reports.py" \
   --output-dir "${EXAMPLE_ROOT}/timeline"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/history_requirements.py" \

@@ -93,6 +93,12 @@ MAJOR_WORKFLOW_COVERAGE = {
         "pool_key.pool_id",
         "pool_key.label",
     ),
+    "memory_debug/probe/expandable_segments.py": (
+        "expandable_inactive_bytes",
+        "empty_cache()",
+        "removed_segment_bytes",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
+    ),
     "memory_debug/probe/snapshot_comparison.py": ("compare_snapshots(",),
     "memory_debug/recorder/timeline_and_reports.py": (
         'record_point("during_capture")',
@@ -260,6 +266,21 @@ def test_memory_report_glossary_covers_rendered_terms() -> None:
     assert "`change_gap = candidate_change - baseline_change`" in guide
     assert "`change_gap = candidate_change - baseline_change`" in api
     assert "every user-visible text/HTML label" in checklist
+
+
+def test_expandable_inactive_metric_is_documented() -> None:
+    guide = (ROOT / "docs" / "memory_debug.md").read_text(encoding="utf-8")
+    api = (ROOT / "docs" / "api.md").read_text(encoding="utf-8")
+    checklist = (ROOT / "docs" / "release_checklist.md").read_text(encoding="utf-8")
+
+    stats_section = api.split("`MemoryStats` stores", 1)[1].split("### MemoryRun", 1)[0]
+    phase_section = api.split("`PhaseMetric` contains", 1)[1].split(
+        "A private-pool mapping", 1
+    )[0]
+    for document in (guide, stats_section, phase_section):
+        assert "`expandable_inactive_bytes`" in document
+    assert "expandable inactive" in checklist
+    assert "](../examples/memory_debug/probe/expandable_segments.py)" in guide
 
 
 def test_workflow_docs_separate_control_flow_from_containment() -> None:

@@ -951,7 +951,8 @@ point.descriptor() -> dict
 
 `MemoryStats` stores reserved, allocated, active, requested, segment count,
 block count, inactive block count, largest inactive block, expandable segment
-count, and expandable reserved bytes. Three byte metrics are derived:
+count, `expandable_reserved_bytes`, and `expandable_inactive_bytes`. Three byte
+metrics are derived:
 `awaiting_free_bytes = active_bytes - allocated_bytes`,
 `inactive_bytes = reserved_bytes - active_bytes`, and
 `internal_fragmentation_bytes = active_bytes - requested_bytes`. Allocator states
@@ -1243,8 +1244,9 @@ end_gap = start_gap + candidate_change - baseline_change
 
 `PhaseMetric` contains `reserved_bytes`, `allocated_bytes`, `active_bytes`,
 `awaiting_free_bytes`, `inactive_bytes`, `requested_bytes`,
-`internal_fragmentation_bytes`, and `expandable_reserved_bytes`. Segment and
-block counts are point diagnostics, not phase metrics.
+`internal_fragmentation_bytes`, `expandable_reserved_bytes`, and
+`expandable_inactive_bytes`. Segment and block counts are point diagnostics,
+not phase metrics.
 
 A private-pool mapping is validated against the union of each run's phase
 endpoints. The mapped pool may be absent at one endpoint; that endpoint is

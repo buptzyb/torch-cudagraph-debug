@@ -95,6 +95,9 @@ metrics:
   `expandable_segments:True`, `largest_inactive_block_bytes` also loses its
   fragmentation-verdict power: an allocation that fits no hole can still be
   served by growing the segment in place.
+  The [expandable-segment example](../examples/memory_debug/probe/expandable_segments.py)
+  shows inactive mapped capacity before `empty_cache()` and the exact range
+  removed when the allocator unmaps an interior hole.
 - `internal_fragmentation_bytes = active_bytes - requested_bytes` is allocator
   rounding inside active or awaiting-free blocks.
 
