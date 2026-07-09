@@ -217,6 +217,51 @@ def test_root_readme_memory_output_uses_device_aware_identities() -> None:
     assert "each device's `pool[0,0]`" in memory_section
 
 
+def test_tensor_summary_statistics_are_defined() -> None:
+    guide = (ROOT / "docs" / "tensor_debug.md").read_text(encoding="utf-8")
+    api = (ROOT / "docs" / "api.md").read_text(encoding="utf-8")
+
+    for document in (guide, api):
+        normalized = re.sub(r"\s+", " ", document)
+        assert "population standard deviation" in normalized
+        assert "finite elements" in normalized
+        assert "`zero_count`" in normalized
+
+
+def test_memory_report_glossary_covers_rendered_terms() -> None:
+    guide = (ROOT / "docs" / "memory_debug.md").read_text(encoding="utf-8")
+    api = (ROOT / "docs" / "api.md").read_text(encoding="utf-8")
+    checklist = (ROOT / "docs" / "release_checklist.md").read_text(encoding="utf-8")
+
+    for label in (
+        "`snapshot_peak`",
+        "`snapshot_blocks`",
+        "`owner_event_peak`",
+        "`unreusable_event_peak`",
+    ):
+        assert label in guide
+        assert label in api
+    assert "`diagnostics` line is intentionally sparse" in guide
+    assert "`allocation stack coverage` is attributed" in guide
+    assert "`instance stack coverage` is the sum" in guide
+    for confidence in ("`reported`", "`matched`", "`ambiguous`", "`unknown`"):
+        assert confidence in guide
+        assert confidence in api
+    for match_kind in (
+        "`same_probe`",
+        "`same_run`",
+        "`default`",
+        "`mapped`",
+        "`reference_only`",
+        "`candidate_only`",
+    ):
+        assert match_kind in guide
+        assert match_kind in api
+    assert "`change_gap = candidate_change - baseline_change`" in guide
+    assert "`change_gap = candidate_change - baseline_change`" in api
+    assert "every user-visible text/HTML label" in checklist
+
+
 def test_workflow_docs_separate_control_flow_from_containment() -> None:
     documents = (
         ROOT / "README.md",
@@ -402,6 +447,43 @@ def test_api_reference_covers_every_supported_export() -> None:
             assert name in reference, (
                 f"docs/api.md does not cover {module.__name__}.{name}"
             )
+
+
+def test_memory_result_models_have_field_level_reference() -> None:
+    reference = (ROOT / "docs" / "api.md").read_text(encoding="utf-8")
+    section = reference.split("Supporting public row models", 1)[1].split(
+        "State comparisons", 1
+    )[0]
+    models = (
+        "MemoryAllocatorScopeComparison",
+        "MemoryPoolComparison",
+        "MemoryObservationComparison",
+        "MemoryAllocatorScopeTimelineEntry",
+        "MemoryPoolTimelineEntry",
+        "MemoryObservationTimelineEntry",
+        "MemoryPhaseComponents",
+        "MemoryAllocatorScopePhaseDecomposition",
+        "MemoryPoolPhaseDecomposition",
+        "AllocationStackCoverage",
+        "AllocationStackSummary",
+        "AllocationStackDelta",
+        "AllocatorEventSummary",
+        "CohortPointState",
+        "CohortSizeBucket",
+        "CohortSizeOutcome",
+        "CohortBirth",
+        "CohortFreeRequest",
+        "CohortFreeCompletion",
+        "AllocationCohort",
+        "MemoryRankPointState",
+        "MemoryRankPointAggregate",
+        "MemoryRankPhaseDecomposition",
+        "MemoryRankPoolPhaseDecomposition",
+        "MemoryMetricExtrema",
+        "MemoryRunGroupPhaseAggregate",
+    )
+    for model in models:
+        assert f"`{model}`" in section, model
 
 
 def test_public_markdown_has_balanced_fences() -> None:

@@ -197,7 +197,10 @@ output = recorder.observe(output, name="output", payload="full")
 ```
 
 Every observation stores metadata, SHA-256, and finite/NaN/Inf/zero counts plus
-min, max, mean, standard deviation, and L2 norm.
+min, max, mean, standard deviation, and L2 norm. The numeric statistics use
+finite elements only after conversion to `float64`; `std` is the population
+standard deviation. `zero_count` is a subset of `finite_count`. Statistics are
+`None` when no finite element exists.
 
 - `full` also stores raw tensor bytes and supports allclose or exact
   comparison.

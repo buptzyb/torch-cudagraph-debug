@@ -8,6 +8,9 @@
   changelog are current.
 - Confirm the API reference describes the exact supported public facades and
   serialized formats shipped in this repository.
+- Compare every user-visible text/HTML label with its renderer. Define its
+  source, formula, sampling scope, and relationship to structured fields; mark
+  intentionally sparse text sections and dynamic example values explicitly.
 - Confirm the root README stays limited to concise quick starts and links to
   the dedicated Tensor Debug and Memory Debug guides.
 - Confirm tensor lifecycle, single-capture ownership, eager single-stream and

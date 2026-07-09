@@ -517,6 +517,11 @@ A foreign point passed to `run.point()` raises `TensorOwnershipError`.
 `TensorObservation` is an ownerless leaf shared by Probe snapshots and Recorder
 points. It records global order, name, per-name invocation, shape, stride,
 dtype, source device, payload kind, nbytes, SHA-256, and a `TensorValueSummary`.
+The summary counts finite, NaN, positive-infinity, negative-infinity, and zero
+elements. Its minimum, maximum, mean, population standard deviation, and L2
+norm use finite elements converted to `float64`; they are `None` when no finite
+element exists. `zero_count` is part of `finite_count`, while
+`finite_count + nan_count + pos_inf_count + neg_inf_count == numel`.
 `observation.tensor()` lazily returns a CPU tensor for a full payload and
 validates blob size and digest. It raises `TensorPayloadUnavailableError` for a
 summary-only observation.
@@ -631,8 +636,12 @@ is accepted with the incomplete-bundle warning; a complete rank with fewer
 points or any non-prefix sequence is an error. Conflicting non-null
 group IDs or world sizes are errors; missing identity, missing declared ranks,
 incomplete bundles, provenance differences, and metadata differences are
-warnings. `TensorRankPointSummary` describes rank/point payload inventory, and
-`TensorRankRunComparison` owns one rank's run comparison. A comparison with
+warnings. `TensorRankPointSummary` records rank, run ID, point index/label, observation
+count, and full/summary payload counts. `TensorRankRunComparison` pairs a rank
+with its `TensorRunComparison` and derived status. `TensorRunGroupSummary`
+carries the group, ordered rank-point rows, and warnings;
+`TensorRunGroupComparison` carries both groups, rank comparisons, one-sided
+ranks, warnings, and aggregate status. A comparison with
 missing ranks, unknown world size, or incomplete bundles is `inconclusive`, not
 `match`. Group summary and comparison results provide `to_text()`, `to_dict()`,
 `to_html()`, and `write()`; comparisons also provide `assert_ok()`. Group
@@ -668,6 +677,10 @@ tcgd-tensor compare-run-groups REFERENCE_GROUP CANDIDATE_GROUP \
 tcgd-tensor compare-point-series REFERENCE_BUNDLE [CANDIDATE_BUNDLE] \
   --reference-point LABEL
 ```
+
+`summary` prints run execution and completion state, the point count and default
+payload mode, then each point's observation counts, full/summary split, and
+eager or replay index.
 
 For `compare-points` and `compare-point-series`, omitting `CANDIDATE_BUNDLE`
 reuses the reference bundle.
@@ -943,7 +956,10 @@ count, and expandable reserved bytes. Three byte metrics are derived:
 `inactive_bytes = reserved_bytes - active_bytes`, and
 `internal_fragmentation_bytes = active_bytes - requested_bytes`. Allocator states
 and nested metadata are recursively frozen; `advanced.mutable_snapshot(point)`
-returns an editable deep copy.
+returns an editable deep copy. Text comparisons always show the four base byte
+metrics but list only nonzero diagnostic deltas. Timeline text lists nonzero
+diagnostics at the first point and nonzero diagnostic deltas afterward.
+Structured results retain every metric.
 
 ### MemoryRun
 
@@ -983,7 +999,10 @@ observations:
 active-block address, `approximate` when missing addresses require size-based
 multiset matching, and `unavailable` for independent states. Approximate results
 remain visible but carry a warning because equal-size allocation churn can
-cancel without stable addresses.
+cancel without stable addresses. `MatchKind` is `same_probe` or `same_run` for
+owner-local identity, `default` for independently collected default pools,
+`mapped` for an explicit private-pool mapping, and `reference_only` or
+`candidate_only` for unmatched rows.
 
 Allocator events and allocation lifetimes are separate optional attribution
 results controlled by `MemoryAttributionOptions`.
@@ -1052,9 +1071,14 @@ MemoryAttributionStatus(
 ```
 
 Every comparison stores `attribution_status`, distinguishing unrequested
-analysis, partial stack coverage, and complete evidence. Stack byte coverage
-remains available separately. Event windows and address identity
-are device-specific.
+analysis, partial stack coverage, and complete evidence. Stack byte coverage is
+attributed active block bytes divided by total active block bytes at an
+endpoint; an endpoint with zero active bytes has coverage `1.0`. Lifetime instance coverage instead sums each tracked generation's
+size once and is not a point-in-time peak. Event windows and address identity
+are device-specific. `AllocatorEventSummary.attribution_confidence` is
+`reported` when the raw event supplies a pool, `matched` when its address maps
+uniquely through endpoint segment ranges, `ambiguous` for conflicting endpoint
+ranges, and `unknown` when no address or matching range is available.
 
 ### Allocation Cohort Lifetimes
 
@@ -1107,8 +1131,16 @@ unrelated unattributed sizes are not merged. Each cohort retains:
 - streams, a unique-generation size histogram, and size-by-terminal-state rows;
 - birth, free-request, and free-completion transitions, each marked with
   an `event` or `range_boundary` origin;
-- snapshot peaks plus event-derived owner-active and unreusable peaks;
+- `peak_active_bytes` and `peak_block_count`, the sampled-point peaks rendered
+  as `snapshot_peak` and `snapshot_blocks`;
+- `event_owner_peak_bytes`, the maximum owner-active bytes reconstructed from
+  the range-start state and events, and `event_unreusable_peak_bytes`, the
+  corresponding maximum of owner-active plus awaiting-free bytes; the text
+  labels are `owner_event_peak` and `unreusable_event_peak`;
 - owner-active and awaiting-free terminal totals.
+
+A transient generation born and freed between points contributes to the event
+peaks even when both snapshot fields are zero.
 
 Complete allocator event history must be enabled before the allocations of
 interest.
@@ -1200,6 +1232,11 @@ and `private` scopes and each phase metric. Every row carries an
 end_gap = start_gap + candidate_change - baseline_change
 ```
 
+`PhaseMetric` contains `reserved_bytes`, `allocated_bytes`, `active_bytes`,
+`awaiting_free_bytes`, `inactive_bytes`, `requested_bytes`,
+`internal_fragmentation_bytes`, and `expandable_reserved_bytes`. Segment and
+block counts are point diagnostics, not phase metrics.
+
 A private-pool mapping is validated against the union of each run's phase
 endpoints. The mapped pool may be absent at one endpoint; that endpoint is
 represented by zero state, so phases that create or destroy a pool still retain
@@ -1247,10 +1284,14 @@ decompressed allocator-state or event payloads across ranks or points; set
 `cache_snapshots=True` only for workloads that repeatedly inspect the same
 payloads.
 
-`MemoryRunGroupSummary` emits per-rank point/scope states plus min, max, spread,
-and worst rank. `MemoryRunGroupPhaseComparison` pairs common ranks and
-aggregates the per-rank four-point equations. Neither API sums GPU memory across
-ranks.
+`MemoryRunGroupSummary` retains per-rank point/scope states plus each
+metric's minimum, maximum, owning ranks, and spread. Its text and HTML focus on
+allocated, reserved, active, and requested; JSON and CSV retain every metric.
+`MemoryRunGroupPhaseComparison` pairs common ranks and aggregates every phase
+metric in the per-rank four-point equations. Text reports the minimum, maximum,
+owning ranks, and spread for `end_gap` and
+`change_gap = candidate_change - baseline_change`; JSON and CSV retain extrema
+for every equation component. Neither API sums GPU memory across ranks.
 
 ### Result Objects
 
@@ -1275,6 +1316,40 @@ and serialization. Their main programmatic fields are:
 - `MemoryRunGroupPhaseComparison`: `baseline_group`, `candidate_group`,
   `rank_comparisons`, `rank_decomposition`, `rank_pool_decomposition`,
   `phase_aggregates`, and `warnings`.
+
+Supporting public row models preserve the structured evidence behind those
+reports:
+
+- `MemoryAllocatorScopeComparison`, `MemoryPoolComparison`, and
+  `MemoryObservationComparison` carry reference, candidate, and delta
+  `MemoryStats`; pool and observation rows also carry `MatchKind` and optional
+  `MemoryLifecycleDelta`.
+- `MemoryAllocatorScopeTimelineEntry`, `MemoryPoolTimelineEntry`, and
+  `MemoryObservationTimelineEntry` carry point identity, row identity, absolute
+  stats, and the optional previous-point delta.
+- `MemoryPhaseComponents` carries the five terms of one phase equation.
+  `MemoryAllocatorScopePhaseDecomposition` and `MemoryPoolPhaseDecomposition`
+  add allocator-scope or mapped-pool identity.
+- `AllocationStackCoverage`, `AllocationStackSummary`, and
+  `AllocationStackDelta` retain coverage totals or stack-keyed active size,
+  requested size, count, pool, and optional stream evidence.
+  `AllocatorEventSummary` retains event action, total absolute event bytes,
+  count, stack, device, stream, pool, and pool-attribution confidence.
+- `CohortPointState` splits owner-active and awaiting-free bytes, requested
+  bytes, and counts at one point. `CohortSizeBucket` and `CohortSizeOutcome`
+  retain per-generation size distributions; `CohortBirth`,
+  `CohortFreeRequest`, and `CohortFreeCompletion` retain interval, origin,
+  stack, byte, and count totals. `AllocationCohort` combines those rows with
+  identity; sampled active, owner-active, awaiting-free, and block-count peaks;
+  active-byte span across points; event peaks; first/last sampled or event
+  boundaries; birth/free totals; and terminal owner-active/awaiting-free
+  totals.
+- `MemoryRankPointState` and `MemoryRankPointAggregate` retain per-rank state
+  and cross-rank metric extrema; `worst_rank` aliases `max_rank` for these
+  nonnegative absolute metrics. `MemoryRankPhaseDecomposition` and
+  `MemoryRankPoolPhaseDecomposition` pair a rank with one phase row.
+  `MemoryMetricExtrema` retains signed min/max bytes and ranks;
+  `MemoryRunGroupPhaseAggregate` applies those extrema to every phase term.
 
 State comparisons, timelines, phase comparisons, and group phase comparisons
 use:
@@ -1406,6 +1481,10 @@ tcgd-memory compare-run-group-phases BASELINE_GROUP CANDIDATE_GROUP \
   --candidate-start POINT --candidate-end POINT \
   [--pool-map RANK@DEVICE:POOL0,POOL1=DEVICE:POOL0,POOL1] [--output DIR]
 ```
+
+`summary` prints run completion and rank identity, then each point's
+observation and pool counts plus allocator-wide allocated, reserved, active,
+and requested totals.
 
 Omitting `CANDIDATE_BUNDLE` from `compare-points` compares two ordered points
 in the reference run; `--pool-map` is valid only across independent runs.

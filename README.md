@@ -217,16 +217,30 @@ Memory comparison 'graph-capture@snapshot-0' -> 'graph-capture@snapshot-1' (same
 Read the report top-down:
 
 1. Every metric is `reference -> candidate (delta)`.
-2. `total[all]` combines every device and pool, `total[default]` combines
+2. `pools` identifies which device and pool changed;
+   `device/pool/stream observations` records the state associated with each CUDA
+   stream in that pool. The bracketed `[same_probe]` means the row was matched
+   by identity within this Probe.
+3. `total[all]` combines every device and pool, `total[default]` combines
    each device's `pool[0,0]`, and `total[private]` combines all non-default
    pools, including CUDA Graph pools.
-3. `requested` is the original active allocation request, `allocated` is
+4. `requested` is the original active allocation request, `allocated` is
    block space still owned by live allocations, `active` is space not yet
-   reusable, and
-   `reserved` is the full segment capacity held by the caching allocator.
-4. `pools` identifies which device and pool changed;
-   `device/pool/stream observations` records the state associated with each CUDA
-   stream in that pool.
+   reusable, and `reserved` is the full segment capacity held by the caching
+   allocator.
+5. `diagnostics` explains the allocator structure behind the byte totals.
+   `inactive` is `reserved - active`, capacity currently reusable within that
+   pool; `fragmentation` is `active - requested`, allocator rounding inside
+   active or awaiting-free blocks. Segment and block counts show how that
+   capacity is divided, while inactive-block count and largest inactive block
+   describe reusable blocks.
+6. `lifecycle` compares segment and active-block identity between the two
+   snapshots. `new segment` and `newly active` report identities added at the
+   candidate endpoint; `removed segment` and `became inactive` appear when
+   reference segment or active-block identities are absent from the candidate
+   endpoint. The top-level `address lifecycle` value states whether address
+   matching is `exact` or `approximate`. This snapshot-derived comparison does not require
+   allocator event history and is distinct from the event-backed `lifetimes()` analysis.
 
 The main signal here is `total[private]`: graph capture added a 16 MiB active
 allocation in a private pool. The small default-pool change is separate

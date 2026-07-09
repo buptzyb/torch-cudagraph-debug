@@ -23,6 +23,7 @@ from .allocator_snapshot import (
 )
 from .attribution import MemoryAttributionStatus
 from .comparison_models import (
+    PHASE_METRICS,
     MemoryAllocatorScopeComparison,
     MemoryAllocatorScopePhaseDecomposition,
     MemoryObservationComparison,
@@ -149,7 +150,8 @@ class MemoryAllocationLifetimeAnalysis:
                 f"snapshot_peak={format_bytes(item.peak_active_bytes)} "
                 f"owner_event_peak={format_bytes(item.event_owner_peak_bytes)} "
                 f"unreusable_event_peak={format_bytes(item.event_unreusable_peak_bytes)} "
-                f"blocks={item.peak_block_count} at {item.display_stack(depth)}"
+                f"snapshot_blocks={item.peak_block_count} at "
+                f"{item.display_stack(depth)}"
             )
             lines.append(
                 f"{indent}    born={format_bytes(item.born_bytes)}; "
@@ -1850,18 +1852,10 @@ class MemoryRunGroupPhaseComparison:
             "  end_gap = start_gap + candidate_change - baseline_change",
         ]
         lines.extend(f"  warning: {warning}" for warning in self.warnings)
-        visible_metrics = {
-            "reserved_bytes",
-            "allocated_bytes",
-            "active_bytes",
-            "requested_bytes",
-            "inactive_bytes",
-            "internal_fragmentation_bytes",
-        }
         selected_rows = [
             row
             for row in self.phase_aggregate_rows(include_unchanged=include_unchanged)
-            if row["metric"] in visible_metrics
+            if row["metric"] in PHASE_METRICS
         ]
         if not selected_rows:
             lines.append("  no changed phase rows")
@@ -1869,10 +1863,14 @@ class MemoryRunGroupPhaseComparison:
             lines.append(
                 "  "
                 f"total[{row['scope']}] {row['metric']}: "
-                f"end gap max {format_delta_bytes(int(row['end_gap_max_bytes']))} "
+                f"end gap min {format_delta_bytes(int(row['end_gap_min_bytes']))} "
+                f"on rank {row['end_gap_min_rank']}, max "
+                f"{format_delta_bytes(int(row['end_gap_max_bytes']))} "
                 f"on rank {row['end_gap_max_rank']} "
                 f"(spread {format_bytes(int(row['end_gap_spread_bytes']))}); "
-                f"change gap max "
+                f"change gap min "
+                f"{format_delta_bytes(int(row['change_gap_min_bytes']))} "
+                f"on rank {row['change_gap_min_rank']}, max "
                 f"{format_delta_bytes(int(row['change_gap_max_bytes']))} "
                 f"on rank {row['change_gap_max_rank']} "
                 f"(spread {format_bytes(int(row['change_gap_spread_bytes']))})"

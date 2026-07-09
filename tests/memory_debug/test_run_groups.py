@@ -213,7 +213,12 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
     assert active.end_gap.max_rank == 1
     assert active.end_gap.spread_bytes == 5
     assert active.identity_holds is True
-    assert "not summed across ranks" in report.to_text()
+    text = report.to_text()
+    assert "not summed across ranks" in text
+    assert "end gap min +25 B on rank 0, max +30 B on rank 1" in text
+    assert "change gap min" in text
+    assert "awaiting_free_bytes" in text
+    assert "expandable_reserved_bytes" in text
 
     paths = report.write(tmp_path / "phase")
     assert set(paths) == {

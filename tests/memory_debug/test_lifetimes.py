@@ -220,6 +220,12 @@ def test_born_between_keeps_event_only_transient_allocation(tmp_path: Path) -> N
     assert "born.py" in cohort.stack_key
     assert "requested.py" in cohort.free_requests[0].stack_key
 
+    text = report.to_text()
+    assert "snapshot_peak=0 B" in text
+    assert "owner_event_peak=64 B" in text
+    assert "unreusable_event_peak=64 B" in text
+    assert "snapshot_blocks=0" in text
+
     paths = report.write(tmp_path / "born")
     assert "birth_stacks" in paths
     assert "free_request_stacks" in paths

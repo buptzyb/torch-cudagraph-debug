@@ -90,6 +90,12 @@ metrics:
 - `internal_fragmentation_bytes = active_bytes - requested_bytes` is allocator
   rounding inside active or awaiting-free blocks.
 
+Comparison and timeline text output always prints the four base byte metrics. A
+`diagnostics` line is intentionally sparse: comparison rows include only
+nonzero diagnostic deltas, and a timeline includes only nonzero absolute
+diagnostics at its first point or nonzero deltas afterward. JSON, CSV, and the
+in-memory result objects retain every diagnostic metric.
+
 For a CUDA Graph private pool, inactive does not mean that the memory is
 available to the default pool or has been returned to the CUDA driver. Capture
 records kernel arguments, including device addresses. Replay submits those
@@ -139,6 +145,11 @@ instrumented workloads in one process (for example an eager baseline against
 a CUDA Graph run). Private pools stay unmatched across independent probes
 unless `pool_mapping` explicitly pairs them, exactly like cross-run
 `compare_points`.
+
+Every pool and device/pool/stream row carries a bracketed match kind:
+`same_probe` and `same_run` preserve owner-local identity; `default` matches
+default pools across independent owners; `mapped` uses an explicit private-pool
+mapping; and `reference_only` or `candidate_only` marks an unmatched row.
 
 Same-probe comparisons may request marker-delimited allocator events and
 lifetimes when the application enabled allocator history before the interval.
@@ -274,13 +285,29 @@ input, or an implementation defect.
 
 Every successful comparison exposes `attribution_status`. `requested`
 distinguishes an analysis the caller asked for, and `available`/`complete`
-describe the evidence that backed it.
+describe the evidence that backed it. `allocation stack coverage` is attributed
+active block bytes divided by total active block bytes at each endpoint; an
+endpoint with zero active bytes reports full coverage. In a
+lifetime report, `instance stack coverage` is the sum of sizes for tracked
+allocation generations with frames divided by the sum for all tracked
+generations; it is not a point-in-time memory peak.
 
 A block's `frames` are the allocation call stack for memory still active in a
 snapshot. Entries under `device_traces` are historical allocator events, and
 their `frames` are event call stacks. These are separate data sources.
 Recorder bundles remove cumulative `device_traces` from point state and
 preserve only each adjacent interval's raw event mappings.
+
+Each allocator-event row reports pool-attribution confidence:
+
+- `reported`: the raw event supplied its pool ID;
+- `matched`: the event address resolves uniquely through endpoint segment
+  ranges;
+- `ambiguous`: endpoint ranges associate the address with conflicting pools;
+- `unknown`: no address was available or no endpoint range contains it.
+
+Confidence describes pool attribution, not event-history completeness; the
+comparison's `attribution_status.events` carries the latter.
 
 The normalized raw action vocabulary is `alloc`, `free_requested`,
 `free_completed`, `segment_alloc`, `segment_free`, `segment_map`,
@@ -351,6 +378,20 @@ A generation can occupy three relevant states:
   prevents allocator reuse;
 - **free completed**: `free_completed` occurred and the block can be reused by
   the allocator.
+
+The cohort summary separates point sampling from event replay:
+
+- `snapshot_peak` is the largest cohort `active_bytes` value in any recorded
+  point snapshot.
+- `snapshot_blocks` is the largest cohort block count in any recorded point
+  snapshot.
+- `owner_event_peak` is the largest owner-active byte total reconstructed from
+  the range-start state and allocator events.
+- `unreusable_event_peak` is the largest reconstructed owner-active plus
+  awaiting-free byte total.
+
+An allocation born and freed between adjacent points can therefore have zero
+`snapshot_peak` and `snapshot_blocks` but nonzero event peaks.
 
 Free request and completion are reported independently, each with its own
 stack table. Transitions inside the analyzed range are backed by allocator
@@ -491,8 +532,13 @@ incomplete bundles, provenance differences, and metadata differences are
 warnings. `rank` and `world_size` default from the `RANK`/`WORLD_SIZE`
 environment variables or initialized `torch.distributed`, so torchrun processes
 usually need no explicit identity arguments. `group.missing_ranks` and
-`group.complete` expose rank coverage programmatically. Reports preserve
-per-rank values and show min, max, spread, and the worst rank; GPU memory is deliberately not summed across ranks.
+`group.complete` expose rank coverage programmatically. GPU memory is never
+summed across ranks. Group-summary text and HTML show allocated, reserved,
+active, and requested headline metrics; JSON and CSV retain every memory
+metric, its minimum and maximum rank, and the spread. Group-phase text reports
+the minimum, maximum, owning ranks, and spread for `end_gap` and
+`change_gap = candidate_change - baseline_change` for every phase metric. Its
+JSON and CSV also retain cross-rank extrema for all five equation components.
 `pool_mappings` is keyed by rank because private-pool identity is rank-local.
 Group loading defaults to `cache_snapshots=False`; use `True` only when repeated
 allocator-state or event-payload access is worth the additional host memory.
