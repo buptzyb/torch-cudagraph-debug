@@ -14,7 +14,8 @@ ErrorT = TypeVar("ErrorT", bound=Exception)
 
 
 def strict_json_loads(text: str, *, error_type: type[ErrorT], context: str) -> Any:
-    """Decode strict JSON, rejecting non-standard numeric constants."""
+    """Decode strict JSON, rejecting non-standard numeric constants and
+    duplicate object keys."""
 
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON number {value}")

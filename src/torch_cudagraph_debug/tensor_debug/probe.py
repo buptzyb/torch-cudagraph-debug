@@ -126,7 +126,9 @@ class TensorProbe:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> TensorProbeSnapshot:
-        """Return all recorded invocation values from the latest query point."""
+        """Return the latest recorded value of every slot as one aggregate
+        snapshot. Requires an enabled RecordAction; a record-only probe
+        rejects queries during CUDA graph capture."""
 
         self._ensure_open()
         if not self._collector.record_enabled:
@@ -208,7 +210,8 @@ class TensorProbe:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> TensorCheckStatus:
-        """Return the native CheckAction status after requested synchronization."""
+        """Return the native CheckAction status, synchronizing first only
+        when a callback-backed action (Print/Check) is enabled."""
 
         self._ensure_open()
         selected = self.synchronize if synchronize is None else synchronize
@@ -262,7 +265,8 @@ class TensorProbe:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> None:
-        """Synchronize as configured and raise for a callback mismatch."""
+        """Raise for a callback check mismatch, synchronizing first only
+        when a callback-backed action is enabled."""
 
         check_status = self.check_status(synchronize=synchronize)
         if not check_status.ok:
@@ -273,7 +277,9 @@ class TensorProbe:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> None:
-        """Release native resources after captured graphs can no longer replay."""
+        """Release native resources after captured graphs can no longer
+        replay, and remove every gradient hook registered through
+        ``watch_grad()``. A rejected close leaves the probe fully usable."""
 
         if not self._closed:
             selected = self.synchronize if synchronize is None else synchronize

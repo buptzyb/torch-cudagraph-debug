@@ -45,7 +45,12 @@ HISTORY_WINDOW_STATUSES = frozenset(HistoryWindowStatus.__args__)
 
 @dataclass(frozen=True)
 class EventWindow:
-    """Events delimited by two recorder metadata markers."""
+    """Events between a start boundary marker and either an explicit end
+    marker or the end of the trace.
+
+    A snapshot's own end marker is never visible in its own trace; recorder
+    windows therefore run from the start marker to the trace end.
+    """
 
     entries: tuple[AllocatorTraceEntry, ...]
     available: bool
@@ -287,7 +292,11 @@ def extract_event_window(
     end_marker: str | None,
     start_label: str,
 ) -> EventWindow:
-    """Extract events after a prior marker through the current snapshot point."""
+    """Extract events after the last start marker, through the last end
+    marker or — with ``end_marker=None`` — the end of the trace.
+
+    A requested end marker that is absent yields a truncated window.
+    """
 
     if not entries:
         return _unavailable_window()

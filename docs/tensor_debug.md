@@ -71,6 +71,8 @@ for observation in snapshot.observations:
 
 # The snapshot query already waited for every node in this replay.
 probe.assert_check_ok(synchronize=False)
+# A check mismatch is sticky: the first failure is latched and later
+# correct replays still report it until the probe is replaced.
 # No graph containing this probe may replay after close().
 del graph
 probe.close(synchronize=False)
@@ -142,8 +144,17 @@ comparison.assert_ok()
 print(comparison.to_text())
 ```
 
-`observe()` returns the exact tensor object. Within one point, repeated calls
-with the same name become invocation 0, 1, and so on. The stable cross-run key
+`bundle_dir` must be an absent or empty directory; a nonempty target raises
+`FileExistsError` at construction, so pick a fresh directory per run. Note
+that after capture, before the first replay, recorded slots hold zeros:
+capture installs the copy nodes but does not execute them, so query only
+after a replay.
+
+`observe()` returns the exact tensor object. Within one eager point, repeated
+calls
+with the same name become invocation 0, 1, and so on; for a cuda_graph
+recorder, invocation indices are assigned per capture call. The stable
+cross-run key
 is `(name, invocation_index)`; replay index is evidence rather than
 identity.
 
@@ -268,7 +279,11 @@ Mismatch and inconclusive reports return a nonzero status.
 
 ### Multi-Rank Run Groups
 
-Distributed jobs write one rank-local bundle per process. Load each parent
+Distributed jobs write one rank-local bundle per process. Rank identity comes
+from explicit `TensorRecorder(rank=..., group_id=..., world_size=...)`
+arguments, or defaults from the `RANK`/`WORLD_SIZE` environment variables or
+initialized `torch.distributed` (`group_id` is never auto-resolved); a run
+without a rank cannot be loaded into a group. Load each parent
 directory and compare common ranks without collapsing rank identity:
 
 ```python
@@ -318,8 +333,10 @@ policy. Explicit targets accept only `bool`, `torch.cuda.Stream`, or CUDA
 `torch.device`; strings, integer device indices, and CPU devices are rejected.
 A stream or device from another CUDA device is also an error. A synchronization-enabled query during
 CUDA Graph capture raises an error.
-Defer host queries until after capture; `False` skips synchronization
-but does not make in-capture host reads meaningful. Closing an enabled probe is
+Defer host queries until after capture: `False` skips synchronization, and a
+record-only probe still rejects `snapshot()` during capture outright because
+reading its replay counter would invalidate the capture; callback-backed
+probes return stale staging at best. Closing an enabled probe is
 rejected during capture even with `False` because destroying captured resources
 is never valid.
 
@@ -332,8 +349,8 @@ Pass the replay stream to avoid waiting on unrelated streams, or pass `False`
 only after prior synchronization has completed all probe work. For a captured
 probe, every graph containing it must also be unable to replay again; otherwise
 a later replay accesses resources released by `close()`. The probe cannot verify
-either condition. An unsynchronized close reports pending eager callbacks and
-pending eager copies instead of freeing their staging. Eager (`when="always"`)
+either condition. An unsynchronized close is rejected while eager callbacks or
+eager copies are provably in flight; the probe stays open and fully usable. Eager (`when="always"`)
 probes keep one slot per observation name: repeated names sample in place
 (latest value) and new names append slots, so `snapshot()` returns the latest
 value of every name observed so far. In-place re-samples are counted per name
@@ -348,7 +365,8 @@ order or bind the probe to that call's eager stream.
 Failed host-side insertion or replacement restores the prior eager layout and
 value. Host-side capture preparation has the same rollback guarantee. A later
 successful capture replaces the eager slot layout with its own; pre-capture
-eager observations are dropped, while their staging remains retired until
+eager observations are dropped; their staging is retired immediately and
+reclaimed only after
 queued eager work has completed. If CUDA command submission fails after that
 transaction is published, the probe rejects further collection and queries;
 destroy the affected graph, close the probe, and create a new one.

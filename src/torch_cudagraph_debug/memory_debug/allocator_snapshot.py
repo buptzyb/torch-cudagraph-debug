@@ -316,6 +316,12 @@ def summarize_snapshot(
 def summarize_segments(
     segments: Sequence[Mapping[str, Any]],
 ) -> dict[MemoryObservationKey, MemoryStats]:
+    """Group normalized segments into per-(device, pool, stream) stats.
+
+    Expects ``normalize_snapshot()`` output; raw segments missing required
+    structural sizes raise.
+    """
+
     grouped: dict[MemoryObservationKey, list[Mapping[str, Any]]] = defaultdict(list)
     for segment in segments:
         key = MemoryObservationKey(

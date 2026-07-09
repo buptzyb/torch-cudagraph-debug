@@ -27,22 +27,26 @@
 
 ## Local Gate
 
-Install the pinned development tools from `requirements-dev.txt` before
-running the gate. In particular, use the repository's Ruff version.
+Install the development tools from `requirements-dev.txt` before running
+the gate (Ruff is pinned — use the repository's version; the others are
+floors). Run every gate on Python 3.11 or newer: the suite's one
+`tomllib`-dependent test skips on 3.10 and `TCGD_FAIL_ON_SKIP=1` turns
+that skip into a failure.
 
 ```bash
 python -m pip install -r requirements-dev.txt
+python -m pip install --upgrade "setuptools>=77.0.3" wheel
 python -m compileall -q src tests examples
 bash -n examples/tensor_debug/cli/workflows.sh
 bash -n examples/memory_debug/cli/workflows.sh
 python -m ruff check src tests examples
 python -m ruff check --select I src tests examples
 python -m ruff format --check src tests examples
-python -m pytest -q tests/test_terminology.py
 python -m pytest -q
+rm -rf dist
 python -m build --sdist --no-isolation
 python -m twine check dist/*
-git diff --check
+git diff --check   # uncommitted whitespace/conflict markers only
 ```
 
 Inspect the sdist and confirm it contains package sources, C++ and CUDA
@@ -61,7 +65,9 @@ devices. Start in the source checkout and keep the same shell:
 TCGD_REPO_ROOT="$(pwd)"
 TCGD_RUN_ROOT="$(mktemp -d /tmp/tcgd-gpu-gate.XXXXXX)"
 
+python -m pip install -r requirements-dev.txt
 python -m pip install --upgrade "setuptools>=77.0.3" wheel
+rm -rf dist
 python -m build --sdist --wheel --no-isolation
 TCGD_SDIST="$(find dist -maxdepth 1 -name 'torch_cudagraph_debug-*.tar.gz' -print -quit)"
 python -m pip install --no-build-isolation --no-deps "${TCGD_SDIST}"
@@ -71,8 +77,12 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 \
   python -m pytest -s -q "${TCGD_REPO_ROOT}/tests"
 ```
 
-The `cd` ensures tests and examples import the installed package and compiled
-native extension rather than source-tree artifacts.
+The `rm -rf dist` guarantees the freshly built sdist is the one installed
+and gated — a stale artifact in `dist/` would otherwise be picked first.
+The `cd` plus `TCGD_TEST_INSTALLED=1` ensure tests and examples import the
+installed package and compiled native extension rather than source-tree
+artifacts (`TCGD_TEST_INSTALLED=1` keeps `src/` off `sys.path`, so a
+silently failed install fails the suite instead of falling back).
 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` keeps globally installed plugins from changing
 collection or execution. `-s` avoids environment-specific file-descriptor capture;
 tests that need Python output capture use explicit in-memory fixtures.
@@ -180,7 +190,9 @@ python "${TCGD_REPO_ROOT}/examples/integrations/tensorboard_export.py" \
 ```
 
 Still on the two-GPU node, rerun the complete installed-package suite with
-zero skips, then cover rank-local run groups and the remaining CLI commands:
+zero skips — the examples above ran real workloads against the installed
+package, and this rerun confirms none of them corrupted the environment —
+then cover rank-local run groups and the remaining CLI commands:
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 \
@@ -219,9 +231,13 @@ do not accept a skipped test as coverage.
 ## Public Ref Gate
 
 Before tagging, install the exact public GitHub commit or branch in a clean CUDA
-environment and repeat the GPU gate:
+environment and repeat the GPU gate's test and example steps — skip the
+gate's own build/install steps, which would overwrite this public-ref
+install with a locally built sdist and hide public-ref-only failures
+(files missing from the pushed ref):
 
 ```bash
+python -m pip install --upgrade "setuptools>=77.0.3" wheel
 REF=<commit-or-branch>
 python -m pip install --no-build-isolation \
   "git+https://github.com/buptzyb/torch-cudagraph-debug.git@${REF}"

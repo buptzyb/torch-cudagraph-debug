@@ -442,6 +442,13 @@ def compare_run_groups(
     point_mapping: Mapping[str, str] | None = None,
     options: TensorComparisonOptions | None = None,
 ) -> TensorRunGroupComparison:
+    """Compare two run groups rank by rank over their common ranks.
+
+    Raises ``TensorBundleError`` when the groups share no ranks; missing
+    ranks, unknown world size, or incomplete bundles make the group verdict
+    ``inconclusive``.
+    """
+
     common_ranks = tuple(sorted(set(reference.runs) & set(candidate.runs)))
     if not common_ranks:
         raise TensorBundleError("tensor run groups have no common ranks")

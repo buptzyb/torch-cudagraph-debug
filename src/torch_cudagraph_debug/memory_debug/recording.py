@@ -542,7 +542,9 @@ class MemoryRun:
         }
 
     def validate_payloads(self) -> None:
-        """Validate every state and event payload against the manifest."""
+        """Validate every persisted state and event payload against the
+        manifest, bypassing caches; an in-memory run has nothing to
+        validate."""
 
         for point in self.points:
             point._load_allocator_state()
@@ -662,6 +664,13 @@ class MemoryRun:
         *,
         cache_snapshots: bool = True,
     ) -> "MemoryRun":
+        """Load a persisted bundle, validating the manifest strictly.
+
+        Raises ``MemoryBundleError`` for malformed or unreadable bundles.
+        ``cache_snapshots=False`` drops decompressed payloads after each
+        access instead of retaining them.
+        """
+
         root = Path(bundle_dir).resolve()
         manifest_path = root / "manifest.json"
         try:
@@ -895,7 +904,8 @@ class MemoryRun:
 
 @dataclass(frozen=True)
 class MemoryRange:
-    """An ordered pair of points owned by one run."""
+    """An ordered pair of points; created by ``run.between()``, which
+    validates ownership and ordering."""
 
     run: MemoryRun
     start: MemoryPoint
@@ -988,6 +998,16 @@ class MemoryRecorder:
         metadata: Mapping[str, Any] | None = None,
         synchronize: SynchronizeTarget | None = None,
     ) -> MemoryPoint:
+        """Record one named point: allocator state plus the event evidence
+        for the interval ending here.
+
+        Labels must be nonempty and unique per run. By default every
+        selected device is synchronized first; during CUDA stream capture
+        synchronization is skipped with a warning. With a ``bundle_dir``,
+        the state, event, and manifest files are persisted before the point
+        is committed, so a crash leaves a loadable ``complete=False``
+        bundle.
+        """
         if self._result is not None:
             raise MemoryDebugError(
                 "cannot record a point on a finished memory recorder"
@@ -1100,7 +1120,8 @@ class MemoryRecorder:
         return self._collector.devices
 
     def preview(self) -> MemoryRun:
-        """Return an immutable nonterminal view of collected points."""
+        """Return an immutable view of collected points; once the recorder is
+        finished or aborted, returns the terminal result."""
 
         if self._result is not None:
             return self._result

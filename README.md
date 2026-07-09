@@ -64,7 +64,7 @@ Tensor Debug uses the native extension built during source installation.
 ## Tensor Quick Start
 
 Insert a probe at intermediate tensors inside a captured dataflow. This example
-uses the recommended `RecordAction` action to inspect two hidden states without
+uses the recommended `RecordAction` to inspect two hidden states without
 changing the graph's output:
 
 ```python
@@ -176,6 +176,7 @@ Output from the tested run:
 
 ```text
 Memory comparison 'graph-capture@snapshot-0' -> 'graph-capture@snapshot-1' (same probe)
+  address lifecycle: exact
   allocator totals:
     total[all]
       allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 18.00 MiB (delta +18.00 MiB)
@@ -220,7 +221,8 @@ Read the report top-down:
    each device's `pool[0,0]`, and `total[private]` combines all non-default
    pools, including CUDA Graph pools.
 3. `requested` is the original active allocation request, `allocated` is
-   allocator-owned allocated space, `active` is space not yet reusable, and
+   block space still owned by live allocations, `active` is space not yet
+   reusable, and
    `reserved` is the full segment capacity held by the caching allocator.
 4. `pools` identifies which device and pool changed;
    `device/pool/stream observations` records the state associated with each CUDA

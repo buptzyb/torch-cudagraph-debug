@@ -53,7 +53,8 @@ class TensorCheckStatus:
 
 @dataclass(frozen=True)
 class TensorProbeSnapshot:
-    """All tensor observations recorded from one CUDA Graph replay."""
+    """All tensor observations from one query point: the values of one CUDA
+    Graph replay, or the latest eager sample per name (replay index 0)."""
 
     probe_id: str
     probe_name: str
@@ -113,10 +114,11 @@ class TensorProbeSnapshot:
 
     @cached_property
     def eager_overwrite_counts(self) -> Mapping[str, int]:
-        """Times each eager observation was re-sampled in place.
+        """Re-sample counts for the eager names that were overwritten.
 
-        A nonzero count means intermediate values were superseded before this
-        snapshot; the snapshot holds only the latest sample of that name.
+        Only names with a count of one or more appear; a nonzero count means
+        intermediate values were superseded before this snapshot, which holds
+        only the latest sample of that name.
         """
 
         return MappingProxyType(dict(self.eager_overwrites))

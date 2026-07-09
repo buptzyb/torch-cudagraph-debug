@@ -8,9 +8,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-if os.environ.get("TCGD_TEST_INSTALLED") == "1":
-    sys.path.append(str(SRC))
-else:
+# With TCGD_TEST_INSTALLED=1 the source tree is deliberately NOT added to
+# sys.path: a silently failed install must fail the suite, not fall back
+# to src/.
+if os.environ.get("TCGD_TEST_INSTALLED") != "1":
     sys.path.insert(0, str(SRC))
 
 

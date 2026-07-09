@@ -57,7 +57,11 @@ from .stats import MemoryStats
 def mutable_snapshot(
     source: MemoryPoint | MemoryProbeSnapshot | FrozenJSONValue,
 ) -> JSONValue:
-    """Return a deep mutable copy of a point, probe snapshot, or raw view."""
+    """Return a deep mutable copy of a point, probe snapshot, or raw view.
+
+    A ``MemoryPoint`` copies its ``allocator_state()`` (no ``device_traces``);
+    a ``MemoryProbeSnapshot`` copies its full ``raw_snapshot()``.
+    """
 
     raw = (
         source.allocator_state()

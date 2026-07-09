@@ -1,6 +1,7 @@
 # Examples
 
-Examples follow the same two workflows as the public API:
+Examples follow the public API's two collection workflows, plus CLI
+automation:
 
 - `Probe` examples provide quick, local inspection without bundles.
 - `Recorder -> Run` examples preserve named points for reports and offline analysis.
@@ -9,8 +10,8 @@ Examples follow the same two workflows as the public API:
 Every script uses a deterministic workload, asserts the behavior it demonstrates,
 and exits nonzero when that behavior is unavailable. Install
 `torch-cudagraph-debug` in a CUDA-enabled PyTorch environment before running
-them. Persistent outputs belong outside the source checkout; commands below use
-`/tmp`.
+them. Persistent outputs belong outside the source checkout; the example
+guides' commands use `/tmp`.
 
 ## Tensor Debug
 
@@ -66,7 +67,7 @@ allocator history in a long-running process.
 | 3 | Which stack and allocator events caused growth? | [Stack and event attribution](memory_debug/recorder/stack_and_event_attribution.py) | all |
 | 4 | Which allocations survived or were born between named points? | [Allocation lifetimes](memory_debug/recorder/allocation_lifetimes.py) | all |
 | 5 | How do baseline and candidate phases differ across private pools? | [Compare runs and phases](memory_debug/recorder/compare_runs_and_phases.py) | disabled |
-| 6 | How are per-rank runs summarized without summing GPU memory? | [Distributed run groups](memory_debug/recorder/distributed_run_groups.py) | disabled, 2+ GPUs |
+| 6 | How are per-rank runs summarized without summing GPU memory? (needs 2+ GPUs) | [Distributed run groups](memory_debug/recorder/distributed_run_groups.py) | disabled |
 
 ### CLI Workflow
 

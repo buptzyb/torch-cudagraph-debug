@@ -69,6 +69,14 @@ class MemoryProbe:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> MemoryProbeSnapshot:
+        """Capture one immutable allocator snapshot for the selected devices.
+
+        ``synchronize`` overrides the probe default for this call only;
+        requested synchronization is skipped with a warning during CUDA
+        stream capture. Device binding is resolved lazily by the first
+        snapshot that observes any allocation.
+        """
+
         snapshot_index = self._next_snapshot_index
         marker = (
             "torch-cudagraph-debug:memory-probe:"

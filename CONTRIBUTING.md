@@ -14,8 +14,10 @@ python -m pip install -r requirements-dev.txt
 python -m pip install --no-build-isolation -e .
 ```
 
-CPU-only environments can run Python-level tests. CUDA Graph behavior requires a
-CUDA-enabled PyTorch runtime and a GPU.
+CPU-only environments can run the Python-level tests directly from the
+checkout (the test suite adds `src/` to `sys.path`); installing the package
+itself requires a CUDA-enabled PyTorch build even without a GPU. CUDA Graph
+behavior requires a CUDA-enabled PyTorch runtime and a GPU.
 
 ## Checks
 

@@ -83,7 +83,12 @@ class RecordAction:
 
 @dataclass(frozen=True)
 class CheckAction:
-    """Check replay snapshots with per-invocation CPU or NumPy ground truth."""
+    """Check replay snapshots against CPU or NumPy ground truth.
+
+    Positional expected entries bind by global capture order (a single value
+    is never broadcast); a ``TensorObservationKey`` mapping binds by
+    ``(name, invocation_index)``.
+    """
 
     expected: TensorExpected
     rtol: float = 1e-5

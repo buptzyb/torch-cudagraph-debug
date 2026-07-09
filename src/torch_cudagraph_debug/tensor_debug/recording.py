@@ -936,7 +936,11 @@ class TensorRecorder:
         name: str,
         payload: PayloadKind | None = None,
     ) -> torch.Tensor:
-        """Return tensor unchanged while recording one named observation."""
+        """Return tensor unchanged while recording one named observation.
+
+        Outside an active point (eager) or capture (cuda_graph) this is a
+        transparent no-op unless ``strict_scope=True``.
+        """
 
         self._ensure_open()
         name = validate_observation_name(name)
@@ -1092,13 +1096,22 @@ class TensorRecorder:
                 self._active_point = None
 
     def preview(self) -> TensorRun:
-        """Return an immutable nonterminal view of collected points."""
+        """Return an immutable view of collected points; once the recorder is
+        finished or aborted, returns the terminal result."""
 
         if self._result is not None:
             return self._result
         return self._build_run(complete=False)
 
     def finish(self) -> TensorRun:
+        """Finish collection and return the immutable run; idempotent.
+
+        Writes ``complete=True`` (unless the run already terminated as
+        aborted) and rejects later points. Raises ``TensorDebugError``
+        inside the context manager or while a point is active. Does not
+        release captured native storage — call ``close()`` for that.
+        """
+
         if self._context_active:
             raise TensorDebugError(
                 "cannot finish a tensor recorder inside its context manager"
@@ -1140,7 +1153,10 @@ class TensorRecorder:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> None:
-        """Release native resources after the captured graph can no longer replay."""
+        """Release native resources after the captured graph can no longer
+        replay, and remove every gradient hook registered through
+        ``watch_grad()``. Raises while a point is active; a rejected close
+        leaves the recorder fully usable."""
 
         if self._closed:
             return

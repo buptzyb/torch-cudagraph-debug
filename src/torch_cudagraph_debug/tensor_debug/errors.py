@@ -24,4 +24,5 @@ class TensorOwnershipError(TensorDebugError):
 
 
 class TensorPayloadUnavailableError(TensorDebugError):
-    """Raised when an operation requires a summary-only tensor payload."""
+    """Raised when an operation needs a full tensor payload but the
+    observation is summary-only."""

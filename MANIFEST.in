@@ -3,7 +3,9 @@ include AGENTS.md
 include CLAUDE.md
 recursive-include .agents *.md
 recursive-include .claude *.md
+recursive-include .claude-plugin *.json
 recursive-include .codex *.toml
+recursive-include plugins *.md *.json
 include CHANGELOG.md
 include LICENSE
 include CONTRIBUTING.md

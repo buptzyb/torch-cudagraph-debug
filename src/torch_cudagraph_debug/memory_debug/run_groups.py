@@ -220,6 +220,9 @@ class MemoryRunGroup:
 
     @property
     def complete(self) -> bool:
+        """True only when the world size is known, every rank is present,
+        and every run finished with ``complete=True``."""
+
         return (
             self.world_size is not None
             and not self.missing_ranks

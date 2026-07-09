@@ -366,7 +366,7 @@ class TensorSnapshotComparison(_TensorStateComparison):
 
 @dataclass(frozen=True)
 class TensorRunComparison:
-    """Point-aligned comparison between two complete tensor runs."""
+    """Point-aligned comparison between two tensor runs."""
 
     reference: TensorRun
     candidate: TensorRun

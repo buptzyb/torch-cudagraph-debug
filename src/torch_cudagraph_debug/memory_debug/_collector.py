@@ -44,7 +44,9 @@ def validate_synchronize_target(synchronize: SynchronizeTarget) -> None:
 
 
 class _MemoryCollector:
-    """Capture allocator state for a stable set of selected CUDA devices."""
+    """Capture allocator state for the selected CUDA devices; snapshot-derived
+    selections (default and "all") adopt devices that first appear after
+    binding."""
 
     def __init__(
         self,

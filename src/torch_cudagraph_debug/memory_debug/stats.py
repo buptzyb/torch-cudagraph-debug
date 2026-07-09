@@ -124,6 +124,9 @@ class MemoryStats:
 
     @classmethod
     def combine(cls, values: Iterable["MemoryStats"]) -> "MemoryStats":
+        """Sum counts and bytes across stats, except
+        ``largest_inactive_block_bytes``, which takes the maximum."""
+
         items = tuple(values)
         return cls(
             reserved_bytes=sum(item.reserved_bytes for item in items),

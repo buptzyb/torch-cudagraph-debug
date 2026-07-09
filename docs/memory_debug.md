@@ -75,7 +75,8 @@ workflow metadata live on the snapshot or point, not on an observation.
 
 ## Interpreting CUDA Graph Private-Pool Inactive Memory
 
-`MemoryStats` separates four allocator layers:
+`MemoryStats` separates four base allocator layers plus three derived
+metrics:
 
 - `reserved_bytes` is segment capacity retained by the pool.
 - `active_bytes` is block space that is allocated or still awaiting a
@@ -132,8 +133,12 @@ print(comparison.to_text())
 
 `snapshot()` returns one complete allocator state. `probe.compare()` validates
 that both snapshots belong to that probe and are in increasing index order.
-Top-level `compare_snapshots(reference, candidate)` also compares independent
-probes, which is useful for eager-to-CUDA-Graph or cross-process endpoints.
+Top-level `compare_snapshots(reference, candidate, pool_mapping=...)` also
+compares independent probes, which is useful for two independently
+instrumented workloads in one process (for example an eager baseline against
+a CUDA Graph run). Private pools stay unmatched across independent probes
+unless `pool_mapping` explicitly pairs them, exactly like cross-run
+`compare_points`.
 
 Same-probe comparisons may request marker-delimited allocator events and
 lifetimes when the application enabled allocator history before the interval.
@@ -174,19 +179,25 @@ recorder.record_point("after_replay")
 run = recorder.finish()
 ```
 
+`bundle_dir` must be an absent or empty directory; a nonempty target raises
+`FileExistsError`, so pick a fresh directory per run. The manifest is
+rewritten after every `record_point()`, so a crashed run leaves a loadable
+`complete=False` bundle.
+
 The manifest records rank/group identity, user `run_metadata`, and automatic
 runtime provenance such as package, Python, PyTorch, CUDA, and initialized GPU
 properties. Device provenance is collected only after a real allocator
 snapshot; creating a recorder does not initialize CUDA for metadata alone.
 
-`record_point()` synchronizes the current device by default outside capture.
+`record_point()` synchronizes every selected device by default outside capture.
 Pass a CUDA stream to synchronize only the workload stream, a CUDA device to
 request device-wide synchronization explicitly, or `False` when the application
 owns the ordering. During CUDA stream capture, requested synchronization is
 skipped because it is capture-illegal, and the point records a warning.
 The point-in-time allocator state remains usable, but an event interval touching
-a point whose boundary marker could not be recorded is reported as
-`boundary_unavailable` when event or lifetime evidence is requested.
+a point whose boundary marker could not be recorded fails with
+`MemoryHistoryBoundaryError` when event or lifetime evidence is requested
+(`boundary_unavailable` is the per-device status recorded at collection).
 
 `MemoryRecorder` only collects data. `finish()` returns an immutable
 `MemoryRun`; analysis belongs to the run and result objects:
@@ -325,8 +336,10 @@ lifetimes.write("reports/lifetimes")
 
 The anchor keeps only allocation generations that are not reusable at that
 point. Cohorts use device, pool, and the complete allocation call stack as their
-identity; streams, allocation sizes, requested sizes, and terminal outcomes
-remain available as detail. `stack_depth` shortens rendered stacks only and
+identity; allocations without stack frames additionally include their block and
+requested sizes in the identity so unrelated unattributed sizes are not merged.
+Streams, allocation sizes, requested sizes, and terminal outcomes remain
+available as detail. `stack_depth` shortens rendered stacks only and
 `limit` restricts text/HTML presentation only. JSON, CSV, and the in-memory
 `cohorts` tuple always retain the complete result.
 
@@ -368,8 +381,9 @@ born = run.lifetimes(
 )
 ```
 
-This mode retains generations that were both created and completed between
-the two points, even when they are active in neither endpoint snapshot. It
+This mode retains every generation born in the interval — including
+transients that were created and freed between the points and are active in
+neither endpoint snapshot. It
 reports birth, free-request, and free-completion stacks, plus event-derived
 owner-active and allocator-unreusable peaks.
 
@@ -468,10 +482,14 @@ group_phase = compare_run_group_phases(
 group_phase.write("reports/group-phase")
 ```
 
-Groups require unique ranks and matching point-label sequences. Conflicting
-non-null group IDs or world sizes are errors; missing identity, missing ranks,
+Groups require non-null unique ranks, one run name, and matching point-label
+sequences. A run without a rank, a rank at or above the declared world size,
+and conflicting non-null group IDs or world sizes are errors; missing
+group IDs or world sizes, declared-but-missing ranks,
 incomplete bundles, provenance differences, and metadata differences are
-warnings. `group.missing_ranks` and `group.complete` expose rank coverage
+warnings. `rank` and `world_size` default from the `RANK`/`WORLD_SIZE`
+environment variables or initialized `torch.distributed`, so torchrun
+processes usually need no explicit identity arguments. `group.missing_ranks` and `group.complete` expose rank coverage
 programmatically. Reports preserve per-rank values and show min, max, spread,
 and the worst rank; GPU memory is deliberately not summed across ranks.
 `pool_mappings` is keyed by rank because private-pool identity is rank-local.
@@ -602,10 +620,12 @@ files only when `--output` is supplied. Reusing a nonempty output directory
 requires `--overwrite`. Cross-run event and lifetime requests are rejected
 because allocator addresses and histories have no cross-run identity.
 
+## Advanced Helpers
+
 Low-level snapshot parsers and attribution helpers are available under
 `torch_cudagraph_debug.memory_debug.advanced`. They are experimental and may
-change in a minor release. Snapshot summaries use
-`Mapping[MemoryObservationKey, MemoryStats]`.
+change in a minor release. Their snapshot summaries (`summarize_snapshot`,
+`summarize_segments`) use `Mapping[MemoryObservationKey, MemoryStats]`.
 
 ## Operational Constraints
 

@@ -154,8 +154,9 @@ state and is reclaimed only after its eager copy or callback completion is
 observed. A failure after CUDA submission begins makes the collector unusable
 for further collection or queries, while preserving `close()` for cleanup.
 Eager use is rejected after the collector has participated in capture.
-A Tensor Recorder commits its per-name invocation index only after the private
-collector accepts the slot, preserving retry identity after host-side failure.
+A Tensor Recorder commits its per-name capture invocation index only after the
+private collector accepts the slot, preserving retry identity after host-side
+failure; eager observations consume their index before staging runs.
 
 Memory collectors have no persistent native graph resources to close. Probe and
 Recorder semantics are expressed by immutable snapshots and terminal runs
@@ -180,8 +181,9 @@ flowchart LR
 
 Every `MemoryPoint` owns one allocator state. After the first point, it also
 owns the internal event evidence for the interval ending at that point. There is
-no public interval object: a same-run range reads the ending points whose event
-chunks it crosses. Probe snapshots retain their complete in-memory raw snapshot
+no public event-evidence interval object (`MemoryRange` is a view over two
+points, not an event container): a same-run range reads the ending points whose
+event chunks it crosses. Probe snapshots retain their complete in-memory raw snapshot
 for low-level local inspection and derive `allocator_state()` from it.
 
 Persisted runs mirror this ownership with `states/NNNN.json.gz` and

@@ -2,6 +2,23 @@
 
 ## v0.2.0 - Unreleased
 
+This release rebuilds the tensor-debug domain and introduces the
+memory-debug domain. Entries under Changed and Fixed that reference
+`memory_debug` or the new `TensorRecorder`/run/bundle stack describe
+hardening during 0.2.0 development; no released version exposed the
+earlier behavior.
+
+### Breaking Changes
+
+- The v0.1.0 tensor-debug API is replaced wholesale, with no deprecation
+  shims: `CudaGraphTensorProbe` → `TensorProbe`, `TensorPrint` →
+  `PrintAction`, `TensorRecord` → `RecordAction`, `TensorCompare` →
+  `CheckAction`, `TensorSnapshot` → `TensorProbeSnapshot`,
+  `probe.assert_ok()` → `probe.assert_check_ok()`, `attach_grad()` →
+  `watch_grad()`, the `mode=` keyword → `when=`, and
+  `export_records_to_tensorboard()` → `export_snapshots_to_tensorboard()`.
+  Every v0.1.0 import of these names fails on upgrade.
+
 ### Fixed
 
 - Tensor comparison and native `CheckAction` now preserve exact integer
@@ -15,19 +32,17 @@
   `MemoryRun.validate_payloads()` performs an explicit full-bundle check that
   rereads persisted payloads instead of trusting prior lazy-load caches.
 - Strict persisted models reject duplicate JSON keys, overflowing numeric
-  coercions, impossible tensor summaries, non-string identities, and invalid
-  Run completion or timestamp order before those states can be written.
+  coercions, impossible tensor summaries, and non-string identities before
+  those states can be written; run completion and timestamp order are
+  validated at run construction and load.
 - Block-address inference now resumes from every explicit block address.
   Same-identity memory comparisons report address lifecycle confidence as
   `exact` or `approximate`; independent comparisons report `unavailable`.
 - Timeline cohort charts honor the display cohort limit while retaining every
   selected cohort's complete point series and every cohort in JSON and CSV.
-
 - Structural segment and block sizes (`total_size`, `allocated_size`,
   `active_size`, block `size`) are required: absent fields raise instead of
-  defaulting to invariant-breaking zeros. Absent `requested_size` falls back
-  to the active/block size with an aggregated warning, so fragmentation is
-  no longer fabricated as 100%.
+  defaulting to invariant-breaking zeros.
 - `devices="all"` with a snapshot provider no longer binds an empty device
   set when the first snapshot precedes any allocation; device resolution is
   retried like the default selection.
@@ -89,8 +104,9 @@
 - Snapshot normalization reports absent defaultable fields (`device`,
   `segment_pool_id`, segment/block `requested_size`, and block `state`) through
   the point warnings channel, aggregated per field, instead of substituting
-  defaults silently. Structural sizes remain required, and present-but-invalid
-  fields still raise.
+  defaults silently. Absent `requested_size` falls back to the active/block
+  size, so fragmentation is no longer fabricated as 100%. Structural sizes
+  remain required, and present-but-invalid fields still raise.
 - `became_inactive_bytes` now mirrors the newly-active rule: a
   reference-active block whose `(address, size)` key is gone in the
   candidate (freed and coalesced, re-split, or in a freed segment) counts as
@@ -101,15 +117,18 @@
 - A truncated or corrupted gzip allocator-state or event payload raises
   `MemoryBundleError` instead of leaking a raw `EOFError`, `zlib.error`, or
   `UnicodeDecodeError` through the CLI.
-- Reject malformed manifests, non-finite JSON, invalid scalar coercions,
-  inconsistent ownership, invalid allocator frame fields, and partial recorder
-  writes instead of accepting ambiguous persisted state. Missing per-device
-  trace slots remain unavailable history rather than malformed data.
+- Loading rejects malformed manifests, non-finite JSON, invalid scalar
+  coercions, inconsistent ownership, invalid allocator frame fields, and
+  partial recorder writes instead of accepting ambiguous persisted state.
+  Missing per-device trace slots remain unavailable history rather than
+  malformed data.
 - Verify content-addressed tensor payloads even when two observations advertise
   the same digest, and return defensive tensor copies from public observations.
-- Render all four core allocator metrics consistently for device/pool/stream rows and
-  timeline charts, preserve stream-only stack attribution when pool aggregates
-  cancel, clean stale optional report artifacts, and return absolute report paths.
+- Render all four core allocator metrics consistently for device/pool/stream
+  rows and timeline charts.
+- Preserve stream-only stack attribution when pool aggregates cancel.
+- Clean stale optional report artifacts on overwrite.
+- Return absolute report paths from every `write()`.
 - Report HTML now states shown and total counts for every limited attribution
   table instead of truncating silently. Invalid display limits and stack depths
   are rejected before rendering or creating report output directories.
@@ -120,7 +139,8 @@
   emitting one warning per allocator event.
 - Reclaim eager callback payloads, non-contiguous eager source temporaries, and
   replaced pinned staging instead of retaining them for the full Probe
-  lifetime. Unsynchronized close now reports pending eager callbacks.
+  lifetime. Unsynchronized close is rejected while eager callbacks are
+  provably pending.
 - Preserve exceptional TensorRecorder and MemoryRecorder sessions as terminal,
   loadable `complete=False` runs instead of marking partial data complete.
 - The `tcgd-memory` CLI can be invoked with `python -m
@@ -279,8 +299,9 @@
 - Consistent allocated, reserved, active, and requested metrics at allocator,
   device/pool, and device/pool/stream scope, with structural and fragmentation details shown
   as diagnostics when they explain a change.
-- The `tcgd-memory` CLI with summary, timeline, allocation-lifetime,
-  point-comparison, phase-comparison, and multi-rank run-group commands.
+- The `tcgd-memory` CLI with the `summary`, `timeline`,
+  `allocation-lifetimes`, `compare-points`, `compare-phases`,
+  `group-summary`, and `compare-run-group-phases` commands.
 - Public experimental allocator helpers under `memory_debug.advanced` using
   one `Mapping[MemoryObservationKey, MemoryStats]` state representation.
 - `TensorProbe` with `PrintAction`, `RecordAction`, `CheckAction`, immutable
@@ -320,4 +341,45 @@
 
 ## v0.1.0 - 2026-05-12
 
-Initial tensor-debug release for Linux CUDA source builds.
+First public 0.1.0 release of `torch-cudagraph-debug`.
+
+### Added
+
+- `CudaGraphTensorProbe`, a CUDA graph tensor probe that returns its input tensor
+  unchanged while capturing debug-side device-to-host copies and host callbacks.
+- `TensorPrint` for compact native CPU-side printing from replay snapshots.
+- `TensorRecord` for callback-free latest CPU snapshots per logical probe slot,
+  exposed as `TensorSnapshot` objects in Python.
+- Per-invocation pinned host staging for all actions, so callback-backed probes
+  do not reuse one shared host buffer across logical slots.
+- `TensorCompare` for replay-time comparison against per-invocation CPU tensor
+  or NumPy ground truth lists, with sticky mismatch reporting via
+  `probe.assert_ok()`.
+- `invocation_index` on recorded snapshots and compare status so callers can
+  distinguish repeated calls of the same probe within one replay.
+- Single-capture probe ownership: one probe may be called multiple times inside
+  one capture, slots may have different tensor metadata, and another graph
+  capture must use a new probe.
+- `CudaGraphTensorProbe.attach_grad()` for activation, output, and parameter
+  gradient probing through PyTorch autograd hooks.
+- `mode="capture"` as the default warmup-transparent mode and `mode="always"`
+  as an explicit eager/debug escape hatch.
+- `non_contiguous="copy"` for opt-in debug-only contiguous copies of
+  non-contiguous inputs.
+- `torch_cudagraph_debug.tensor_debug.postprocess.export_records_to_tensorboard()`
+  for scalar and optional histogram summaries from recorded snapshots.
+- Examples for basic tensor debugging, record/compare workflows, module-internal
+  hidden tensor probes, gradient probe patterns, Python-side replay snapshot
+  collection, and TensorBoard export.
+
+### Compatibility Notes
+
+- Linux CUDA environments only.
+- Source builds only; prebuilt wheels are intentionally not provided for v0.1.
+- Build against the CUDA-enabled PyTorch installation in the target runtime with
+  `pip install --no-build-isolation`.
+- Source-tree imports and all-disabled probes can run without the native
+  extension, but enabled probes require a native extension built against
+  CUDA-enabled PyTorch.
+- Probe nodes are inline graph dependencies and can introduce large GPU bubbles;
+  they are intended for correctness debugging, not performance measurement.

@@ -12,10 +12,14 @@ class MemoryHistoryError(MemoryDebugError):
 
 
 class MemoryHistoryDisabledError(MemoryHistoryError):
-    """A device in the analyzed range has no allocator event history.
+    """Required allocator history was never recorded.
 
-    Enable ``torch.cuda.memory._record_memory_history()`` before the
-    allocations of interest are made on every analyzed device.
+    A device in the analyzed range has no allocator event history, or — for
+    stack attribution — nonempty active state has zero allocation-frame
+    coverage at a compared endpoint. Enable
+    ``torch.cuda.memory._record_memory_history()`` (with stack context for
+    stack attribution) before the allocations of interest are made on every
+    analyzed device.
     """
 
 
@@ -24,10 +28,14 @@ class MemoryHistoryBoundaryError(MemoryHistoryError):
 
 
 class MemoryHistoryTruncatedError(MemoryHistoryError):
-    """A recorded boundary marker was overwritten in the history ring buffer.
+    """A required boundary marker is missing from the device trace.
 
-    Raise the history buffer size (``max_entries``) or record points more
-    frequently so each interval fits inside the ring buffer.
+    The bounded history ring buffer may have overwritten it, or history
+    recording was enabled after the boundary; the tool cannot distinguish
+    these. Enable ``_record_memory_history()`` before the first analyzed
+    point and keep it enabled, raise the history buffer size
+    (``max_entries``), or record points more frequently so each interval
+    fits inside the ring buffer.
     """
 
 
@@ -46,4 +54,5 @@ class MemoryBundleError(MemoryDebugError):
 
 
 class MemoryOwnershipError(MemoryDebugError):
-    """A point or range was used with a run that does not own it."""
+    """A snapshot, point, or range was used with an object that does not own
+    it, or same-run points were passed to a cross-run API."""

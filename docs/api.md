@@ -89,8 +89,9 @@ Concept guide: [Tensor Debug guide](tensor_debug.md). Runnable guide:
 
 ### Public Facade
 
-The complete public surface is listed in the [Public Type Index](#public-type-index).
-Typical workflow imports are:
+The complete public surface is listed in the [Public Type Index](#public-type-index),
+plus `export_snapshots_to_tensorboard` from `tensor_debug.postprocess`
+(see TensorBoard Export). Typical workflow imports are:
 
 ```python
 from torch_cudagraph_debug.tensor_debug import (
@@ -234,7 +235,10 @@ synchronization and requires caller-owned ordering. A stream or device must
 match the probe device. Omitting a method-level override or passing `None`
 inherits the probe's configured policy. Explicit
 strings, integer device indices, and CPU devices are rejected.
-Synchronization-enabled queries are invalid during CUDA Graph capture; for an
+Synchronization-enabled queries are invalid during CUDA Graph capture. A
+Record-only probe also rejects `snapshot(synchronize=False)` during capture,
+because reading its replay counter is a blocking device read that would
+invalidate the capture; callback-backed probes may query staged values. For an
 enabled probe, `close()` is invalid during capture for every synchronization
 setting.
 
@@ -247,8 +251,9 @@ query reuses their existing pinned-host counter staging instead of issuing
 another counter transfer. It raises `TensorDebugError` when no `RecordAction`
 is enabled or no slot has recorded a value.
 
-`compare()` accepts two snapshots owned by this probe in chronological replay
-order and returns the same result type as top-level `compare_snapshots()`.
+`compare()` accepts two snapshots owned by this probe in chronological query
+(snapshot) order — two snapshots of the same replay compare fine — and
+returns the same result type as top-level `compare_snapshots()`.
 
 `check_status()` returns:
 
@@ -297,9 +302,9 @@ occurred. Host-side enqueue preparation is transactional: a rejected call does
 not consume its slot or capture order. If CUDA command submission itself fails
 after the transaction is published, the probe becomes unusable for further
 collection or queries; destroy any affected graph, close the probe, and create a
-new one. `TensorProbe` is also a context manager whose exit uses the
-correctness-first default close; use that form only when every replay occurs
-inside the context.
+new one. `TensorProbe` is also a context manager whose exit calls `close()`
+with the probe's configured synchronization target; use that form only when
+every replay occurs inside the context.
 
 ### Actions
 
@@ -364,7 +369,7 @@ perform comparison or formatting offline.
 ### TensorProbeSnapshot
 
 ```python
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True)
 class TensorProbeSnapshot:
     probe_id: str
     probe_name: str
@@ -372,6 +377,7 @@ class TensorProbeSnapshot:
     replay_index: int
     timestamp: float
     observations: tuple[TensorObservation, ...]
+    eager_overwrites: tuple[tuple[str, int], ...] = ()
 
 snapshot.by_key -> Mapping[TensorObservationKey, TensorObservation]
 snapshot.observation(name: str | None = None, invocation_index: int = 0) -> TensorObservation
@@ -414,6 +420,9 @@ TensorRecorder(
     run_metadata: Mapping[str, Any] | None = None,
 )
 
+# rank and world_size default from RANK/WORLD_SIZE environment variables or
+# initialized torch.distributed; group_id is never auto-resolved.
+
 recorder.observe(tensor, *, name, payload=None) -> torch.Tensor
 recorder.watch_grad(
     tensor,
@@ -443,7 +452,11 @@ inside `record_point()`. A CUDA Graph recorder uses `observe()` calls during its
 one capture session to define slots and reads their latest values when
 `record_point()` later wraps a replay. Calls outside those active paths are
 transparent no-ops by default; `strict_scope=True` turns them into errors.
-`preview()` returns an immutable nonterminal view without finishing.
+`preview()` returns an immutable view without finishing; once the recorder
+is finished or aborted it returns the terminal result. A cuda_graph
+`record_point()` raises during capture, when the recorder captured no
+observations, and when its region does not observe a new replay (replay
+index at least one and strictly greater than the previous point's).
 
 All observations must be supported CUDA tensors on the recorder device.
 `non_contiguous` has the same error/copy behavior as `TensorProbe`. One
@@ -589,8 +602,9 @@ removed; unrelated files in the directory are preserved.
 Summary comparison uses three states. Equal digests match, except under
 allclose with `equal_nan=False` when the summary reports NaNs: bit-identical
 NaN positions still fail allclose and are reported as mismatches. Different
-digests are a mismatch in exact mode, but are inconclusive in allclose mode
-when either full payload is unavailable.
+digests are a mismatch in exact mode when the dtypes match; with
+`dtype_policy="promote"` and differing dtypes, or in allclose mode, a missing
+full payload makes the comparison inconclusive.
 
 ### Tensor Run Groups
 
@@ -648,7 +662,7 @@ tcgd-tensor compare-points REFERENCE_BUNDLE [CANDIDATE_BUNDLE] \
   --reference-point LABEL --candidate-point LABEL
 tcgd-tensor compare-runs REFERENCE_BUNDLE CANDIDATE_BUNDLE \
   [--point-map REFERENCE=CANDIDATE]
-tcgd-tensor group-summary GROUP_DIR
+tcgd-tensor group-summary GROUP_DIR [--output DIR]
 tcgd-tensor compare-run-groups REFERENCE_GROUP CANDIDATE_GROUP \
   [--point-map REFERENCE=CANDIDATE]
 tcgd-tensor compare-point-series REFERENCE_BUNDLE [CANDIDATE_BUNDLE] \
@@ -779,8 +793,23 @@ snapshot.descriptor() -> dict
 
 `snapshot_index` is Probe-local query order. Device index is part of every
 pool and observation key, so identical pool IDs on different devices remain
-separate. Same-Probe comparison can use marker-delimited history; independent
-probes support state and stacks but reject events and lifetimes.
+separate. `probe.compare()` accepts only snapshots this probe produced;
+independent probes are compared with the module-level function:
+
+```python
+compare_snapshots(
+    reference: MemoryProbeSnapshot,
+    candidate: MemoryProbeSnapshot,
+    *,
+    pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
+    attribution: MemoryAttributionOptions | None = None,
+) -> MemorySnapshotComparison
+```
+
+Same-Probe comparison can use marker-delimited history; independent probes
+follow the conservative cross-run matching rules (see Cross-Run
+Comparison), support state and stacks, accept `pool_mapping` for explicit
+private-pool pairing, and reject events and lifetimes.
 
 `allocator_state()` returns the point-in-time allocator envelope without cumulative
 `device_traces`; `raw_snapshot()` remains available on Probe snapshots for
@@ -803,6 +832,9 @@ MemoryRecorder(
     world_size: int | None = None,
     run_metadata: Mapping[str, JSONValue] | None = None,
 )
+
+# rank and world_size default from RANK/WORLD_SIZE environment variables or
+# initialized torch.distributed; group_id is never auto-resolved.
 ```
 
 The recorder always collects `torch.cuda.memory._snapshot()`; it does not
@@ -844,7 +876,10 @@ current-stream capture it skips requested synchronization and snapshots
 immediately.
 
 The recorder temporarily sets a PyTorch allocator metadata marker around each
-snapshot when those private APIs are available. Each ending point stores only the
+snapshot when those private APIs are available. The marker uses process-global
+allocator state: run at most one Probe or Recorder at a time and do not call
+`_set_memory_metadata` from the application while one is active (see the
+guide's operational constraints). Each ending point stores only the
 raw event entries between the previous boundary and itself. Marker failures and
 history gaps are recorded per device and become typed errors only when an analysis
 requests the affected event evidence.
@@ -940,6 +975,7 @@ observations:
 - new and removed segment bytes;
 - bytes that became active;
 - bytes that became inactive and allocator-reusable.
+
 `lifecycle_available` indicates whether address lifecycle was computed.
 `lifecycle_confidence` is `exact` when both states retain every segment and
 active-block address, `approximate` when missing addresses require size-based
@@ -1031,7 +1067,9 @@ run.lifetimes(
 ) -> MemoryAllocationLifetimeAnalysis
 ```
 
-The default selection is `all()`. `active_at(point)` retains generations
+`through` sets the last analyzed point; the default is the run's final
+point. The default selection is `all()`. `active_at(point)` retains
+generations
 not allocator-reusable at that point. `born_between(start, end)` retains
 generations allocated in `(start, end]`. `through` cannot precede the
 selection anchor or born-between end. Complete event history preserves
@@ -1144,10 +1182,13 @@ compare_phases(
 ) -> MemoryPhaseComparison
 ```
 
-The result contains `baseline_change`, `candidate_change`, `start_gap`,
+The baseline and candidate ranges must come from independent runs;
+same-run ranges raise `ValueError`. The result contains `baseline_change`,
+`candidate_change`, `start_gap`,
 `end_gap`, one `pool_decomposition` entry for each matched pool and metric, and
-one `allocator_scope_decomposition` entry for each `all`, `default`, and
-`private` scope. Every row verifies:
+one `allocator_scope_decomposition` entry for each of the `all`, `default`,
+and `private` scopes and each phase metric. Every row carries an
+`identity_holds` boolean confirming:
 
 ```text
 end_gap = start_gap + candidate_change - baseline_change
@@ -1189,7 +1230,9 @@ compare_run_group_phases(
 ) -> MemoryRunGroupPhaseComparison
 ```
 
-`load()` reads direct `*.tcgd-memory` child directories. A group requires
+`load()` reads every direct child directory containing a bundle
+`manifest.json` (bundles are conventionally named `*.tcgd-memory`; the name is
+not a load rule). A group requires
 non-null unique ranks, one run name, one ordered point-label sequence, and no
 conflicting non-null group IDs or world sizes. Declared-but-missing ranks,
 missing identity fields, incomplete bundles, runtime provenance differences,
@@ -1279,10 +1322,13 @@ CSV flattens these as `reference_allocated_bytes`,
 `candidate_allocated_bytes`, and `delta_allocated_bytes`.
 
 Every `write()` creates `report.txt`, `report.json`, and `report.html`.
-Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
+Pool-oriented results — state comparisons, timelines, and phase
+comparisons — also create `allocator_scopes.csv`, `pools.csv`, and
 `observations.csv`, with optional `allocation_stack_comparisons.csv`,
 `events.csv`, `pool_decomposition.csv`, and
-`allocator_scope_decomposition.csv`.
+`allocator_scope_decomposition.csv`. Group summaries, group-phase
+comparisons, and standalone lifetime analyses create only `report.*` plus
+their own CSV sets.
 
 `MemoryAllocationLifetimeAnalysis` and pool-oriented results that embed one
 create `cohorts.csv`, `cohort_points.csv`, `size_histograms.csv`, and
@@ -1367,6 +1413,9 @@ always uses event history. `summary` writes to standard output.
 Every report-producing command prints to standard output and writes files only
 when `--output` is present. Reusing a nonempty report directory requires
 `--overwrite`. Cross-run event and lifetime requests are rejected.
+`tcgd-memory` exits 0 when a report is produced and 2 on error; memory
+reports carry no match/mismatch verdict, so there is no exit-1 path (unlike
+`tcgd-tensor`).
 
 ## Experimental Advanced API
 
@@ -1435,8 +1484,9 @@ advanced.compare_allocation_stacks(
 separately because explicitly mapped private pools can have different IDs.
 Its size, requested-byte, and count fields each retain reference, candidate,
 and delta values. Advanced stack and event helpers always group by complete
-normalized stacks and return every row; callers perform any custom slicing
-afterward.
+normalized stacks and return every matching row without display truncation;
+`compare_allocation_stacks` additionally drops unchanged buckets unless
+`include_unchanged=True`. Callers perform any custom slicing afterward.
 
 `AllocationStackSummary`, `AllocationStackDelta`, and
 `AllocatorEventSummary` expose the complete normalized stack as
@@ -1487,6 +1537,7 @@ advanced.stack_key_from_frames(frames)
 advanced.format_bytes(value)
 advanced.format_delta_bytes(value)
 advanced.format_comparison(reference, candidate, delta)
+advanced.mutable_snapshot(source)
 ```
 
 ## Errors

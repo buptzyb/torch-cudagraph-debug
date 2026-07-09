@@ -1,4 +1,4 @@
-"""Offline allocation-cohort lifetime analysis for memory run bundles."""
+"""Allocation-cohort lifetime analysis for memory runs and probe snapshots."""
 
 from __future__ import annotations
 

@@ -28,7 +28,7 @@ requirement.
 | How do independently collected endpoints differ? | Probe | `compare_snapshots()` | `examples/memory_debug/probe/snapshot_comparison.py` |
 | Where in a phase did memory grow? | Recorder | `MemoryRecorder`, `MemoryRun.timeline()` | `examples/memory_debug/recorder/timeline_and_reports.py` |
 | Which stacks or allocator events caused growth? | Recorder plus application-owned history | `MemoryAttributionOptions` | `examples/memory_debug/recorder/stack_and_event_attribution.py` |
-| Which allocations survived or were born in a range? | Recorder plus application-owned history | `MemoryLifetimeOptions` | `examples/memory_debug/recorder/allocation_lifetimes.py` |
+| Which allocations survived or were born in a range? | Recorder plus application-owned history | `MemoryRun.lifetimes()`, `MemoryLifetimeSelection` | `examples/memory_debug/recorder/allocation_lifetimes.py` |
 | How do matched baseline and candidate phases differ? | Recorder | `compare_phases()` | `examples/memory_debug/recorder/compare_runs_and_phases.py` |
 | How do corresponding ranks differ? | Recorder | `MemoryRunGroup`, `compare_run_group_phases()` | `examples/memory_debug/recorder/distributed_run_groups.py` |
 | How should persisted memory bundles be inspected in automation? | CLI | `tcgd-memory` | `examples/memory_debug/cli/workflows.sh` |
