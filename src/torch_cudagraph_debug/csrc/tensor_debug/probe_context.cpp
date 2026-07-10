@@ -177,7 +177,6 @@ torch::Tensor ProbeContext::enqueue(
     const uint64_t order =
         peek_slot_index(is_capturing, capture_id, observation_name);
 
-    validate_tensor(tensor);
     validate_check_actions(
         tensor,
         order,

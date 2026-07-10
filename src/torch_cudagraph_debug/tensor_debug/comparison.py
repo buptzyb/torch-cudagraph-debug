@@ -386,11 +386,23 @@ class TensorRunComparison:
 
     @property
     def status(self) -> ComparisonStatus:
-        if self.reference_only_points or self.candidate_only_points:
+        """One-sided points are a mismatch unless they are the crash tail of
+        an incomplete run, which is missing evidence, not divergence."""
+        if self.reference_only_points and not _incomplete_prefix_tail(
+            self.reference_only_points, self.reference, self.candidate
+        ):
+            return "mismatch"
+        if self.candidate_only_points and not _incomplete_prefix_tail(
+            self.candidate_only_points, self.candidate, self.reference
+        ):
             return "mismatch"
         if any(item.status == "mismatch" for item in self.point_comparisons):
             return "mismatch"
-        if any(item.status == "inconclusive" for item in self.point_comparisons):
+        if (
+            self.reference_only_points
+            or self.candidate_only_points
+            or any(item.status == "inconclusive" for item in self.point_comparisons)
+        ):
             return "inconclusive"
         return "match"
 
@@ -400,7 +412,7 @@ class TensorRunComparison:
 
     @property
     def conclusive(self) -> bool:
-        return not any(not item.conclusive for item in self.point_comparisons)
+        return self.status != "inconclusive"
 
     @property
     def first_issue(self) -> tuple[str, TensorObservationComparison | None] | None:
@@ -757,6 +769,22 @@ def _compare_observation_sets(
     return tuple(observation_comparisons), tuple(warnings)
 
 
+def _incomplete_prefix_tail(
+    one_sided_labels: tuple[str, ...],
+    longer: "TensorRun",
+    shorter: "TensorRun",
+) -> bool:
+    """True when the longer run's unmatched points are explained by the
+    shorter run being an incomplete (crashed) recording: the shorter run
+    never finished and the unmatched labels are exactly the longer run's
+    trailing points."""
+
+    if shorter.complete or not one_sided_labels:
+        return False
+    longer_labels = tuple(point.label for point in longer.points)
+    return one_sided_labels == longer_labels[-len(one_sided_labels) :]
+
+
 def compare_runs(
     reference: TensorRun,
     candidate: TensorRun,
@@ -764,7 +792,13 @@ def compare_runs(
     point_mapping: Mapping[str, str] | None = None,
     options: TensorComparisonOptions | None = None,
 ) -> TensorRunComparison:
-    """Compare aligned points from two runs."""
+    """Compare aligned points from two runs.
+
+    Points recorded on only one side are a mismatch, except when the other
+    run is incomplete and the unmatched points are its crash tail: missing
+    evidence makes the comparison ``inconclusive`` with a warning, while
+    genuine differences on shared points still report ``mismatch``.
+    """
 
     reference_by_label = {point.label: point for point in reference.points}
     candidate_by_label = {point.label: point for point in candidate.points}
@@ -823,6 +857,16 @@ def compare_runs(
         if point.label not in matched_candidate
     )
     warnings = []
+    if _incomplete_prefix_tail(reference_only, reference, candidate):
+        warnings.append(
+            "candidate run is incomplete; reference points recorded after it "
+            f"stopped were not compared: {', '.join(reference_only)}"
+        )
+    if _incomplete_prefix_tail(candidate_only, candidate, reference):
+        warnings.append(
+            "reference run is incomplete; candidate points recorded after it "
+            f"stopped were not compared: {', '.join(candidate_only)}"
+        )
     if reference.execution != candidate.execution:
         warnings.append(
             f"execution differs: {reference.execution} -> {candidate.execution}"

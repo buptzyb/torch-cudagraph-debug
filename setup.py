@@ -5,6 +5,25 @@ from setuptools import setup
 
 
 def is_metadata_command() -> bool:
+    """True only when no requested command needs the native extension.
+
+    distutils runs every command of one invocation with the same
+    ``ext_modules``, so a build-style command anywhere in argv must win:
+    ``setup.py sdist bdist_wheel`` would otherwise silently produce a pure
+    wheel without ``_C``, and ``clean build_ext --inplace`` a no-op rebuild.
+    """
+
+    build_commands = {
+        "build",
+        "build_ext",
+        "build_py",
+        "bdist",
+        "bdist_wheel",
+        "bdist_egg",
+        "install",
+        "develop",
+        "editable_wheel",
+    }
     metadata_commands = {
         "egg_info",
         "dist_info",
@@ -13,7 +32,10 @@ def is_metadata_command() -> bool:
         "--name",
         "--version",
     }
-    return any(arg in metadata_commands for arg in sys.argv[1:])
+    args = sys.argv[1:]
+    if any(arg in build_commands for arg in args):
+        return False
+    return any(arg in metadata_commands for arg in args)
 
 
 def get_extensions():

@@ -9,6 +9,7 @@ import pytest
 from torch_cudagraph_debug.memory_debug import (
     MemoryPoolKey,
     MemoryProbe,
+    compare_points,
     compare_snapshots,
 )
 
@@ -143,6 +144,32 @@ def test_pruning_reports_no_changed_devices() -> None:
     )
     text = run.compare("before", "after").to_text(include_unchanged=False)
     assert text.endswith("no changed devices")
+
+
+def test_independent_comparison_renders_both_one_sided_streams() -> None:
+    reference = make_run([snapshot(segment(active=512, stream=7))], labels=("p",))
+    candidate = make_run([snapshot(segment(active=2048, stream=8))], labels=("p",))
+    result = compare_points(reference.point("p"), candidate.point("p"))
+    rows = result.observation_comparison_rows(include_unchanged=True)
+    assert len(rows) == len(result.observation_comparisons) == 2
+    text = result.to_text(include_unchanged=True)
+    assert "stream[7] [reference_only]" in text
+    assert "stream[8] [candidate_only]" in text
+    (pool_row,) = result.pool_comparison_rows(include_unchanged=True)
+    assert pool_row["delta_reserved_bytes"] == sum(
+        row["delta_reserved_bytes"] for row in rows
+    )
+
+
+def test_depth_pruning_keeps_devices_with_changes_below_the_cutoff() -> None:
+    reference = make_run([snapshot(segment(active=512, stream=7))], labels=("p",))
+    candidate = make_run([snapshot(segment(active=512, stream=8))], labels=("p",))
+    result = compare_points(reference.point("p"), candidate.point("p"))
+    for depth in ("pool", "device"):
+        text = result.to_text(include_unchanged=False, depth=depth)
+        assert "no changed devices" not in text
+        assert "device[0]" in text
+        assert "pool[0,0] (default)" in text or depth == "device"
 
 
 def test_depth_truncates_containers() -> None:

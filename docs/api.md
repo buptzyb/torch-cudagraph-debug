@@ -578,6 +578,10 @@ semantically equivalent point labels differ; explicit entries take precedence
 and unmapped labels still align by identical label. A candidate label may be
 claimed only once across the merged mapping, and only labels covered by
 neither the mapping nor auto-alignment are reported as one-sided points.
+One-sided points are a mismatch, except when the other run is incomplete and
+they are exactly its crash tail (the longer run's trailing points): missing
+evidence makes the run comparison `inconclusive` with a warning, while a
+genuine difference on any shared point still reports `mismatch`.
 
 Allclose uses the reference tensor in
 `atol + rtol * abs(reference)`. Integer and bool values compare exactly.
@@ -1119,7 +1123,9 @@ size once and is not a point-in-time peak. Event windows and address identity
 are device-specific. `AllocatorEventSummary.attribution_confidence` is
 `reported` when the raw event supplies a pool, `matched` when its address maps
 uniquely through endpoint segment ranges, `ambiguous` for conflicting endpoint
-ranges, and `unknown` when no address or matching range is available.
+ranges, `unknown` when no address or matching range is available, and
+`not_applicable` for `oom` events, whose payload is the device's free-byte
+count (`AllocatorTraceEntry.device_free_bytes`) rather than an address.
 
 ### Allocation Cohort Lifetimes
 
@@ -1290,8 +1296,10 @@ not phase metrics.
 
 Pool and device mappings are validated against the union of each run's phase
 endpoints. A mapped endpoint may be absent at phase start or end; its allocator
-state is zero. Device equations require all four CUDA Runtime samples and retain
-both `baseline_device_index` and `candidate_device_index`.
+state is zero. Device equations retain both `baseline_device_index` and
+`candidate_device_index`; sample-derived metrics need all four CUDA Runtime
+samples, while the allocator-reserved equation is computed from pool state and
+survives missing samples.
 
 Event attribution applies to the two same-run change comparisons. Start/end
 cross-run comparisons never compare events.
@@ -1329,9 +1337,14 @@ compare_run_group_phases(
 `manifest.json` (bundles are conventionally named `*.tcgd-memory`; the name is
 not a load rule). A group requires
 non-null unique ranks, one run name, one ordered point-label sequence, and no
-conflicting non-null group IDs or world sizes. Declared-but-missing ranks,
+conflicting non-null group IDs or world sizes. An incomplete rank whose labels
+are a strict prefix of the longest rank sequence (a crashed rank) is accepted
+with the incomplete-bundle warning; a complete rank with fewer points or any
+non-prefix sequence is an error. Declared-but-missing ranks,
 missing identity fields, incomplete bundles, runtime provenance differences,
-and user metadata differences are warnings. The default does not retain
+and user metadata differences are warnings. Summary aggregates report
+`rank_count` per point, so points past a crashed rank's tail cover only the
+ranks that recorded them. The default does not retain
 decompressed allocator-state or event payloads across ranks or points; set
 `cache_snapshots=True` only for workloads that repeatedly inspect the same
 payloads.
@@ -1478,10 +1491,11 @@ CSV flattens these as `reference_allocated_bytes`,
 
 Every `write()` creates `report.txt`, `report.json`, and `report.html`.
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
-`observations.csv`. State comparisons and timelines add `devices.csv`
-whenever any device carries a sample or pools (sample columns stay empty for
-unsampled devices); phase comparisons with CUDA Runtime samples add
-`devices.csv` and `device_decomposition.csv`. Optional attribution and
+`observations.csv`. State comparisons, timelines, and phase comparisons add
+`devices.csv` whenever any device carries a sample or pools (sample columns
+stay empty for unsampled devices); phase comparisons additionally add
+`device_decomposition.csv` whenever any device-level four-point equation is
+computable — allocator metrics need no samples. Optional attribution and
 lifetime CSVs remain unchanged. Group summaries, group-phase comparisons, and
 standalone lifetime analyses create `report.*` plus their domain-specific CSV
 sets.

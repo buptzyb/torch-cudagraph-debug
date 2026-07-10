@@ -123,11 +123,10 @@ its pools, and each pool is the sum of its streams. The CUDA Runtime and
 allocator measurements are consecutive rather than atomic, so the residual can
 be positive or negative. Interior allocator, pool, and stream nodes put
 `reserved:` first, followed by the remaining core metrics and sparse structural
-diagnostics. Points without a CUDA Runtime sample attach `allocator:` directly
-The `diagnostics` line is intentionally sparse: text and HTML surface structural
-metrics only when they explain an absolute state or change; JSON and CSV retain
-all metrics.
-to the device.
+diagnostics. The `diagnostics` line is intentionally sparse: text and HTML
+surface structural metrics only when they explain an absolute state or change;
+JSON and CSV retain all metrics. Points without a CUDA Runtime sample attach
+`allocator:` directly to the device.
 
 Cross-run device roots retain both endpoint indices, for example
 `device[0] -> device[1] [mapped]`. Match tags appear only when the identity
@@ -189,12 +188,12 @@ unless `pool_mapping` explicitly pairs them, exactly like cross-run
 `compare_points`.
 
 Structured pool and stream rows carry `MatchKind`; device rows carry
-Pool values are `same_probe`, `same_run`, `default`, `mapped`,
-`reference_only`, or `candidate_only`. Device values additionally distinguish
-`same_index` and `pool_mapping`.
-`DeviceMatchKind`. Text and HTML show tags only when the decision matters:
-`[mapped]`, `[pool_mapping]`, `[reference_only]`, or `[candidate_only]`.
-Owner-local and automatic same-index/default matches stay untagged.
+`DeviceMatchKind`. Pool values are `same_probe`, `same_run`, `default`,
+`mapped`, `reference_only`, or `candidate_only`. Device values additionally
+distinguish `same_index` and `pool_mapping`. Text and HTML show tags only when
+the decision matters: `[mapped]`, `[pool_mapping]`, `[reference_only]`, or
+`[candidate_only]`. Owner-local and automatic same-index/default matches stay
+untagged.
 Same-probe comparisons may request marker-delimited allocator events and
 lifetimes when the application enabled allocator history before the interval.
 The embedded lifetime result reports `source_kind="probe"`; Run-based lifetime
@@ -348,7 +347,10 @@ Each allocator-event row reports pool-attribution confidence:
 - `matched`: the event address resolves uniquely through endpoint segment
   ranges;
 - `ambiguous`: endpoint ranges associate the address with conflicting pools;
-- `unknown`: no address was available or no endpoint range contains it.
+- `unknown`: no address was available or no endpoint range contains it;
+- `not_applicable`: the event describes the device rather than an allocator
+  block (`oom`, whose payload is the device's free-byte count, not an
+  address), so pool attribution is never attempted.
 
 Confidence describes pool attribution, not event-history completeness; the
 comparison's `attribution_status.events` carries the latter.
@@ -609,7 +611,10 @@ group_phase.write("reports/group-phase")
 ```
 
 Groups require non-null unique ranks, one run name, and matching point-label
-sequences. A run without a rank, a rank at or above the declared world size,
+sequences; an incomplete rank whose labels are a strict prefix of the longest
+sequence (a crashed rank) is accepted with the incomplete-bundle warning. A
+run without a rank, a rank at or above the declared world size, a complete
+run with fewer points or a non-prefix sequence,
 and conflicting non-null group IDs or world sizes are errors; missing
 group IDs or world sizes, declared-but-missing ranks,
 incomplete bundles, provenance differences, and metadata differences are
@@ -669,9 +674,9 @@ Overwrite removes known tcgd report artifacts from the prior report while
 preserving unrelated files in the directory.
 
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
-`observations.csv`. State comparisons, timelines, and phase comparisons with
-device-wide CUDA Runtime samples add `devices.csv`; phase reports additionally
-add `device_decomposition.csv`. Attribution can add
+`observations.csv`. State comparisons, timelines, and phase comparisons add
+`devices.csv` whenever any device carries a sample or pools; phase reports
+additionally add `device_decomposition.csv`. Attribution can add
 `allocation_stack_comparisons.csv` or `events.csv`; phase reports also add
 `pool_decomposition.csv` and `allocator_scope_decomposition.csv`. Lifetime
 reports add `cohorts.csv`, `cohort_points.csv`, `size_histograms.csv`,

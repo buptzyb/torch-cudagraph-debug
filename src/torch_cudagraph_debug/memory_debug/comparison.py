@@ -1150,9 +1150,9 @@ def _device_phase_decomposition(
         if any(item is None for item in comparisons):
             continue
         complete = tuple(cast(MemoryDeviceComparison, item) for item in comparisons)
-        if any(item.reference is None or item.candidate is None for item in complete):
-            continue
         for metric in DEVICE_MEMORY_METRICS:
+            # Sample-derived metrics report None deltas when any leg lacks a
+            # device sample; allocator rollups stay available regardless.
             deltas = tuple(getattr(item, f"delta_{metric}") for item in complete)
             if any(value is None for value in deltas):
                 continue

@@ -84,3 +84,11 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m build --sdist
           python -m twine check dist/*
+
+      - name: Run the test suite from the unpacked sdist
+        run: |
+          python -m pip install numpy torch
+          mkdir -p /tmp/sdist-check
+          tar -xzf dist/*.tar.gz -C /tmp/sdist-check
+          cd /tmp/sdist-check/torch_cudagraph_debug-*
+          python -m pytest -q tests

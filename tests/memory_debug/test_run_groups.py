@@ -154,6 +154,41 @@ def test_group_validation_rejects_ambiguous_rank_identity_and_points() -> None:
         MemoryRunGroup.from_runs((replace(rank0, rank=None),))
 
 
+def test_group_accepts_incomplete_prefix_rank_as_crashed() -> None:
+    rank0 = _distributed_run((10, 20), name="run", rank=0, group_id="job")
+    crashed = replace(
+        make_run(
+            [snapshot(segment(active=11, device=1))],
+            name="run",
+            rank=1,
+            group_id="job",
+            world_size=2,
+            run_metadata={"source_revision": "abc123"},
+            labels=("start",),
+        ),
+        complete=False,
+    )
+
+    group = MemoryRunGroup.from_runs((rank0, crashed))
+    assert group.point_labels == ("start", "end")
+    assert group.complete is False
+    assert any(
+        "memory bundles are incomplete for ranks 1" in item for item in group.warnings
+    )
+    summary = group.summary()
+    rank1_labels = {row.point_label for row in summary.rank_points if row.rank == 1}
+    assert rank1_labels == {"start"}
+    end_aggregates = [
+        row for row in summary.point_aggregates if row.point_label == "end"
+    ]
+    assert end_aggregates and all(row.rank_count == 1 for row in end_aggregates)
+
+    # A complete rank with fewer points is a structural difference, not a
+    # crash, and remains an error.
+    with pytest.raises(MemoryBundleError, match="label sequences differ"):
+        MemoryRunGroup.from_runs((rank0, replace(crashed, complete=True)))
+
+
 def test_group_warns_for_missing_rank_and_metadata_mismatch() -> None:
     rank0 = _distributed_run((10, 20), name="run", rank=0, group_id="job", world_size=3)
     rank2 = _distributed_run((10, 20), name="run", rank=2, group_id="job", world_size=3)

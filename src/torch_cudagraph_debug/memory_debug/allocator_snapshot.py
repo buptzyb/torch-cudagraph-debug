@@ -60,6 +60,9 @@ class AllocatorTraceEntry:
     time_us: int | None
     user_metadata: str
     pool_id: PoolId | None = None
+    # OOM entries report the device's free-byte count, which torch stores
+    # under ``device_free`` precisely because it is not an address.
+    device_free_bytes: int | None = None
 
 
 _SEGMENT_DRIFT_FIELDS = (
@@ -284,14 +287,11 @@ def normalize_raw_trace_entries(
 def _normalize_trace_entry(
     raw: Mapping[str, Any], device_index: int, trace_index: int
 ) -> AllocatorTraceEntry:
-    addr = raw.get("addr")
-    if addr is None:
-        addr = raw.get("device_free")
     return AllocatorTraceEntry(
         device_index=device_index,
         trace_index=trace_index,
         action=_string_field(raw, "action", f"trace[{trace_index}]", "unknown"),
-        addr=_optional_int_value(addr, f"trace[{trace_index}].addr"),
+        addr=_optional_int_value(raw.get("addr"), f"trace[{trace_index}].addr"),
         size_bytes=_int_field(raw, "size", f"trace[{trace_index}]"),
         stream=normalize_stream(raw.get("stream", None)),
         frames=_frames_field(raw, f"trace[{trace_index}]"),
@@ -301,6 +301,9 @@ def _normalize_trace_entry(
             normalize_pool_id(raw.get("pool_id"))
             if raw.get("pool_id") is not None
             else None
+        ),
+        device_free_bytes=_optional_int_field(
+            raw, "device_free", f"trace[{trace_index}]"
         ),
     )
 
@@ -323,7 +326,10 @@ def summarize_segments(
     """
 
     grouped: dict[MemoryObservationKey, list[Mapping[str, Any]]] = defaultdict(list)
-    for segment in segments:
+    for segment_index, segment in enumerate(segments):
+        for name in _SEGMENT_REQUIRED_SIZE_FIELDS:
+            if name not in segment:
+                raise TypeError(f"segment[{segment_index}].{name} is required")
         key = MemoryObservationKey(
             normalize_device_index(_int(segment.get("device"))),
             normalize_pool_id(segment.get("segment_pool_id", DEFAULT_POOL_ID)),

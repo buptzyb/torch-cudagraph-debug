@@ -790,6 +790,29 @@ def test_invalid_allocator_schema_in_payloads_raises_bundle_error(
         )
 
 
+def test_state_payload_overflow_float_literal_is_rejected(tmp_path: Path) -> None:
+    # 1e999 is grammatically valid JSON that the default parser turns into
+    # inf; a validated bundle must never let non-finite values through.
+    bundle = tmp_path / "overflow.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=64))],
+        labels=("point",),
+        bundle_dir=bundle,
+    )
+
+    state_path = bundle / "states" / "0000.json.gz"
+    with gzip.open(state_path, "rt", encoding="utf-8") as handle:
+        text = handle.read()
+    tampered = text.rstrip().removesuffix("}") + ', "overflow_probe": 1e999}'
+    with gzip.open(state_path, "wt", encoding="utf-8") as handle:
+        handle.write(tampered)
+    _refresh_payload_sha256(bundle, 0, "state_sha256", state_path)
+
+    run = MemoryRun.load(bundle, cache_snapshots=False)
+    with pytest.raises(MemoryBundleError, match="non-finite JSON number"):
+        run["point"].allocator_state()
+
+
 def test_memory_run_rejects_boolean_point_reference() -> None:
     run = make_run([snapshot(segment(active=10))], labels=("point",))
     with pytest.raises(TypeError, match="must not be a boolean"):

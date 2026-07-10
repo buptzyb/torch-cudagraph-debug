@@ -154,7 +154,22 @@ def test_plugin_wraps_canonical_assets_through_marketplace_links() -> None:
 
     skill_link = PLUGIN_ROOT / "skills" / "tcgd-investigate"
     agent_link = PLUGIN_ROOT / "agents" / "tcgd-debugger.md"
-    assert skill_link.is_symlink(), "plugin skill must link to the canonical skill"
-    assert skill_link.resolve() == SKILL_ROOT.resolve()
-    assert agent_link.is_symlink(), "plugin agent must link to the Claude agent"
-    assert agent_link.resolve() == CLAUDE_AGENT.resolve()
+    if skill_link.is_symlink() or agent_link.is_symlink():
+        assert skill_link.is_symlink(), "plugin skill must link to the canonical skill"
+        assert skill_link.resolve() == SKILL_ROOT.resolve()
+        assert agent_link.is_symlink(), "plugin agent must link to the Claude agent"
+        assert agent_link.resolve() == CLAUDE_AGENT.resolve()
+        return
+
+    # setuptools dereferences symlinks when building the sdist, so an
+    # unpacked source distribution carries materialized copies instead.
+    assert not (ROOT / ".git").exists(), "source checkout must use plugin links"
+    for relative_path in (
+        Path("SKILL.md"),
+        Path("assets/report-template.md"),
+        Path("references/workflow-map.md"),
+    ):
+        assert (skill_link / relative_path).read_bytes() == (
+            SKILL_ROOT / relative_path
+        ).read_bytes()
+    assert agent_link.read_bytes() == CLAUDE_AGENT.read_bytes()

@@ -20,6 +20,14 @@ def strict_json_loads(text: str, *, error_type: type[ErrorT], context: str) -> A
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON number {value}")
 
+    def parse_finite_float(value: str) -> float:
+        # Overflow literals like 1e999 are grammatically valid JSON that the
+        # default parser turns into inf, bypassing parse_constant.
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError(f"non-finite JSON number {value}")
+        return result
+
     def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
@@ -32,6 +40,7 @@ def strict_json_loads(text: str, *, error_type: type[ErrorT], context: str) -> A
         return json.loads(
             text,
             parse_constant=reject_constant,
+            parse_float=parse_finite_float,
             object_pairs_hook=reject_duplicate_keys,
         )
     except (json.JSONDecodeError, ValueError) as exc:

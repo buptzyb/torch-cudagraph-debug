@@ -216,6 +216,67 @@ def test_tensor_run_group_accepts_incomplete_rank_with_prefix_labels() -> None:
     ]
 
 
+def test_crashed_rank_with_identical_shared_points_is_inconclusive() -> None:
+    reference = TensorRunGroup.from_runs(
+        make_tensor_run(
+            [
+                ("a", [("output", torch.tensor([0.0]), "full")]),
+                ("b", [("output", torch.tensor([1.0]), "full")]),
+            ],
+            name="eager",
+            rank=rank,
+            group_id="eager-job",
+            world_size=2,
+        )
+        for rank in range(2)
+    )
+    candidate = TensorRunGroup.from_runs(
+        _prefix_group_runs(name="cuda-graph", group_id="graph-job")
+    )
+
+    comparison = compare_run_groups(reference, candidate)
+    assert comparison.status == "inconclusive"
+    assert [item.status for item in comparison.rank_comparisons] == [
+        "match",
+        "inconclusive",
+    ]
+    rank1 = comparison.rank_comparisons[1].comparison
+    assert rank1.conclusive is False
+    assert any("candidate run is incomplete" in item for item in rank1.warnings)
+
+
+def test_crashed_rank_with_shared_point_divergence_stays_mismatch() -> None:
+    reference = TensorRunGroup.from_runs(
+        make_tensor_run(
+            [
+                ("a", [("output", torch.tensor([0.0]), "full")]),
+                ("b", [("output", torch.tensor([1.0]), "full")]),
+            ],
+            name="eager",
+            rank=rank,
+            group_id="eager-job",
+            world_size=2,
+        )
+        for rank in range(2)
+    )
+    healthy, _ = _prefix_group_runs(name="cuda-graph", group_id="graph-job")
+    diverged_crash = replace(
+        make_tensor_run(
+            [("a", [("output", torch.tensor([9.0]), "full")])],
+            name="cuda-graph",
+            rank=1,
+            group_id="graph-job",
+            world_size=2,
+        ),
+        complete=False,
+    )
+    candidate = TensorRunGroup.from_runs((healthy, diverged_crash))
+
+    comparison = compare_run_groups(reference, candidate)
+    assert comparison.status == "mismatch"
+    assert comparison.rank_comparisons[1].status == "mismatch"
+
+
 def test_tensor_run_group_load_accepts_incomplete_prefix_rank_bundle(
     tmp_path: Path,
 ) -> None:

@@ -408,15 +408,18 @@ def test_phase_comparison_decomposes_complete_device_samples(
     assert "Device Decomposition" in paths["html"].read_text(encoding="utf-8")
 
 
-def test_phase_comparison_omits_incomplete_device_equations() -> None:
+def test_missing_sample_keeps_allocator_equation_drops_sample_metrics() -> None:
+    # The baseline run loses its device sample at "end": sample-derived
+    # metrics cannot complete their four legs, but the allocator equation is
+    # computed from pool stats and must survive.
     baseline = make_run(
-        [snapshot(segment(active=100)), snapshot(segment(active=100))],
+        [snapshot(segment(active=100)), snapshot(segment(active=150))],
         name="baseline",
         labels=("start", "end"),
         device_memory=[{0: (900, 1000)}, {}],
     )
     candidate = make_run(
-        [snapshot(segment(active=100)), snapshot(segment(active=100))],
+        [snapshot(segment(active=100)), snapshot(segment(active=180))],
         name="candidate",
         labels=("start", "end"),
         device_memory=[{0: (850, 1000)}, {0: (800, 1000)}],
@@ -425,8 +428,14 @@ def test_phase_comparison_omits_incomplete_device_equations() -> None:
         baseline.between("start", "end"),
         candidate.between("start", "end"),
     )
-    assert report.device_decomposition == ()
-    assert "no complete changed device equations" in report.to_text()
+    (row,) = report.device_decomposition
+    assert row.components.metric == "allocator_reserved_bytes"
+    assert row.components.start_gap_bytes == 0
+    assert row.components.baseline_change_bytes == 50
+    assert row.components.candidate_change_bytes == 80
+    assert row.components.end_gap_bytes == 30
+    assert row.components.identity_holds
+    assert "device[0] -> device[0] allocator_reserved_bytes" in report.to_text()
 
 
 def test_independent_comparison_marks_missing_side() -> None:

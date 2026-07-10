@@ -16,6 +16,7 @@ from torch_cudagraph_debug.memory_debug.advanced import (
     stack_key_from_frames,
     summarize_allocation_stacks,
     summarize_allocator_events,
+    summarize_segments,
     summarize_snapshot,
 )
 
@@ -114,6 +115,45 @@ def test_extract_event_window_distinguishes_missing_end_marker() -> None:
     # never contains the ending snapshot's own marker) and must point at
     # the end_marker=None escape hatch.
     assert any("end_marker=None" in warning for warning in missing_end.warnings)
+
+
+def test_summarize_segments_requires_structural_sizes() -> None:
+    # Defaulting the structural sizes to zero would fabricate a valid-looking
+    # all-zero group from corrupted input.
+    with pytest.raises(TypeError, match=r"segment\[0\].total_size is required"):
+        summarize_segments([{"device": 0, "blocks": []}])
+    with pytest.raises(TypeError, match=r"segment\[1\].allocated_size is required"):
+        summarize_segments(
+            [
+                segment(active=10),
+                {"device": 0, "total_size": 100, "active_size": 100, "blocks": []},
+            ]
+        )
+
+
+def test_extract_event_window_rejects_shared_boundary_marker() -> None:
+    value = snapshot(
+        segment(active=64),
+        traces=[
+            [
+                event("snapshot", marker="boundary"),
+                event("alloc", address=9000, size=64),
+            ]
+        ],
+    )
+    entries = normalize_trace_entries(value)
+
+    # The same marker for both bounds resolves to one entry serving as start
+    # and end; that must not be classified as a complete empty window.
+    window = extract_event_window(
+        entries,
+        start_marker="boundary",
+        end_marker="boundary",
+        start_label="boundary",
+    )
+    assert window.complete is False
+    assert window.cause == "invalid_boundary_order"
+    assert window.entries == ()
 
 
 def test_pool_range_prefers_exact_device_over_device_fallback() -> None:
@@ -254,6 +294,39 @@ def test_trace_normalization_rejects_invalid_device_trace_container() -> None:
 
     with pytest.raises(TypeError, match=r"device_traces\[0\]"):
         normalize_trace_entries(malformed)
+
+
+def test_oom_device_free_is_not_an_address_and_never_pool_attributes() -> None:
+    # Real torch OOM entries carry the free-byte count under ``device_free``
+    # and have no ``addr``; the byte count must not leak into address-based
+    # pool attribution even when it numerically falls inside a segment range.
+    value = snapshot(segment(active=8192, address=4096, pool=(3, 7)))
+    value["device_traces"] = [
+        [
+            {
+                "action": "oom",
+                "device_free": 5000,
+                "size": 1 << 30,
+                "stream": 0,
+                "time_us": 1,
+                "user_metadata": "",
+                "frames": [],
+            }
+        ]
+    ]
+
+    (entry,) = normalize_trace_entries(value)
+    assert entry.addr is None
+    assert entry.device_free_bytes == 5000
+
+    (row,) = summarize_allocator_events(
+        [entry],
+        reference_segments=normalize_snapshot(value),
+        candidate_segments=normalize_snapshot(value),
+    )
+    assert row.action == "oom"
+    assert row.pool_id is None
+    assert row.attribution_confidence == "not_applicable"
 
 
 def test_full_stack_identity_includes_fx_frame_metadata() -> None:

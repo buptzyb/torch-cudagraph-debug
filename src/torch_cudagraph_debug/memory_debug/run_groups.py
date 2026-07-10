@@ -380,18 +380,27 @@ class MemoryRunGroup:
             )
         name = materialized[0].name
 
-        point_sequences = {
-            tuple(point.label for point in run.points) for run in materialized
-        }
-        if len(point_sequences) != 1:
-            details = "; ".join(
-                f"rank {rank}: {tuple(point.label for point in run.points)!r}"
-                for rank, run in sorted(by_rank.items())
-            )
-            raise MemoryBundleError(
-                f"memory point label sequences differ across ranks: {details}"
-            )
-        point_labels = tuple(point.label for point in materialized[0].points)
+        # The canonical point-label sequence is the longest across ranks. An
+        # incomplete rank whose labels are a strict prefix of it (a crashed
+        # rank) is accepted and surfaced by the incomplete-bundle warning
+        # below; a complete rank with fewer points or any non-prefix sequence
+        # is a genuine structural difference.
+        point_labels = max(
+            (tuple(point.label for point in run.points) for run in materialized),
+            key=len,
+        )
+        for run in materialized:
+            labels = tuple(point.label for point in run.points)
+            if labels == point_labels:
+                continue
+            if run.complete or labels != point_labels[: len(labels)]:
+                details = "; ".join(
+                    f"rank {rank}: {tuple(point.label for point in item.points)!r}"
+                    for rank, item in sorted(by_rank.items())
+                )
+                raise MemoryBundleError(
+                    f"memory point label sequences differ across ranks: {details}"
+                )
 
         warnings: list[str] = []
         group_ids = {run.group_id for run in materialized if run.group_id is not None}

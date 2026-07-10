@@ -157,7 +157,7 @@ def _extract_point_event_evidence(
                     "or history recording was enabled after the boundary, and the "
                     "interval is excluded from event analysis",
                 )
-            elif end is not None and end < start:
+            elif end is not None and end <= start:
                 status = "invalid_boundary_order"
                 warnings = ("allocator event boundary order is inconsistent",)
             else:
@@ -421,7 +421,10 @@ def _window_bounds(
                 cause="truncated",
             )
         end = length
-    elif end < start:
+    elif end <= start:
+        # A shared index means one entry would serve as both boundaries —
+        # the same-marker copy-paste case — which is as incoherent as a
+        # reversed pair.
         warnings.append("allocator event boundary order is inconsistent")
         return _WindowBounds(
             start=start,
@@ -456,7 +459,11 @@ def summarize_allocator_events(
     for entry in entries:
         if entry.action == "snapshot":
             continue
-        if entry.pool_id is not None:
+        if entry.action == "oom":
+            # OOM entries describe the device, not an allocator block, so
+            # pool attribution is categorically meaningless for them.
+            pool_id, confidence = None, "not_applicable"
+        elif entry.pool_id is not None:
             pool_id, confidence = entry.pool_id, "reported"
         else:
             pool_id, confidence = _attribute_pool(

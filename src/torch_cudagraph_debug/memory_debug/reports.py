@@ -369,9 +369,9 @@ class MemoryAllocationLifetimeAnalysis:
             limit=limit,
             stack_depth=stack_depth,
         )
-        root = _prepare_output(output_dir, overwrite=overwrite)
-        paths = _write_report_documents(
-            root,
+        root, paths = _write_report_documents(
+            output_dir,
+            overwrite=overwrite,
             text=self.to_text(limit=limit, stack_depth=stack_depth),
             payload=self.to_dict(),
             html=self.to_html(limit=limit, stack_depth=stack_depth),
@@ -888,9 +888,9 @@ class _MemoryStateComparison:
             stack_depth=stack_depth,
         )
         tree_depth = _resolve_tree_depth(depth)
-        root = _prepare_output(output_dir, overwrite=overwrite)
-        paths = _write_common(
-            root,
+        root, paths = _write_common(
+            output_dir,
+            overwrite=overwrite,
             text=self.to_text(
                 include_unchanged=include_unchanged,
                 limit=limit,
@@ -1309,9 +1309,9 @@ class MemoryTimeline:
             stack_depth=stack_depth,
         )
         tree_depth = _resolve_tree_depth(depth)
-        root = _prepare_output(output_dir, overwrite=overwrite)
-        paths = _write_common(
-            root,
+        root, paths = _write_common(
+            output_dir,
+            overwrite=overwrite,
             text=self.to_text(
                 include_unchanged=include_unchanged,
                 limit=limit,
@@ -1673,7 +1673,6 @@ class MemoryPhaseComparison:
             limit=limit,
             stack_depth=stack_depth,
         )
-        root = _prepare_output(output_dir, overwrite=overwrite)
         phase_comparisons = (
             ("baseline_change", self.baseline_change),
             ("candidate_change", self.candidate_change),
@@ -1708,8 +1707,9 @@ class MemoryPhaseComparison:
                 include_unchanged=include_unchanged
             )
         ]
-        paths = _write_common(
-            root,
+        root, paths = _write_common(
+            output_dir,
+            overwrite=overwrite,
             text=self.to_text(
                 include_unchanged=include_unchanged,
                 limit=limit,
@@ -1934,9 +1934,9 @@ class MemoryRunGroupSummary:
         *,
         overwrite: bool = False,
     ) -> dict[str, Path]:
-        root = _prepare_output(output_dir, overwrite=overwrite)
-        paths = _write_report_documents(
-            root,
+        root, paths = _write_report_documents(
+            output_dir,
+            overwrite=overwrite,
             text=self.to_text(),
             payload=self.to_dict(),
             html=self.to_html(),
@@ -2218,9 +2218,9 @@ class MemoryRunGroupPhaseComparison:
             limit=limit,
             stack_depth=stack_depth,
         )
-        root = _prepare_output(output_dir, overwrite=overwrite)
-        paths = _write_report_documents(
-            root,
+        root, paths = _write_report_documents(
+            output_dir,
+            overwrite=overwrite,
             text=self.to_text(
                 include_unchanged=include_unchanged,
                 limit=limit,
@@ -2491,7 +2491,15 @@ def _prune_report_tree(
             for child in node.children
             if (selected := prune(child)) is not None
         ]
-        if not include_unchanged and not node.changed_self and not children:
+        # Children hidden by the depth cutoff must still contribute their
+        # changed signal, or a node whose only changes live below the cutoff
+        # would be pruned as unchanged.
+        changed_self = node.changed_self or any(
+            child.changed_subtree
+            for child in node.children
+            if not _tree_kind_visible(child.kind, depth)
+        )
+        if not include_unchanged and not changed_self and not children:
             return None
         return _ReportTreeNode(
             kind=node.kind,
@@ -2499,7 +2507,7 @@ def _prune_report_tree(
             label=node.label,
             details=node.details,
             payload=node.payload,
-            changed_self=node.changed_self,
+            changed_self=changed_self,
             children=children,
         )
 
@@ -2707,11 +2715,21 @@ def _build_comparison_tree(
 
     pool_nodes: list[tuple[MemoryPoolComparison, _ReportTreeNode]] = []
     for pool in pool_rows:
-        observations = (
-            observations_by_reference.get(pool.reference_key, [])
-            if pool.reference_key is not None
-            else observations_by_candidate.get(pool.candidate_key, [])
-        )
+        # Independent comparisons produce one-sided observation rows, so a
+        # matched pool needs the union of both indexes, not just the
+        # reference side.
+        observations: list[MemoryObservationComparison] = []
+        seen: set[int] = set()
+        if pool.reference_key is not None:
+            for observation in observations_by_reference.get(pool.reference_key, []):
+                seen.add(id(observation))
+                observations.append(observation)
+        if pool.candidate_key is not None:
+            observations.extend(
+                observation
+                for observation in observations_by_candidate.get(pool.candidate_key, [])
+                if id(observation) not in seen
+            )
         pool_nodes.append((pool, _comparison_pool_node(pool, observations)))
 
     roots: list[
@@ -3070,42 +3088,41 @@ def _timeline_point_tree_lines(
     )
 
 
-def _prepare_output(
+def _write_report_documents(
     output_dir: str | Path,
     *,
     overwrite: bool,
-) -> Path:
-    return prepare_output_dir(output_dir, overwrite=overwrite)
-
-
-def _write_report_documents(
-    root: Path,
-    *,
     text: str,
     payload: Mapping[str, object],
     html: str,
-) -> dict[str, Path]:
+) -> tuple[Path, dict[str, Path]]:
+    """Prepare the output directory only after every document argument has
+    been rendered, so a rendering failure cannot destroy a previous report."""
+
+    root = prepare_output_dir(output_dir, overwrite=overwrite)
     text_path = root / "report.txt"
     json_path = root / "report.json"
     html_path = root / "report.html"
     atomic_write_text(text_path, text + "\n")
     atomic_write_json(json_path, payload)
     atomic_write_text(html_path, html)
-    return {"text": text_path, "json": json_path, "html": html_path}
+    return root, {"text": text_path, "json": json_path, "html": html_path}
 
 
 def _write_common(
-    root: Path,
+    output_dir: str | Path,
     *,
+    overwrite: bool,
     text: str,
     payload: Mapping[str, object],
     html: str,
     allocator_scopes: Sequence[Mapping[str, object]],
     pools: Sequence[Mapping[str, object]],
     observations: Sequence[Mapping[str, object]],
-) -> dict[str, Path]:
-    paths = _write_report_documents(
-        root,
+) -> tuple[Path, dict[str, Path]]:
+    root, paths = _write_report_documents(
+        output_dir,
+        overwrite=overwrite,
         text=text,
         payload=payload,
         html=html,
@@ -3119,7 +3136,7 @@ def _write_common(
             "observations": _write_csv(root / "observations.csv", observations),
         }
     )
-    return paths
+    return root, paths
 
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> Path:

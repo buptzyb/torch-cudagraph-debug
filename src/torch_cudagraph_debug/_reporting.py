@@ -55,6 +55,18 @@ def prepare_output_dir(
         if nonempty and not overwrite:
             raise FileExistsError(f"report directory is not empty: {root}")
         if nonempty:
+            # Detect collisions before deleting anything so a bad target
+            # cannot destroy half of the previous report set and then fail.
+            colliding = sorted(
+                name
+                for name in _REPORT_ARTIFACT_FILENAMES
+                if (root / name).is_dir() and not (root / name).is_symlink()
+            )
+            if colliding:
+                raise FileExistsError(
+                    "report artifact names exist as directories in "
+                    f"{root}: {', '.join(colliding)}"
+                )
             for name in _REPORT_ARTIFACT_FILENAMES:
                 artifact = root / name
                 if artifact.is_file() or artifact.is_symlink():

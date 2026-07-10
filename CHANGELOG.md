@@ -37,6 +37,10 @@ memory-debug domain.
   duplicate active addresses, and duplicate free requests. Device comparisons
   also treat one-sided CUDA sample availability as a change without fabricating
   a delta.
+- `setup.py` treats an invocation as metadata-only only when no requested
+  command needs the native extension; `python setup.py sdist bdist_wheel`
+  previously produced a pure-Python wheel without `_C` and
+  `clean build_ext --inplace` silently skipped the rebuild.
 
 ### Added
 
@@ -60,7 +64,9 @@ memory-debug domain.
   explicit one-to-one private-pool mappings, and visible unmatched pools.
 - Optional live-allocation stack attribution with explicit partial coverage,
   plus strict marker-delimited allocator-event attribution and typed unavailable,
-  boundary, truncated, and reconciliation failures.
+  boundary, truncated, and reconciliation failures. OOM trace entries keep the
+  device free-byte count in `device_free_bytes` instead of `addr` and report
+  pool-attribution confidence `not_applicable`.
 - Allocation cohort lifetime analysis requiring complete allocator event history,
   with address-reuse generation splitting,
   owner-active versus awaiting-free point states, event-backed birth,
@@ -127,7 +133,10 @@ memory-debug domain.
   first-divergence and worst-error reporting, and explicit
   match/mismatch/inconclusive results.
 - Rank-preserving `TensorRunGroup` summaries and comparisons with missing-rank,
-  completeness, provenance, metadata, and point-label validation.
+  completeness, provenance, metadata, and point-label validation. Both group
+  domains accept a crashed rank's incomplete strict-prefix bundle with a
+  warning, and comparisons report an incomplete run's missing crash tail as
+  `inconclusive` — differences on shared points still win as `mismatch`.
 - Private domain collectors shared by each domain's Probe and Recorder
   workflows without introducing a synthetic cross-domain base class.
 - Text, JSON, CSV, and standalone HTML tensor reports plus the `tcgd-tensor`

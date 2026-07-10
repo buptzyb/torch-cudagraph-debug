@@ -388,6 +388,27 @@ def test_write_requires_explicit_overwrite_for_nonempty_directory(
     assert unrelated.read_text(encoding="utf-8") == "keep"
 
 
+def test_overwrite_detects_directory_collision_before_deleting(
+    tmp_path: Path,
+) -> None:
+    run = make_run(
+        [snapshot(segment(active=10)), snapshot(segment(active=20))],
+        labels=("before", "after"),
+    )
+    comparison = run.compare("before", "after")
+    output = tmp_path / "report"
+    comparison.write(output)
+
+    (output / "report.json").unlink()
+    (output / "report.json").mkdir()
+
+    with pytest.raises(FileExistsError, match="directories"):
+        comparison.write(output, overwrite=True)
+    # The collision was detected before anything was deleted.
+    assert (output / "report.txt").is_file()
+    assert (output / "pools.csv").is_file()
+
+
 def test_attribution_display_options_do_not_change_structured_results(
     tmp_path: Path,
 ) -> None:
