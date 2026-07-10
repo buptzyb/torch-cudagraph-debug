@@ -47,6 +47,7 @@ class TensorProbe:
     ) -> None:
         validate_synchronize_target(synchronize)
         self.synchronize = synchronize
+        name = validate_observation_name(name)
         self.name = name
         self._probe_id = uuid.uuid4().hex
         self._closed = False

@@ -101,11 +101,41 @@ metrics:
 - `internal_fragmentation_bytes = active_bytes - requested_bytes` is allocator
   rounding inside active or awaiting-free blocks.
 
-Comparison and timeline text output always prints the four base byte metrics. A
-`diagnostics` line is intentionally sparse: comparison rows include only
-nonzero diagnostic deltas, and a timeline includes only nonzero absolute
-diagnostics at its first point or nonzero deltas afterward. JSON, CSV, and the
-in-memory result objects retain every diagnostic metric.
+Comparison and timeline text and HTML render one decomposition tree per device:
+
+```text
+device[0]
+  CUDA total: 44.39 GiB -> 44.39 GiB (0 B)
+  CUDA used: 434.19 MiB -> 540.19 MiB (+106.00 MiB)
+    residual: 434.19 MiB -> 522.19 MiB (+88.00 MiB)
+    allocator:
+      reserved: 0 B -> 18.00 MiB (+18.00 MiB)
+      allocated: ..., active: ..., requested: ...
+      diagnostics: ...
+      pool[0,0] (default)
+        reserved: ...
+        stream[336943840]
+          ...
+```
+
+`CUDA used = residual + allocator reserved`; allocator reserved is the sum of
+its pools, and each pool is the sum of its streams. The CUDA Runtime and
+allocator measurements are consecutive rather than atomic, so the residual can
+be positive or negative. Interior allocator, pool, and stream nodes put
+`reserved:` first, followed by the remaining core metrics and sparse structural
+diagnostics. Points without a CUDA Runtime sample attach `allocator:` directly
+The `diagnostics` line is intentionally sparse: text and HTML surface structural
+metrics only when they explain an absolute state or change; JSON and CSV retain
+all metrics.
+to the device.
+
+Cross-run device roots retain both endpoint indices, for example
+`device[0] -> device[1] [mapped]`. Match tags appear only when the identity
+decision carries information. The `depth` option (`"device"`, `"pool"`, or
+`"stream"`, default `"stream"`) truncates text and HTML. One bottom-up filter
+implements `include_unchanged=False`: a changed descendant keeps its complete
+parent path. CSV remains flat but keeps those parent context rows; JSON and
+in-memory results always remain complete.
 
 For a CUDA Graph private pool, inactive does not mean that the memory is
 available to the default pool or has been returned to the CUDA driver. Capture
@@ -150,18 +180,21 @@ print(comparison.to_text())
 
 `snapshot()` returns one complete allocator state. `probe.compare()` validates
 that both snapshots belong to that probe and are in increasing index order.
-Top-level `compare_snapshots(reference, candidate, pool_mapping=...)` also
-compares independent probes, which is useful for two independently
-instrumented workloads in one process (for example an eager baseline against
-a CUDA Graph run). Private pools stay unmatched across independent probes
+Top-level `compare_snapshots(reference, candidate, device_mapping=...,
+pool_mapping=...)` also compares independent probes, which is useful for two
+independently instrumented workloads. Device pairing is explicit first, then
+inferred from cross-device pool mappings, then matched by an unclaimed equal
+index. Default pools follow resolved device pairs; private pools stay unmatched
 unless `pool_mapping` explicitly pairs them, exactly like cross-run
 `compare_points`.
 
-Every pool and device/pool/stream row carries a bracketed match kind:
-`same_probe` and `same_run` preserve owner-local identity; `default` matches
-default pools across independent owners; `mapped` uses an explicit private-pool
-mapping; and `reference_only` or `candidate_only` marks an unmatched row.
-
+Structured pool and stream rows carry `MatchKind`; device rows carry
+Pool values are `same_probe`, `same_run`, `default`, `mapped`,
+`reference_only`, or `candidate_only`. Device values additionally distinguish
+`same_index` and `pool_mapping`.
+`DeviceMatchKind`. Text and HTML show tags only when the decision matters:
+`[mapped]`, `[pool_mapping]`, `[reference_only]`, or `[candidate_only]`.
+Owner-local and automatic same-index/default matches stay untagged.
 Same-probe comparisons may request marker-delimited allocator events and
 lifetimes when the application enabled allocator history before the interval.
 The embedded lifetime result reports `source_kind="probe"`; Run-based lifetime
@@ -366,20 +399,22 @@ CUDA-visible `free_bytes` and `total_bytes`;
 `used_bytes = total_bytes - free_bytes`. Comparisons and timelines also derive
 
 ```text
-unattributed_device_bytes = used_bytes - allocator_reserved_bytes
+cuda_allocator_residual_bytes = used_bytes - allocator_reserved_bytes
 ```
 
-This device-global value is not explained by the allocator snapshot of the
-recording process. It can include that process CUDA context, NCCL buffers,
-library workspaces, and raw `cudaMalloc`, plus every other process on a shared
-GPU. It is evidence of an attribution gap, not proof that the recording process
-made an external allocation. `allocator_reserved_bytes` remains process-local;
-device used, free, total, and unattributed values carry cross-process noise.
+The residual can be positive or negative. `_snapshot()` and `mem_get_info()` are
+consecutive, not atomic, and CUDA used includes the process context, NCCL
+buffers, library workspaces, raw `cudaMalloc`, every other process sharing the
+GPU, and concurrent changes between the two measurements. The value is evidence
+not explained by this process allocator's reserved state, not ownership
+attribution. `allocator_reserved_bytes` remains process-local; CUDA used, free,
+total, and residual values are device-global.
 
 Reports expose `delta_total_bytes` as well as used and free deltas. When
 CUDA-visible total capacity changes, used growth is not allocation growth alone:
 `delta_used_bytes = delta_total_bytes - delta_free_bytes`. A missing endpoint
-sample is reported as unavailable and produces no fabricated delta.
+sample renders as `n/a` and produces no fabricated delta; devices whose pools
+exist without samples still render their allocator subtree.
 
 Allocation cohort lifetimes are an optional focused same-run analysis, not a
 replacement for those modes. To answer "what was live here, and when did it
@@ -486,19 +521,26 @@ candidate = MemoryRun.load("candidate-rank0.tcgd-memory")
 end_gap = compare_points(
     baseline["forward_end"],
     candidate["capture_end"],
-    pool_mapping={MemoryPoolKey(0, (0, 1)): MemoryPoolKey(0, (0, 4))},
+    pool_mapping={MemoryPoolKey(0, (0, 1)): MemoryPoolKey(1, (0, 4))},
+    device_mapping={0: 1},  # Omit when both runs use the same device index.
     attribution=MemoryAttributionOptions(stacks=True),
 )
 ```
 
-Cross-run rules are intentionally conservative:
+Cross-run identity is conservative and deterministic:
 
-- Default pools on the same device match automatically.
-- Private pools remain reference-only/candidate-only even when raw IDs happen
-  to be equal, unless `pool_mapping` explicitly pairs `MemoryPoolKey` objects.
-- Stream IDs are process-local CUDA handles with no stable cross-run identity,
-  so pool/stream observations remain reference-only or candidate-only.
-- Address lifecycle and allocator events are unavailable across runs.
+1. An explicit one-to-one `device_mapping` pairs reference and candidate devices.
+2. A cross-device `pool_mapping` infers the same device pair when no explicit
+   mapping claimed either device.
+3. Remaining unclaimed devices with the same index pair automatically.
+4. Remaining devices are reference-only or candidate-only.
+5. Default pools pair within every resolved device pair. Private pools require
+   an explicit one-to-one `pool_mapping`; equal raw IDs are not identity.
+6. Stream IDs remain process-local, so stream observations are one-sided.
+7. Address lifecycle, allocator events, and lifetimes are unavailable across runs.
+
+An explicit device map and every pool map must agree; conflicting or many-to-one
+mappings raise `ValueError`.
 
 The optional four-point helper separates start-state differences from phase
 change:
@@ -521,10 +563,10 @@ end_gap = start_gap + candidate_change - baseline_change
 The same four-point equation is emitted for `all`, `default`, and `private`
 totals independently of private-pool ID matching.
 
-A private-pool mapping is validated against the union of each run's phase
-endpoints. A pool may therefore be absent at phase start or end; the missing
-endpoint contributes zero state, preserving phases that create or destroy the
-pool.
+Pool and device mappings are validated against the union of each run's phase
+endpoints. A pool or device may therefore be absent at phase start or end; the
+missing endpoint contributes zero allocator state. Every device phase row
+retains both `baseline_device_index` and `candidate_device_index`.
 
 ## Multi-Rank Groups
 
@@ -553,8 +595,9 @@ group_phase = compare_run_group_phases(
     candidate_start="capture_start",
     candidate_end="capture_end",
     pool_mappings={
-        0: {MemoryPoolKey(0, (0, 1)): MemoryPoolKey(0, (0, 4))},
+        0: {MemoryPoolKey(0, (0, 1)): MemoryPoolKey(1, (0, 4))},
     },
+    device_mappings={0: {0: 1}},
 )
 group_phase.write("reports/group-phase")
 ```
@@ -574,7 +617,8 @@ metric, its minimum and maximum rank, and the spread. Group-phase text reports
 the minimum, maximum, owning ranks, and spread for `end_gap` and
 `change_gap = candidate_change - baseline_change` for every phase metric. Its
 JSON and CSV also retain cross-rank extrema for all five equation components.
-`pool_mappings` is keyed by rank because private-pool identity is rank-local.
+`pool_mappings` and `device_mappings` are keyed by rank because allocator and
+CUDA device identity is resolved independently for each rank.
 Group loading defaults to `cache_snapshots=False`; use `True` only when repeated
 allocator-state or event-payload access is worth the additional host memory.
 
@@ -588,10 +632,14 @@ provide:
 - `to_html(include_unchanged=True, limit=None, stack_depth=None)`
 - `write(output_dir, include_unchanged=True, limit=None, stack_depth=None, overwrite=False)`
 
+State comparisons and timelines additionally accept `depth` on `to_text`,
+`to_html`, and `write` (`"device"`, `"pool"`, or `"stream"`, default
+`"stream"`) to truncate the rendered tree; CSV and JSON stay complete. The
+`tcgd-memory timeline` and `compare-points` commands expose it as `--depth`.
+
 Lifetime analyses have no unchanged-row filter and provide `to_text(limit=None,
 stack_depth=None)`, `to_dict()`, `to_html(limit=None, stack_depth=None)`, and
 `write(output_dir, limit=None, stack_depth=None, overwrite=False)`. Run-group
-summaries provide the corresponding parameter-free render methods plus
 `overwrite` on `write()`.
 
 Allocation-stack and allocator-event identity always uses complete
@@ -693,8 +741,9 @@ tcgd-memory compare-run-group-phases baseline candidate \
 ```
 
 Omitting the candidate bundle from `compare-points` compares two ordered points
-in the reference run; `--pool-map` is valid only across independent runs.
-
+in the reference run; `--pool-map` and `--device-map` are valid only across
+independent runs. Group phases use rank-qualified forms such as
+`--device-map 3@0=1`.
 `timeline`, `compare-points`, `compare-phases`, and
 `compare-run-group-phases` accept `--stacks`, `--events`, `--lifetimes`,
 `--stack-depth`, `--limit`, and `--only-changed`. Lifetime analysis always uses

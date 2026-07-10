@@ -568,6 +568,8 @@ class MemoryRun:
                 point._load_event_evidence()
 
     def point(self, ref: str | int | MemoryPoint) -> MemoryPoint:
+        if isinstance(ref, bool):
+            raise TypeError("memory point reference must not be a boolean")
         if isinstance(ref, MemoryPoint):
             if ref.run_id != self.run_id:
                 raise MemoryOwnershipError(

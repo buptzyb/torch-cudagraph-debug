@@ -372,6 +372,8 @@ def test_cross_run_private_pool_mapping_is_explicit_and_one_to_one() -> None:
     )
     assert all(item.match == "mapped" for item in comparison.pool_comparisons)
     assert [item.delta.active_bytes for item in comparison.pool_comparisons] == [5, 5]
+    (device,) = comparison.device_comparisons
+    assert device.match == "same_index"
 
     with pytest.raises(ValueError, match="candidate.*more than once"):
         compare_points(
@@ -621,7 +623,7 @@ def test_timeline_reports_absolute_state_and_zero_deltas() -> None:
     assert "steady" in timeline.to_text(include_unchanged=True)
     compact = timeline.to_text(include_unchanged=False)
     assert "steady" not in compact
-    assert "allocated=10 B (delta +0 B)" not in compact
+    assert "allocated: 10 B (0 B)" not in compact
 
 
 def test_phase_comparison_preserves_four_point_identity() -> None:

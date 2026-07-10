@@ -78,7 +78,7 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
     assert len(report.rank_points) == 12
     assert len(report.rank_devices) == 4
     assert report.rank_devices[-1].device_index == 1
-    assert report.rank_devices[-1].unattributed_device_bytes == 25
+    assert report.rank_devices[-1].cuda_allocator_residual_bytes == 25
     text = report.to_text()
     assert "not summed across ranks" in text
     assert group[0]["end"].allocator_state()["segments"]
@@ -377,3 +377,66 @@ def test_group_provenance_compares_multi_device_properties_not_uuid() -> None:
         )
     )
     assert any("provenance differs" in warning for warning in different.warnings)
+
+
+def test_group_summary_qualifies_point_warnings() -> None:
+    run = _distributed_run(
+        (10, 20),
+        name="run",
+        rank=0,
+        group_id="job",
+        world_size=1,
+    )
+    run = replace(
+        run,
+        points=(
+            replace(run.points[0], warnings=("sample failed",)),
+            run.points[1],
+        ),
+    )
+    summary = MemoryRunGroup.from_runs((run,)).summary()
+    assert summary.warnings == ("rank 0 point [0] start: sample failed",)
+
+
+def test_group_phase_accepts_rank_specific_device_mappings() -> None:
+    baseline_run = make_run(
+        [
+            snapshot(segment(active=10, device=0)),
+            snapshot(segment(active=20, device=0)),
+        ],
+        name="run",
+        rank=0,
+        group_id="baseline",
+        world_size=1,
+        labels=("start", "end"),
+        device_memory=[{0: (90, 100)}, {0: (80, 100)}],
+    )
+    candidate_run = make_run(
+        [
+            snapshot(segment(active=10, device=1)),
+            snapshot(segment(active=30, device=1)),
+        ],
+        name="run",
+        rank=0,
+        group_id="candidate",
+        world_size=1,
+        labels=("start", "end"),
+        device_memory=[{1: (70, 100)}, {1: (50, 100)}],
+    )
+    report = compare_run_group_phases(
+        MemoryRunGroup.from_runs((baseline_run,)),
+        MemoryRunGroup.from_runs((candidate_run,)),
+        baseline_start="start",
+        baseline_end="end",
+        candidate_start="start",
+        candidate_end="end",
+        device_mappings={0: {0: 1}},
+    )
+    assert report.rank_device_decomposition
+    assert {
+        (
+            item.decomposition.baseline_device_index,
+            item.decomposition.candidate_device_index,
+        )
+        for item in report.rank_device_decomposition
+    } == {(0, 1)}

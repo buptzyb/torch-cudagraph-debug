@@ -75,7 +75,7 @@ class MemoryRankDevicePointState:
     allocator_reserved_bytes: int
 
     @property
-    def unattributed_device_bytes(self) -> int:
+    def cuda_allocator_residual_bytes(self) -> int:
         return self.sample.used_bytes - self.allocator_reserved_bytes
 
     def to_dict(self) -> dict[str, object]:
@@ -87,7 +87,7 @@ class MemoryRankDevicePointState:
             "device_index": self.device_index,
             **self.sample.to_dict(),
             "allocator_reserved_bytes": self.allocator_reserved_bytes,
-            "unattributed_device_bytes": self.unattributed_device_bytes,
+            "cuda_allocator_residual_bytes": self.cuda_allocator_residual_bytes,
         }
 
 
@@ -298,12 +298,18 @@ class MemoryRunGroup:
         """Summarize point states and cross-rank skew without summing GPUs."""
 
         rank_rows = _rank_point_rows(self)
+        point_warnings = [
+            f"rank {rank} point [{point.index}] {point.label}: {warning}"
+            for rank, run in self.runs.items()
+            for point in run.points
+            for warning in point.warnings
+        ]
         return MemoryRunGroupSummary(
             run_group=self,
             rank_points=rank_rows,
             rank_devices=_rank_device_point_rows(self),
             point_aggregates=_aggregate_point_rows(rank_rows),
-            warnings=self.warnings,
+            warnings=tuple(dict.fromkeys((*self.warnings, *point_warnings))),
         )
 
     @classmethod
@@ -482,6 +488,7 @@ def compare_run_group_phases(
     candidate_start: str | int,
     candidate_end: str | int,
     pool_mappings: Mapping[int, Mapping[MemoryPoolKey, MemoryPoolKey]] | None = None,
+    device_mappings: Mapping[int, Mapping[int, int]] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryRunGroupPhaseComparison:
     """Compare four-point phase equations rank by rank and report skew."""
@@ -498,6 +505,12 @@ def compare_run_group_phases(
             + ", ".join(str(rank) for rank in sorted(unknown_mapping_ranks))
         )
 
+    unknown_device_mapping_ranks = set(device_mappings or {}) - set(common_ranks)
+    if unknown_device_mapping_ranks:
+        raise ValueError(
+            "device_mappings contains ranks outside the comparison: "
+            + ", ".join(str(rank) for rank in sorted(unknown_device_mapping_ranks))
+        )
     warnings = [
         *(f"baseline: {warning}" for warning in baseline.warnings),
         *(f"candidate: {warning}" for warning in candidate.warnings),
@@ -525,6 +538,7 @@ def compare_run_group_phases(
             baseline[rank].between(baseline_start, baseline_end),
             candidate[rank].between(candidate_start, candidate_end),
             pool_mapping=(pool_mappings or {}).get(rank),
+            device_mapping=(device_mappings or {}).get(rank),
             attribution=options,
         )
         rank_comparisons[rank] = phase

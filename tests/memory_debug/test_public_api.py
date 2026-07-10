@@ -30,6 +30,7 @@ def test_memory_facade_exports_public_result_types() -> None:
         "CohortSizeBucket",
         "CohortSizeOutcome",
         "DeviceMemoryMetric",
+        "DeviceMatchKind",
         "DeviceMemorySample",
         "MatchKind",
         "MemoryAllocationLifetimeAnalysis",

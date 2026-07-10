@@ -416,11 +416,16 @@ def test_real_device_memory_sampling_tracks_allocator_state() -> None:
 
     comparison = run.compare("baseline", "grown")
     (row,) = [
-        item for item in comparison.device_comparisons if item.device_index == device
+        item
+        for item in comparison.device_comparisons
+        if item.reference_device_index == item.candidate_device_index == device
     ]
     assert row.delta_used_bytes is not None
     assert row.delta_total_bytes is not None
     # Our own allocator growth is deterministic even on a shared GPU; the
     # device-wide used delta is not, so only the reserved delta is asserted.
     assert row.delta_allocator_reserved_bytes >= payload.numel()
-    assert "devices (device-wide, includes other processes):" in comparison.to_text()
+    text = comparison.to_text()
+    assert "CUDA scope: device-wide, includes other processes" in text
+    assert f"device[{device}]" in text
+    assert "residual:" in text

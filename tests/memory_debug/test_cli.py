@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import torch_cudagraph_debug
+from torch_cudagraph_debug.memory_debug import MemoryRecorder
 from torch_cudagraph_debug.memory_debug.cli import build_parser, main
 
 from ._helpers import event, make_history_run, make_run, segment, snapshot
@@ -338,7 +339,8 @@ def test_cli_reports_include_device_memory_sections(tmp_path: Path) -> None:
     assert main(["timeline", str(bundle), "--output", str(timeline_output)]) == 0
     assert (timeline_output / "devices.csv").exists()
     timeline_text = (timeline_output / "report.txt").read_text(encoding="utf-8")
-    assert "device[0] (device-wide) CUDA used=" in timeline_text
+    assert "device[0]" in timeline_text
+    assert "CUDA used: 40 B (+30 B)" in timeline_text
 
     comparison_output = tmp_path / "comparison"
     assert (
@@ -357,7 +359,8 @@ def test_cli_reports_include_device_memory_sections(tmp_path: Path) -> None:
         == 0
     )
     comparison_text = (comparison_output / "report.txt").read_text(encoding="utf-8")
-    assert "devices (device-wide, includes other processes):" in comparison_text
+    assert "CUDA scope: device-wide, includes other processes" in comparison_text
+    assert "residual: 0 B -> 10 B (+10 B)" in comparison_text
     assert (comparison_output / "devices.csv").exists()
 
 
@@ -374,3 +377,84 @@ def test_lifetime_cli_does_not_expose_irrelevant_common_flags() -> None:
                     flag,
                 ]
             )
+
+
+def test_cli_device_mapping_syntax(tmp_path: Path) -> None:
+    reference_path = tmp_path / "reference.tcgd-memory"
+    candidate_path = tmp_path / "candidate.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=10, device=0))],
+        bundle_dir=reference_path,
+        labels=("point",),
+    )
+    make_run(
+        [snapshot(segment(active=20, device=1))],
+        bundle_dir=candidate_path,
+        labels=("point",),
+    )
+    output = tmp_path / "mapped-device"
+
+    assert (
+        main(
+            [
+                "compare-points",
+                str(reference_path),
+                str(candidate_path),
+                "--reference-point",
+                "point",
+                "--candidate-point",
+                "point",
+                "--device-map",
+                "0=1",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    (device,) = payload["device_comparisons"]
+    assert device["reference_device_index"] == 0
+    assert device["candidate_device_index"] == 1
+    assert device["match"] == "mapped"
+
+
+def test_cli_summary_prints_point_warnings(tmp_path: Path, capsys) -> None:
+    bundle = tmp_path / "warning.tcgd-memory"
+
+    def fail_device_sample(device: int) -> tuple[int, int]:
+        raise RuntimeError(f"device {device} unavailable")
+
+    recorder = MemoryRecorder._from_snapshot_provider(
+        lambda marker: snapshot(segment(active=10)),
+        device_memory_provider=fail_device_sample,
+        bundle_dir=bundle,
+    )
+    recorder.record_point("point")
+    recorder.finish()
+
+    assert main(["summary", str(bundle)]) == 0
+    output = capsys.readouterr().out
+    assert "[0] point:" in output
+    assert "warning: could not sample device memory for device 0" in output
+
+
+def test_cli_parser_accepts_rank_device_mapping() -> None:
+    args = build_parser().parse_args(
+        [
+            "compare-run-group-phases",
+            "baseline",
+            "candidate",
+            "--baseline-start",
+            "start",
+            "--baseline-end",
+            "end",
+            "--candidate-start",
+            "start",
+            "--candidate-end",
+            "end",
+            "--device-map",
+            "3@0=1",
+        ]
+    )
+    assert args.device_map == ["3@0=1"]

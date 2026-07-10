@@ -101,7 +101,7 @@ MAJOR_WORKFLOW_COVERAGE = {
     ),
     "memory_debug/probe/device_memory.py": (
         "device_memory",
-        "delta_unattributed_device_bytes",
+        "delta_cuda_allocator_residual_bytes",
         "delta_total_bytes",
         "delta_allocator_reserved_bytes",
         "cudaMalloc(",
@@ -222,11 +222,14 @@ def test_root_readme_memory_output_uses_device_aware_identities() -> None:
         "Read the report top-down:", 1
     )[0]
 
-    assert "device[0]/pool[0,0]" in output
-    assert "device[0]/pool[1,0]" in output
-    assert "device/pool/stream observations:" in output
+    assert "  device[0]\n" in output
+    assert "pool[0,0] (default)" in output
+    assert "pool[1,0] (private)" in output
+    assert "stream[" in output
+    assert "CUDA scope: device-wide, includes other processes" in output
+    assert "residual:" in output
     assert "diagnostics:" in output
-    assert "\n    pool[" not in output
+    assert "(delta " not in output
     assert "each device's `pool[0,0]`" in memory_section
 
 

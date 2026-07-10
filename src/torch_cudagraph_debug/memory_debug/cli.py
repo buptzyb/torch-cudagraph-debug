@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     timeline.add_argument("bundle")
     _add_attribution_options(timeline)
+    _add_depth_option(timeline)
     lifetime_analysis = commands.add_parser(
         "allocation-lifetimes",
         help="Trace active allocation cohorts across one memory run",
@@ -80,7 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="REFERENCE=CANDIDATE",
         help="Explicit private-pool mapping, for example 0:0,1=0:0,2",
     )
+    _add_device_map_option(compare)
     _add_attribution_options(compare)
+    _add_depth_option(compare)
 
     phases = commands.add_parser(
         "compare-phases",
@@ -99,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BASELINE=CANDIDATE",
         help="Explicit private-pool mapping, for example 0:0,1=0:0,2",
     )
+    _add_device_map_option(phases)
     _add_attribution_options(phases)
 
     group_summary = commands.add_parser(
@@ -125,6 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="RANK@BASELINE=CANDIDATE",
         help="Per-rank private-pool mapping, for example 0@0:0,1=0:0,2",
     )
+    _add_device_map_option(group_phases, ranked=True)
     _add_attribution_options(group_phases)
     return parser
 
@@ -163,9 +168,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             reference = _load_run(args.reference_bundle)
             candidate = _load_run(args.candidate_bundle or args.reference_bundle)
             pool_mapping = _parse_pool_mappings(args.pool_map)
+            device_mapping = _parse_device_mappings(args.device_map)
             if reference.run_id == candidate.run_id:
-                if pool_mapping:
-                    raise ValueError("--pool-map is only valid across independent runs")
+                if pool_mapping or device_mapping:
+                    raise ValueError(
+                        "--pool-map and --device-map are only valid across independent runs"
+                    )
                 result = reference.compare(
                     args.reference_point,
                     args.candidate_point,
@@ -176,6 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     reference.point(args.reference_point),
                     candidate.point(args.candidate_point),
                     pool_mapping=pool_mapping,
+                    device_mapping=device_mapping,
                     attribution=options,
                 )
         elif args.command == "compare-phases":
@@ -186,6 +195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 baseline.between(args.baseline_start, args.baseline_end),
                 candidate.between(args.candidate_start, args.candidate_end),
                 pool_mapping=_parse_pool_mappings(args.pool_map),
+                device_mapping=_parse_device_mappings(args.device_map),
                 attribution=options,
             )
         elif args.command == "group-summary":
@@ -202,16 +212,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_start=args.candidate_start,
                 candidate_end=args.candidate_end,
                 pool_mappings=_parse_rank_pool_mappings(args.pool_map),
+                device_mappings=_parse_rank_device_mappings(args.device_map),
                 attribution=options,
             )
         else:
             raise ValueError(f"unknown command {args.command!r}")
 
         include_unchanged = not getattr(args, "only_changed", False)
+        display_kwargs: dict[str, object] = {"include_unchanged": include_unchanged}
+        depth = getattr(args, "depth", None)
+        if depth is not None:
+            display_kwargs["depth"] = depth
         print(
             result.to_text()
             if args.command in {"allocation-lifetimes", "group-summary"}
-            else result.to_text(include_unchanged=include_unchanged)
+            else result.to_text(**display_kwargs)
         )
         if args.output is not None:
             if args.command in {"allocation-lifetimes", "group-summary"}:
@@ -219,8 +234,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 paths = result.write(
                     args.output,
-                    include_unchanged=include_unchanged,
                     overwrite=args.overwrite,
+                    **display_kwargs,
                 )
             for kind, path in paths.items():
                 print(f"{kind}: {path.resolve()}")
@@ -253,6 +268,9 @@ def _summary_text(run: MemoryRun) -> str:
             f"active={format_bytes(total.active_bytes)} "
             f"requested={format_bytes(total.requested_bytes)}"
         )
+        lines.extend(
+            f"    warning: {warning}" for warning in dict.fromkeys(point.warnings)
+        )
     return "\n".join(lines)
 
 
@@ -280,6 +298,31 @@ def _add_attribution_options(parser: argparse.ArgumentParser) -> None:
         "--only-changed",
         action="store_true",
         help="Omit unchanged allocator, pool, and device/pool/stream rows from text, HTML, and CSV",
+    )
+
+
+def _add_device_map_option(
+    parser: argparse.ArgumentParser, *, ranked: bool = False
+) -> None:
+    parser.add_argument(
+        "--device-map",
+        action="append",
+        default=[],
+        metavar=("RANK@REFERENCE=CANDIDATE" if ranked else "REFERENCE=CANDIDATE"),
+        help=(
+            "Per-rank CUDA device mapping, for example 0@0=1"
+            if ranked
+            else "CUDA device mapping, for example 0=1"
+        ),
+    )
+
+
+def _add_depth_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--depth",
+        choices=("device", "pool", "stream"),
+        default="stream",
+        help="Deepest tree level rendered in text and HTML (default: stream)",
     )
 
 
@@ -336,6 +379,55 @@ def _parse_rank_pool_mappings(
             if reference in rank_mappings:
                 raise ValueError(
                     f"pool {reference.label} is mapped more than once on rank {rank}"
+                )
+            rank_mappings[reference] = candidate
+    return result
+
+
+def _parse_device_mappings(values: Sequence[str]) -> Mapping[int, int]:
+    result: dict[int, int] = {}
+    for value in values:
+        if value.count("=") != 1:
+            raise ValueError(
+                f"invalid device mapping {value!r}; expected REFERENCE=CANDIDATE"
+            )
+        reference_text, candidate_text = value.split("=", 1)
+        try:
+            reference = int(reference_text)
+            candidate = int(candidate_text)
+        except ValueError as exc:
+            raise ValueError(f"invalid device mapping {value!r}") from exc
+        if reference < 0 or candidate < 0:
+            raise ValueError("device mapping indices must be non-negative")
+        if reference in result:
+            raise ValueError(f"device {reference} is mapped more than once")
+        result[reference] = candidate
+    return result
+
+
+def _parse_rank_device_mappings(
+    values: Sequence[str],
+) -> Mapping[int, Mapping[int, int]]:
+    result: dict[int, dict[int, int]] = {}
+    for value in values:
+        rank_text, separator, mapping_text = value.partition("@")
+        if not separator or not rank_text or not mapping_text:
+            raise ValueError(
+                f"invalid rank device mapping {value!r}; "
+                "expected RANK@REFERENCE=CANDIDATE"
+            )
+        try:
+            rank = int(rank_text)
+        except ValueError as exc:
+            raise ValueError(f"invalid rank in device mapping {value!r}") from exc
+        if rank < 0:
+            raise ValueError("device mapping rank must be non-negative")
+        parsed = _parse_device_mappings((mapping_text,))
+        rank_mappings = result.setdefault(rank, {})
+        for reference, candidate in parsed.items():
+            if reference in rank_mappings:
+                raise ValueError(
+                    f"device {reference} is mapped more than once on rank {rank}"
                 )
             rank_mappings[reference] = candidate
     return result

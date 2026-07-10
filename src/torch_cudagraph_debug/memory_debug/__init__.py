@@ -15,6 +15,7 @@ from .attribution import (
 )
 from .comparison import compare_phases, compare_points, compare_snapshots
 from .comparison_models import (
+    DeviceMatchKind,
     DeviceMemoryMetric,
     MatchKind,
     MemoryAllocatorScopeComparison,
@@ -111,6 +112,7 @@ __all__ = [
     "CohortPointState",
     "CohortSizeBucket",
     "CohortSizeOutcome",
+    "DeviceMatchKind",
     "DeviceMemoryMetric",
     "DeviceMemorySample",
     "MatchKind",

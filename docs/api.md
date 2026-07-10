@@ -52,7 +52,7 @@ Memory facade:
   `MemoryObservation`, `MemoryObservationKey`, `MemoryPoolKey`,
   `MemoryLifetimeSelection`, `PoolId`, and `StreamId`.
 - State and policies: `AllocatorScope`, `MemoryStats`, `MemoryStatsDelta`,
-  `MemoryStatMetric`, `DeviceMemoryMetric`, `DeviceMemorySample`,
+  `MemoryStatMetric`, `DeviceMemoryMetric`, `DeviceMatchKind`, `DeviceMemorySample`,
   `MemoryDisplayOptions`, `MemoryAttributionOptions`, `MemoryLifetimeOptions`,
   `MemoryEvidenceStatus`, `MemoryAttributionStatus`, `MatchKind`, and
   `PhaseMetric`.
@@ -829,14 +829,14 @@ compare_snapshots(
     candidate: MemoryProbeSnapshot,
     *,
     pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
+    device_mapping: Mapping[int, int] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemorySnapshotComparison
 ```
 
-Same-Probe comparison can use marker-delimited history; independent probes
-follow the conservative cross-run matching rules (see Cross-Run
-Comparison), support state and stacks, accept `pool_mapping` for explicit
-private-pool pairing, and reject events and lifetimes.
+Same-Probe comparison can use marker-delimited history. Independent probes
+follow the conservative cross-run matching rules, support state and stacks,
+accept `device_mapping` and `pool_mapping`, and reject events and lifetimes.
 
 `allocator_state()` returns the point-in-time allocator envelope without cumulative
 `device_traces`; `raw_snapshot()` remains available on Probe snapshots for
@@ -976,8 +976,11 @@ metrics are derived:
 `inactive_bytes = reserved_bytes - active_bytes`, and
 `internal_fragmentation_bytes = active_bytes - requested_bytes`. Allocator states
 and nested metadata are recursively frozen; `advanced.mutable_snapshot(point)`
-returns an editable deep copy. Text comparisons always show the four base byte
-metrics but list only nonzero diagnostic deltas. Timeline text lists nonzero
+returns an editable deep copy. Comparison and timeline text renders one
+decomposition tree per device (`device -> CUDA total/used -> residual +
+allocator -> pools -> streams`); interior nodes lead with `reserved:` — their
+share of the parent — followed by the remaining base metrics on one packed
+line, and list only nonzero diagnostic deltas. Timeline text lists nonzero
 diagnostics at the first point and nonzero diagnostic deltas afterward.
 Structured results retain every metric.
 
@@ -1033,6 +1036,10 @@ owner-local identity, `default` for independently collected default pools,
 `mapped` for an explicit private-pool mapping, and `reference_only` or
 `candidate_only` for unmatched rows.
 
+`DeviceMatchKind` uses `same_probe` or `same_run` for owner-local identity,
+`mapped` for explicit `device_mapping`, `pool_mapping` for an inferred device
+pair, `same_index` for the unclaimed equal-index fallback, and the same two
+one-sided values.
 Allocator events and allocation lifetimes are separate optional attribution
 results controlled by `MemoryAttributionOptions`.
 
@@ -1213,6 +1220,7 @@ compare_points(
     candidate: MemoryPoint,
     *,
     pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
+    device_mapping: Mapping[int, int] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryPointComparison
 ```
@@ -1222,16 +1230,18 @@ comparison uses compact manifest state and never reads allocator-state files.
 Cross-run
 matching is conservative:
 
-1. Default `(0,0)` pools match automatically when present in both runs.
-2. Private pools match only through a one-to-one `pool_mapping`; every mapped
-   reference and candidate must exist at the selected points.
-3. Identical raw private IDs are still unmatched without that mapping.
-4. Stream IDs are process-local CUDA handles with no stable cross-run identity;
-   every device/pool/stream observation is reference-only or candidate-only.
-5. Address lifecycle is disabled.
-6. `events=True` is rejected.
-7. `lifetimes=True` is rejected.
+1. Explicit `device_mapping` entries pair devices first and must be one-to-one.
+2. Cross-device `pool_mapping` entries infer an unclaimed device pair.
+3. Remaining unclaimed same-index devices pair automatically.
+4. Remaining devices are reference-only or candidate-only.
+5. Default pools pair within every resolved device pair; private pools require
+   explicit one-to-one `pool_mapping` entries.
+6. Stream IDs remain process-local and stream observations stay one-sided.
+7. Address lifecycle is disabled; events and lifetimes are rejected.
 8. Stack deltas are computed only for matched pools.
+
+Device and pool mappings must agree. Conflicting pairs, missing endpoints, and
+many-to-one mappings raise `ValueError`.
 
 Every comparison separately exposes `all`, `default`, and `private` totals.
 They include unmatched private pools and therefore remain complete even when
@@ -1245,6 +1255,7 @@ compare_phases(
     candidate: MemoryRange,
     *,
     pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
+    device_mapping: Mapping[int, int] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryPhaseComparison
 ```
@@ -1267,10 +1278,10 @@ end_gap = start_gap + candidate_change - baseline_change
 `expandable_inactive_bytes`. Segment and block counts are point diagnostics,
 not phase metrics.
 
-A private-pool mapping is validated against the union of each run's phase
-endpoints. The mapped pool may be absent at one endpoint; that endpoint is
-represented by zero state, so phases that create or destroy a pool still retain
-a valid four-point equation.
+Pool and device mappings are validated against the union of each run's phase
+endpoints. A mapped endpoint may be absent at phase start or end; its allocator
+state is zero. Device equations require all four CUDA Runtime samples and retain
+both `baseline_device_index` and `candidate_device_index`.
 
 Event attribution applies to the two same-run change comparisons. Start/end
 cross-run comparisons never compare events.
@@ -1299,6 +1310,7 @@ compare_run_group_phases(
     candidate_start: str | int,
     candidate_end: str | int,
     pool_mappings: Mapping[int, Mapping[MemoryPoolKey, MemoryPoolKey]] | None = None,
+    device_mappings: Mapping[int, Mapping[int, int]] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryRunGroupPhaseComparison
 ```
@@ -1351,24 +1363,28 @@ reports:
   `MemoryObservationComparison` carry reference, candidate, and delta
   `MemoryStats`; pool and observation rows also carry `MatchKind` and optional
   `MemoryLifecycleDelta`.
-- `MemoryDeviceComparison` carries one device reference/candidate
-  `DeviceMemorySample` pair, either of which may be unavailable. It reports
-  used, free, total, allocator reserved for the recording process, and
-  `unattributed_device_bytes = used_bytes - allocator_reserved_bytes`, with
-  deltas including `delta_total_bytes`. The unattributed value is device-global
-  evidence not explained by the allocator of the source process; it is not
-  process attribution.
+- `MemoryDeviceComparison` carries `reference_device_index`,
+  `candidate_device_index`, and `match`, plus each side's optional
+  `DeviceMemorySample` and allocator rollup `MemoryStats`. Either index may be
+  absent only for a one-sided row. It reports used, free, total, allocator
+  reserved, and signed
+  `cuda_allocator_residual_bytes = used_bytes - allocator_reserved_bytes`.
+  The residual compares consecutive, non-atomic device-global and allocator
+  measurements; positive and negative values are both valid and neither is
+  ownership attribution.
 - `MemoryAllocatorScopeTimelineEntry`, `MemoryPoolTimelineEntry`, and
   `MemoryObservationTimelineEntry` carry point identity, row identity, absolute
   stats, and the optional previous-point delta.
-- `MemoryDeviceTimelineEntry` carries the same device metrics and leaves every
-  delta `None` when the immediately preceding point lacks that sample.
+- `MemoryDeviceTimelineEntry` carries the same device node per point: an
+  optional sample, the device allocator rollup `stats` with its previous-point
+  `delta`, and sample deltas that stay `None` together when either endpoint
+  lacks the sample.
 - `MemoryPhaseComponents` carries the five terms of one phase equation.
-  `MemoryAllocatorScopePhaseDecomposition`, `MemoryPoolPhaseDecomposition`, and
-  `MemoryDevicePhaseDecomposition` add allocator-scope, mapped-pool, or device
-  identity. `MemoryRankDevicePointState` and
-  `MemoryRankDevicePhaseDecomposition` retain those values per rank without
-  summing or aggregating device-global memory across ranks.
+  `MemoryAllocatorScopePhaseDecomposition` adds a scope,
+  `MemoryPoolPhaseDecomposition` adds both mapped pool keys, and
+  `MemoryDevicePhaseDecomposition` adds `baseline_device_index` and
+  `candidate_device_index`. Rank wrappers retain those rows without summing or
+  aggregating device-global memory across ranks.
 - `AllocationStackCoverage`, `AllocationStackSummary`, and
   `AllocationStackDelta` retain coverage totals or stack-keyed active size,
   requested size, count, pool, and optional stream evidence.
@@ -1410,10 +1426,17 @@ result.write(
 ) -> dict[str, Path]
 ```
 
-`include_unchanged=False` filters zero-change allocator-state rows from
-text, HTML, and CSV. Attribution rows are always complete in memory, `to_dict()`,
-JSON, and CSV. `limit` and `stack_depth` restrict only their text/HTML
-presentation. Timeline, phase, and group-phase reports apply the limit
+`include_unchanged=False` prunes the rendered tree bottom-up: unchanged leaf
+lines drop, and a node survives only when it or any descendant changed
+(offsetting churn keeps the parent as path context). Attribution rows are
+always complete in memory, `to_dict()`, JSON, and CSV. `limit` and
+`stack_depth` restrict only their text/HTML presentation. State comparisons
+and timelines additionally accept `depth: Literal["device", "pool", "stream"]`
+on `to_text`, `to_html`, and `write`; the default is `"stream"`. It truncates
+text and HTML only. CSV uses the same bottom-up selection but stays flat and
+keeps parent context rows when a descendant changed. JSON is always complete,
+and an invalid depth raises before `write()` creates the output directory.
+Timeline, phase, and group-phase reports apply attribution display limits
 independently to each interval or component and aggregate component warnings at
 the top level.
 
@@ -1444,11 +1467,13 @@ CSV flattens these as `reference_allocated_bytes`,
 
 Every `write()` creates `report.txt`, `report.json`, and `report.html`.
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
-`observations.csv`. State comparisons, timelines, and phase comparisons with
-CUDA Runtime samples add `devices.csv`; phase reports additionally add
-`device_decomposition.csv`. Optional attribution and lifetime CSVs remain
-unchanged. Group summaries, group-phase comparisons, and standalone lifetime
-analyses create `report.*` plus their domain-specific CSV sets.
+`observations.csv`. State comparisons and timelines add `devices.csv`
+whenever any device carries a sample or pools (sample columns stay empty for
+unsampled devices); phase comparisons with CUDA Runtime samples add
+`devices.csv` and `device_decomposition.csv`. Optional attribution and
+lifetime CSVs remain unchanged. Group summaries, group-phase comparisons, and
+standalone lifetime analyses create `report.*` plus their domain-specific CSV
+sets.
 
 `MemoryAllocationLifetimeAnalysis` and pool-oriented results that embed one
 create `cohorts.csv`, `cohort_points.csv`, `size_histograms.csv`, and
@@ -1529,12 +1554,14 @@ observation and pool counts plus allocator-wide allocated, reserved, active,
 and requested totals.
 
 Omitting `CANDIDATE_BUNDLE` from `compare-points` compares two ordered points
-in the reference run; `--pool-map` is valid only across independent runs.
-For group phases, repeat rank-qualified `--pool-map` for each private-pool pair.
-
+in the reference run; `--pool-map` and `--device-map` are valid only across
+independent runs. Group phases accept rank-qualified forms such as
+`--pool-map 3@0:0,1=1:0,4` and `--device-map 3@0=1`.
 `timeline`, `compare-points`, `compare-phases`, and
 `compare-run-group-phases` accept `--stacks`, `--events`, `--lifetimes`,
-`--stack-depth`, `--limit`, and `--only-changed`. Lifetime analysis always uses
+`--stack-depth`, `--limit`, and `--only-changed`; `timeline` and
+`compare-points` additionally accept `--depth {device,pool,stream}` to
+truncate the rendered tree. Lifetime analysis always uses
 complete event history internally; `--events` independently controls whether an
 allocator-event table is included. `allocation-lifetimes` accepts `--stack-depth` and `--limit` and
 always uses event history. `summary` writes to standard output.

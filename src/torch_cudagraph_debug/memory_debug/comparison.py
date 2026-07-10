@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ._pool_identity import DEFAULT_POOL_ID, MemoryPoolKey
 from .aggregation import (
@@ -27,7 +27,9 @@ from .attribution import (
 from .comparison_models import (
     DEVICE_MEMORY_METRICS,
     PHASE_METRICS,
+    DeviceMatchKind,
     MemoryAllocatorScopePhaseDecomposition,
+    MemoryDeviceComparison,
     MemoryDevicePhaseDecomposition,
     MemoryLifecycleDelta,
     MemoryObservationComparison,
@@ -120,6 +122,7 @@ def compare_snapshots(
     candidate: MemoryProbeSnapshot,
     *,
     pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
+    device_mapping: Mapping[int, int] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemorySnapshotComparison:
     """Compare Probe snapshots using same- or cross-Probe semantics."""
@@ -128,8 +131,10 @@ def compare_snapshots(
     same_probe = reference.probe_id == candidate.probe_id
     if same_probe and candidate.snapshot_index <= reference.snapshot_index:
         raise ValueError("candidate snapshot must follow reference snapshot")
-    if same_probe and pool_mapping is not None:
-        raise ValueError("pool_mapping is only valid for cross-Probe comparison")
+    if same_probe and (pool_mapping is not None or device_mapping is not None):
+        raise ValueError(
+            "pool_mapping and device_mapping are only valid for cross-Probe comparison"
+        )
 
     if same_probe:
         interval_views = _load_interval_views((reference, candidate), options)
@@ -146,6 +151,7 @@ def compare_snapshots(
             reference,
             candidate,
             pool_mapping=pool_mapping,
+            device_mapping=device_mapping,
             options=options,
             independent_kind="probes",
         )
@@ -158,6 +164,7 @@ def compare_points(
     candidate: MemoryPoint,
     *,
     pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
+    device_mapping: Mapping[int, int] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryPointComparison:
     """Compare points from independent runs without address/event identity."""
@@ -171,6 +178,7 @@ def compare_points(
         reference,
         candidate,
         pool_mapping=pool_mapping,
+        device_mapping=device_mapping,
         options=attribution or MemoryAttributionOptions(),
     )
     assert isinstance(comparison, MemoryPointComparison)
@@ -182,6 +190,7 @@ def _compare_independent_states(
     candidate: _MemoryState,
     *,
     pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None,
+    device_mapping: Mapping[int, int] | None,
     options: MemoryAttributionOptions,
     reference_pool_universe: Mapping[MemoryPoolKey, MemoryStats] | None = None,
     candidate_pool_universe: Mapping[MemoryPoolKey, MemoryStats] | None = None,
@@ -200,10 +209,29 @@ def _compare_independent_states(
 
     reference_pool_stats = reference.pool_stats
     candidate_pool_stats = candidate.pool_stats
-    mapping = _validate_pool_mapping(
-        reference_pool_universe or reference_pool_stats,
-        candidate_pool_universe or candidate_pool_stats,
+    resolved_reference_pools = (
+        reference_pool_stats
+        if reference_pool_universe is None
+        else reference_pool_universe
+    )
+    resolved_candidate_pools = (
+        candidate_pool_stats
+        if candidate_pool_universe is None
+        else candidate_pool_universe
+    )
+    device_pairs = _resolve_device_pairs(
+        reference,
+        candidate,
+        resolved_reference_pools,
+        resolved_candidate_pools,
         pool_mapping,
+        device_mapping,
+    )
+    mapping = _validate_pool_mapping(
+        resolved_reference_pools,
+        resolved_candidate_pools,
+        pool_mapping,
+        device_pairs,
     )
     pool_comparisons: list[MemoryPoolComparison] = []
     matched_reference: set[MemoryPoolKey] = set()
@@ -307,6 +335,7 @@ def _compare_independent_states(
             candidate.device_memory,
             reference_pool_stats,
             candidate_pool_stats,
+            device_pairs=device_pairs,
         ),
         allocation_stack_comparisons=stack_deltas,
         reference_stack_coverage=reference_coverage,
@@ -332,6 +361,7 @@ def compare_phases(
     candidate: MemoryRange,
     *,
     pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None = None,
+    device_mapping: Mapping[int, int] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryPhaseComparison:
     """Decompose candidate-vs-baseline phase memory using four points."""
@@ -397,6 +427,7 @@ def compare_phases(
         baseline.start,
         candidate.start,
         pool_mapping=pool_mapping,
+        device_mapping=device_mapping,
         options=cross_options,
         reference_pool_universe=baseline_pool_universe,
         candidate_pool_universe=candidate_pool_universe,
@@ -407,6 +438,7 @@ def compare_phases(
         baseline.end,
         candidate.end,
         pool_mapping=pool_mapping,
+        device_mapping=device_mapping,
         options=cross_options,
         reference_pool_universe=baseline_pool_universe,
         candidate_pool_universe=candidate_pool_universe,
@@ -733,6 +765,7 @@ def _compare_same_identity_views(
             candidate.device_memory,
             reference.pool_stats,
             candidate.pool_stats,
+            default_match=match,
         ),
         allocation_stack_comparisons=stack_deltas,
         allocation_stack_observation_comparisons=stack_detail_deltas,
@@ -792,40 +825,154 @@ def _segment_device_indices(
     return tuple(sorted(devices))
 
 
-def _validate_pool_mapping(
-    reference_pool_stats: Mapping[MemoryPoolKey, MemoryStats],
-    candidate_pool_stats: Mapping[MemoryPoolKey, MemoryStats],
+def _resolve_device_pairs(
+    reference: _MemoryState,
+    candidate: _MemoryState,
+    reference_pools: Mapping[MemoryPoolKey, MemoryStats],
+    candidate_pools: Mapping[MemoryPoolKey, MemoryStats],
     pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None,
-) -> dict[MemoryPoolKey, tuple[MemoryPoolKey, Literal["default", "mapped"]]]:
-    result: dict[MemoryPoolKey, tuple[MemoryPoolKey, Literal["default", "mapped"]]] = {}
-    for pool_key in set(reference_pool_stats) & set(candidate_pool_stats):
-        if pool_key.pool_id == DEFAULT_POOL_ID:
-            result[pool_key] = (pool_key, "default")
+    device_mapping: Mapping[int, int] | None,
+) -> tuple[tuple[int | None, int | None, DeviceMatchKind], ...]:
+    reference_devices = {
+        *reference.device_memory,
+        *(key.device_index for key in reference_pools),
+    }
+    candidate_devices = {
+        *candidate.device_memory,
+        *(key.device_index for key in candidate_pools),
+    }
+    pairs: dict[int, tuple[int, DeviceMatchKind]] = {}
+    claimed_candidates: dict[int, int] = {}
 
-    candidate_pools = {candidate_pool for candidate_pool, _match in result.values()}
+    def add_pair(
+        reference_device: int,
+        candidate_device: int,
+        match: DeviceMatchKind,
+        *,
+        source: str,
+    ) -> None:
+        existing = pairs.get(reference_device)
+        if existing is not None and existing[0] != candidate_device:
+            raise ValueError(
+                f"{source} maps reference device {reference_device} to candidate "
+                f"device {candidate_device}, conflicting with device {existing[0]}"
+            )
+        claimed = claimed_candidates.get(candidate_device)
+        if claimed is not None and claimed != reference_device:
+            raise ValueError(
+                f"{source} maps candidate device {candidate_device} from reference "
+                f"device {reference_device}, conflicting with device {claimed}"
+            )
+        if existing is None:
+            pairs[reference_device] = (candidate_device, match)
+            claimed_candidates[candidate_device] = reference_device
+
+    for reference_device, candidate_device in (device_mapping or {}).items():
+        if type(reference_device) is not int or reference_device < 0:
+            raise TypeError("device_mapping keys must be non-negative integers")
+        if type(candidate_device) is not int or candidate_device < 0:
+            raise TypeError("device_mapping values must be non-negative integers")
+        if reference_device not in reference_devices:
+            raise ValueError(
+                f"mapped reference device {reference_device} does not exist"
+            )
+        if candidate_device not in candidate_devices:
+            raise ValueError(
+                f"mapped candidate device {candidate_device} does not exist"
+            )
+        add_pair(
+            reference_device,
+            candidate_device,
+            "mapped",
+            source="device_mapping",
+        )
+
     for reference_pool, candidate_pool in (pool_mapping or {}).items():
         if not isinstance(reference_pool, MemoryPoolKey) or not isinstance(
             candidate_pool, MemoryPoolKey
         ):
             raise TypeError("pool_mapping keys and values must be MemoryPoolKey")
-        if (
-            reference_pool.pool_id == DEFAULT_POOL_ID
-            or candidate_pool.pool_id == DEFAULT_POOL_ID
-        ):
-            if (
-                reference_pool.pool_id != DEFAULT_POOL_ID
-                or candidate_pool.pool_id != DEFAULT_POOL_ID
-            ):
-                raise ValueError("the default pool may only map to a default pool")
-        if reference_pool not in reference_pool_stats:
+        if reference_pool not in reference_pools:
             raise ValueError(
                 f"mapped reference pool {reference_pool.label} does not exist"
             )
-        if candidate_pool not in candidate_pool_stats:
+        if candidate_pool not in candidate_pools:
             raise ValueError(
                 f"mapped candidate pool {candidate_pool.label} does not exist"
             )
-        if reference_pool in result:
+        if reference_pool.device_index != candidate_pool.device_index:
+            add_pair(
+                reference_pool.device_index,
+                candidate_pool.device_index,
+                "pool_mapping",
+                source="pool_mapping",
+            )
+
+    for device in sorted(reference_devices & candidate_devices):
+        if device not in pairs and device not in claimed_candidates:
+            add_pair(device, device, "same_index", source="same-index pairing")
+
+    result: list[tuple[int | None, int | None, DeviceMatchKind]] = [
+        (reference_device, candidate_device, match)
+        for reference_device, (candidate_device, match) in sorted(pairs.items())
+    ]
+    result.extend(
+        (device, None, "reference_only")
+        for device in sorted(reference_devices - set(pairs))
+    )
+    result.extend(
+        (None, device, "candidate_only")
+        for device in sorted(candidate_devices - set(claimed_candidates))
+    )
+    return tuple(result)
+
+
+def _validate_pool_mapping(
+    reference_pool_stats: Mapping[MemoryPoolKey, MemoryStats],
+    candidate_pool_stats: Mapping[MemoryPoolKey, MemoryStats],
+    pool_mapping: Mapping[MemoryPoolKey, MemoryPoolKey] | None,
+    device_pairs: Sequence[tuple[int | None, int | None, DeviceMatchKind]],
+) -> dict[MemoryPoolKey, tuple[MemoryPoolKey, Literal["default", "mapped"]]]:
+    paired_devices = {
+        reference_device: candidate_device
+        for reference_device, candidate_device, _match in device_pairs
+        if reference_device is not None and candidate_device is not None
+    }
+    result: dict[MemoryPoolKey, tuple[MemoryPoolKey, Literal["default", "mapped"]]] = {}
+    for reference_device, candidate_device in paired_devices.items():
+        reference_pool = MemoryPoolKey(reference_device, DEFAULT_POOL_ID)
+        candidate_pool = MemoryPoolKey(candidate_device, DEFAULT_POOL_ID)
+        if (
+            reference_pool in reference_pool_stats
+            and candidate_pool in candidate_pool_stats
+        ):
+            result[reference_pool] = (candidate_pool, "default")
+
+    candidate_pools = {candidate_pool for candidate_pool, _match in result.values()}
+    for reference_pool, candidate_pool in (pool_mapping or {}).items():
+        if (
+            reference_pool.pool_id == DEFAULT_POOL_ID
+            or candidate_pool.pool_id == DEFAULT_POOL_ID
+        ) and (
+            reference_pool.pool_id != DEFAULT_POOL_ID
+            or candidate_pool.pool_id != DEFAULT_POOL_ID
+        ):
+            raise ValueError("the default pool may only map to a default pool")
+        if (
+            paired_devices.get(reference_pool.device_index)
+            != candidate_pool.device_index
+        ):
+            raise ValueError(
+                f"pool mapping {reference_pool.label} -> {candidate_pool.label} "
+                "conflicts with the resolved device mapping"
+            )
+        existing = result.get(reference_pool)
+        if existing is not None:
+            if existing[0] == candidate_pool and (
+                reference_pool.pool_id == DEFAULT_POOL_ID
+                and candidate_pool.pool_id == DEFAULT_POOL_ID
+            ):
+                continue
             raise ValueError(
                 f"reference pool {reference_pool.label} is mapped more than once"
             )
@@ -976,25 +1123,37 @@ def _device_phase_decomposition(
     start_gap: MemoryPointComparison,
     end_gap: MemoryPointComparison,
 ) -> tuple[MemoryDevicePhaseDecomposition, ...]:
-    by_leg = tuple(
-        {item.device_index: item for item in comparison.device_comparisons}
-        for comparison in (
-            baseline_change,
-            candidate_change,
-            start_gap,
-            end_gap,
-        )
-    )
-    complete_devices = sorted(set.intersection(*(set(items) for items in by_leg)))
+    baseline_by_device = {
+        (item.reference_device_index, item.candidate_device_index): item
+        for item in baseline_change.device_comparisons
+    }
+    candidate_by_device = {
+        (item.reference_device_index, item.candidate_device_index): item
+        for item in candidate_change.device_comparisons
+    }
+    end_gap_by_pair = {
+        (item.reference_device_index, item.candidate_device_index): item
+        for item in end_gap.device_comparisons
+    }
     rows: list[MemoryDevicePhaseDecomposition] = []
-    for device in complete_devices:
-        comparisons = tuple(items[device] for items in by_leg)
-        if any(
-            item.reference is None or item.candidate is None for item in comparisons
-        ):
+    for start in start_gap.device_comparisons:
+        baseline_device = start.reference_device_index
+        candidate_device = start.candidate_device_index
+        if baseline_device is None or candidate_device is None:
+            continue
+        comparisons = (
+            baseline_by_device.get((baseline_device, baseline_device)),
+            candidate_by_device.get((candidate_device, candidate_device)),
+            start,
+            end_gap_by_pair.get((baseline_device, candidate_device)),
+        )
+        if any(item is None for item in comparisons):
+            continue
+        complete = tuple(cast(MemoryDeviceComparison, item) for item in comparisons)
+        if any(item.reference is None or item.candidate is None for item in complete):
             continue
         for metric in DEVICE_MEMORY_METRICS:
-            deltas = tuple(getattr(item, f"delta_{metric}") for item in comparisons)
+            deltas = tuple(getattr(item, f"delta_{metric}") for item in complete)
             if any(value is None for value in deltas):
                 continue
             baseline_delta, candidate_delta, start_delta, end_delta = (
@@ -1002,7 +1161,8 @@ def _device_phase_decomposition(
             )
             rows.append(
                 MemoryDevicePhaseDecomposition(
-                    device_index=device,
+                    baseline_device_index=baseline_device,
+                    candidate_device_index=candidate_device,
                     components=MemoryPhaseComponents(
                         metric=metric,
                         start_gap_bytes=start_delta,

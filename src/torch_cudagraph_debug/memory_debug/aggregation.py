@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from ._pool_identity import DEFAULT_POOL_ID, MemoryObservationKey, MemoryPoolKey
-from .comparison_models import MemoryAllocatorScopeComparison, MemoryDeviceComparison
+from .comparison_models import (
+    DeviceMatchKind,
+    MemoryAllocatorScopeComparison,
+    MemoryDeviceComparison,
+)
 from .stats import (
     AllocatorScope,
     DeviceMemorySample,
@@ -63,32 +67,60 @@ def compare_device_memory(
     candidate_device_memory: Mapping[int, DeviceMemorySample],
     reference_pools: Mapping[MemoryPoolKey, MemoryStats],
     candidate_pools: Mapping[MemoryPoolKey, MemoryStats],
+    *,
+    device_pairs: Sequence[tuple[int | None, int | None, DeviceMatchKind]]
+    | None = None,
+    default_match: DeviceMatchKind = "same_index",
 ) -> tuple[MemoryDeviceComparison, ...]:
-    """Compare device-wide CUDA Runtime samples against allocator reserved totals.
+    """Compare paired device nodes with CUDA samples and allocator rollups."""
 
-    Only sampled devices produce rows; a device that has allocator
-    observations but no CUDA Runtime sample on either endpoint is omitted.
-    """
-
-    devices = sorted({*reference_device_memory, *candidate_device_memory})
-    if not devices:
-        return ()
-    reference_reserved = summarize_devices(reference_pools)
-    candidate_reserved = summarize_devices(candidate_pools)
+    reference_allocator = summarize_devices(reference_pools)
+    candidate_allocator = summarize_devices(candidate_pools)
+    reference_devices = {*reference_device_memory, *reference_allocator}
+    candidate_devices = {*candidate_device_memory, *candidate_allocator}
+    if device_pairs is None:
+        common = sorted(reference_devices & candidate_devices)
+        pairs: tuple[tuple[int | None, int | None, DeviceMatchKind], ...] = (
+            *((device, device, default_match) for device in common),
+            *(
+                (device, None, "reference_only")
+                for device in sorted(reference_devices - set(common))
+            ),
+            *(
+                (None, device, "candidate_only")
+                for device in sorted(candidate_devices - set(common))
+            ),
+        )
+    else:
+        pairs = tuple(device_pairs)
     empty = MemoryStats()
     return tuple(
         MemoryDeviceComparison(
-            device_index=device,
-            reference=reference_device_memory.get(device),
-            candidate=candidate_device_memory.get(device),
-            reference_allocator_reserved_bytes=reference_reserved.get(
-                device, empty
-            ).reserved_bytes,
-            candidate_allocator_reserved_bytes=candidate_reserved.get(
-                device, empty
-            ).reserved_bytes,
+            reference_device_index=reference_device,
+            candidate_device_index=candidate_device,
+            match=match,
+            reference=(
+                reference_device_memory.get(reference_device)
+                if reference_device is not None
+                else None
+            ),
+            candidate=(
+                candidate_device_memory.get(candidate_device)
+                if candidate_device is not None
+                else None
+            ),
+            reference_allocator=(
+                reference_allocator.get(reference_device, empty)
+                if reference_device is not None
+                else empty
+            ),
+            candidate_allocator=(
+                candidate_allocator.get(candidate_device, empty)
+                if candidate_device is not None
+                else empty
+            ),
         )
-        for device in devices
+        for reference_device, candidate_device, match in pairs
     )
 
 

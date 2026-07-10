@@ -23,6 +23,16 @@ MatchKind = Literal[
     "candidate_only",
 ]
 
+DeviceMatchKind = Literal[
+    "same_run",
+    "same_probe",
+    "same_index",
+    "mapped",
+    "pool_mapping",
+    "reference_only",
+    "candidate_only",
+]
+
 
 PhaseMetric = Literal[
     "reserved_bytes",
@@ -41,7 +51,7 @@ DeviceMemoryMetric = Literal[
     "free_bytes",
     "total_bytes",
     "allocator_reserved_bytes",
-    "unattributed_device_bytes",
+    "cuda_allocator_residual_bytes",
 ]
 
 DEVICE_MEMORY_METRICS: tuple[DeviceMemoryMetric, ...] = (
@@ -49,7 +59,7 @@ DEVICE_MEMORY_METRICS: tuple[DeviceMemoryMetric, ...] = (
     "free_bytes",
     "total_bytes",
     "allocator_reserved_bytes",
-    "unattributed_device_bytes",
+    "cuda_allocator_residual_bytes",
 )
 
 
@@ -75,6 +85,18 @@ class MemoryPhaseComponents:
     baseline_change_bytes: int
     candidate_change_bytes: int
     end_gap_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.metric not in {*PHASE_METRICS, *DEVICE_MEMORY_METRICS}:
+            raise ValueError(f"unknown phase metric {self.metric!r}")
+        for name in (
+            "start_gap_bytes",
+            "baseline_change_bytes",
+            "candidate_change_bytes",
+            "end_gap_bytes",
+        ):
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"{name} must be an integer")
 
     @property
     def change_gap_bytes(self) -> int:
@@ -170,14 +192,17 @@ class MemoryPoolPhaseDecomposition:
 
 @dataclass(frozen=True)
 class MemoryDevicePhaseDecomposition:
-    """Four-point decomposition for one CUDA device and metric."""
+    """Four-point decomposition for one paired CUDA device and metric."""
 
-    device_index: int
+    baseline_device_index: int
+    candidate_device_index: int
     components: MemoryPhaseComponents
 
     def __post_init__(self) -> None:
-        if type(self.device_index) is not int or self.device_index < 0:
-            raise ValueError("device_index must be a non-negative integer")
+        for name in ("baseline_device_index", "candidate_device_index"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
         if self.components.metric not in DEVICE_MEMORY_METRICS:
             raise ValueError("device decomposition requires a device memory metric")
 
@@ -186,7 +211,11 @@ class MemoryDevicePhaseDecomposition:
         return self.components.changed
 
     def to_dict(self) -> dict[str, object]:
-        return {"device_index": self.device_index, **self.components.to_dict()}
+        return {
+            "baseline_device_index": self.baseline_device_index,
+            "candidate_device_index": self.candidate_device_index,
+            **self.components.to_dict(),
+        }
 
     def to_row(self) -> dict[str, object]:
         return self.to_dict()
@@ -225,47 +254,79 @@ class MemoryAllocatorScopeComparison:
 
 @dataclass(frozen=True)
 class MemoryDeviceComparison:
-    """Reference/candidate device-wide CUDA Runtime memory for one device.
+    """Reference/candidate device pair with CUDA and allocator state.
 
     Samples come from ``torch.cuda.mem_get_info`` and cover the whole device.
-    Unattributed device bytes subtract allocator reserved bytes from the
-    recording process snapshot from device-global usage. The remainder can
-    include that process context and external allocations plus every other
-    process sharing the GPU. A side without a sample reports ``None`` and
-    produces no deltas.
+    The CUDA/allocator residual subtracts this process allocator's reserved
+    bytes from device-global usage. It can be positive or negative because the
+    two measurements are consecutive rather than atomic and device usage also
+    includes other processes. A side without a sample reports ``None`` and
+    produces no sample deltas; allocator rollups remain available.
     """
 
-    device_index: int
+    reference_device_index: int | None
+    candidate_device_index: int | None
+    match: DeviceMatchKind
     reference: DeviceMemorySample | None
     candidate: DeviceMemorySample | None
-    reference_allocator_reserved_bytes: int
-    candidate_allocator_reserved_bytes: int
+    reference_allocator: MemoryStats
+    candidate_allocator: MemoryStats
 
     def __post_init__(self) -> None:
-        if type(self.device_index) is not int or self.device_index < 0:
-            raise ValueError("device_index must be a non-negative integer")
-        if self.reference is None and self.candidate is None:
-            raise ValueError("device comparison requires at least one sample")
+        for name in ("reference_device_index", "candidate_device_index"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{name} must be a non-negative integer or None")
+        if self.match not in {
+            "same_run",
+            "same_probe",
+            "same_index",
+            "mapped",
+            "pool_mapping",
+            "reference_only",
+            "candidate_only",
+        }:
+            raise ValueError(f"unknown device match kind {self.match!r}")
+        if self.reference_device_index is None and self.candidate_device_index is None:
+            raise ValueError("a device comparison requires at least one device index")
+        if self.match == "reference_only" and self.candidate_device_index is not None:
+            raise ValueError("reference_only device comparison cannot have a candidate")
+        if self.match == "candidate_only" and self.reference_device_index is not None:
+            raise ValueError("candidate_only device comparison cannot have a reference")
+        if self.match not in ("reference_only", "candidate_only") and (
+            self.reference_device_index is None or self.candidate_device_index is None
+        ):
+            raise ValueError("paired device comparison requires both device indices")
         for name in ("reference", "candidate"):
             sample = getattr(self, name)
             if sample is not None and not isinstance(sample, DeviceMemorySample):
                 raise TypeError(f"{name} must be a DeviceMemorySample or None")
-        for name in (
-            "reference_allocator_reserved_bytes",
-            "candidate_allocator_reserved_bytes",
-        ):
-            value = getattr(self, name)
-            if type(value) is not int or value < 0:
-                raise ValueError(f"{name} must be a non-negative integer")
+        for name in ("reference_allocator", "candidate_allocator"):
+            if not isinstance(getattr(self, name), MemoryStats):
+                raise TypeError(f"{name} must be MemoryStats")
 
     @property
-    def reference_unattributed_device_bytes(self) -> int | None:
+    def allocator_delta(self) -> MemoryStatsDelta:
+        return MemoryStatsDelta.between(
+            self.reference_allocator, self.candidate_allocator
+        )
+
+    @property
+    def reference_allocator_reserved_bytes(self) -> int:
+        return self.reference_allocator.reserved_bytes
+
+    @property
+    def candidate_allocator_reserved_bytes(self) -> int:
+        return self.candidate_allocator.reserved_bytes
+
+    @property
+    def reference_cuda_allocator_residual_bytes(self) -> int | None:
         if self.reference is None:
             return None
         return self.reference.used_bytes - self.reference_allocator_reserved_bytes
 
     @property
-    def candidate_unattributed_device_bytes(self) -> int | None:
+    def candidate_cuda_allocator_residual_bytes(self) -> int | None:
         if self.candidate is None:
             return None
         return self.candidate.used_bytes - self.candidate_allocator_reserved_bytes
@@ -290,79 +351,78 @@ class MemoryDeviceComparison:
 
     @property
     def delta_allocator_reserved_bytes(self) -> int:
-        return (
-            self.candidate_allocator_reserved_bytes
-            - self.reference_allocator_reserved_bytes
-        )
+        return self.allocator_delta.reserved_bytes
 
     @property
-    def delta_unattributed_device_bytes(self) -> int | None:
-        reference = self.reference_unattributed_device_bytes
-        candidate = self.candidate_unattributed_device_bytes
+    def delta_cuda_allocator_residual_bytes(self) -> int | None:
+        reference = self.reference_cuda_allocator_residual_bytes
+        candidate = self.candidate_cuda_allocator_residual_bytes
         if reference is None or candidate is None:
             return None
         return candidate - reference
 
     @property
     def changed(self) -> bool:
-        if self.reference is None or self.candidate is None:
+        if self.match in ("reference_only", "candidate_only"):
             return True
         return bool(
             self.delta_used_bytes
             or self.delta_free_bytes
             or self.delta_total_bytes
-            or self.delta_allocator_reserved_bytes
+            or self.allocator_delta.changed
         )
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "device_index": self.device_index,
+            "reference_device_index": self.reference_device_index,
+            "candidate_device_index": self.candidate_device_index,
+            "match": self.match,
             "reference": self.reference.to_dict() if self.reference else None,
             "candidate": self.candidate.to_dict() if self.candidate else None,
-            "reference_allocator_reserved_bytes": (
-                self.reference_allocator_reserved_bytes
-            ),
-            "candidate_allocator_reserved_bytes": (
-                self.candidate_allocator_reserved_bytes
-            ),
-            "reference_unattributed_device_bytes": self.reference_unattributed_device_bytes,
-            "candidate_unattributed_device_bytes": self.candidate_unattributed_device_bytes,
+            "reference_allocator": self.reference_allocator.to_dict(),
+            "candidate_allocator": self.candidate_allocator.to_dict(),
+            "allocator_delta": self.allocator_delta.to_dict(),
+            "reference_cuda_allocator_residual_bytes": self.reference_cuda_allocator_residual_bytes,
+            "candidate_cuda_allocator_residual_bytes": self.candidate_cuda_allocator_residual_bytes,
             "delta": {
                 "used_bytes": self.delta_used_bytes,
                 "free_bytes": self.delta_free_bytes,
                 "total_bytes": self.delta_total_bytes,
-                "allocator_reserved_bytes": self.delta_allocator_reserved_bytes,
-                "unattributed_device_bytes": self.delta_unattributed_device_bytes,
+                "cuda_allocator_residual_bytes": self.delta_cuda_allocator_residual_bytes,
             },
         }
 
     def to_row(self) -> dict[str, object]:
         def side(
-            prefix: str, sample: DeviceMemorySample | None, reserved: int
+            prefix: str, sample: DeviceMemorySample | None, allocator: MemoryStats
         ) -> dict[str, object]:
             return {
                 f"{prefix}_free_bytes": sample.free_bytes if sample else None,
                 f"{prefix}_total_bytes": sample.total_bytes if sample else None,
                 f"{prefix}_used_bytes": sample.used_bytes if sample else None,
-                f"{prefix}_allocator_reserved_bytes": reserved,
-                f"{prefix}_unattributed_device_bytes": (
-                    sample.used_bytes - reserved if sample else None
+                f"{prefix}_cuda_allocator_residual_bytes": (
+                    sample.used_bytes - allocator.reserved_bytes if sample else None
                 ),
+                **{
+                    f"{prefix}_allocator_{key}": value
+                    for key, value in allocator.to_dict().items()
+                },
             }
 
         return {
-            "device_index": self.device_index,
-            **side(
-                "reference", self.reference, self.reference_allocator_reserved_bytes
-            ),
-            **side(
-                "candidate", self.candidate, self.candidate_allocator_reserved_bytes
-            ),
+            "reference_device_index": self.reference_device_index,
+            "candidate_device_index": self.candidate_device_index,
+            "match": self.match,
+            **side("reference", self.reference, self.reference_allocator),
+            **side("candidate", self.candidate, self.candidate_allocator),
             "delta_used_bytes": self.delta_used_bytes,
             "delta_free_bytes": self.delta_free_bytes,
             "delta_total_bytes": self.delta_total_bytes,
-            "delta_allocator_reserved_bytes": self.delta_allocator_reserved_bytes,
-            "delta_unattributed_device_bytes": self.delta_unattributed_device_bytes,
+            "delta_cuda_allocator_residual_bytes": self.delta_cuda_allocator_residual_bytes,
+            **{
+                f"delta_allocator_{key}": value
+                for key, value in self.allocator_delta.to_dict().items()
+            },
         }
 
 

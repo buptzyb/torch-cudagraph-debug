@@ -10,8 +10,8 @@ import torch
 
 from torch_cudagraph_debug.memory_debug import (
     DeviceMemorySample,
-    MemoryBundleError,
     MemoryAllocatorScopePhaseDecomposition,
+    MemoryBundleError,
     MemoryDevicePhaseDecomposition,
     MemoryPhaseComponents,
     MemoryPoolKey,
@@ -52,13 +52,13 @@ def test_phase_decompositions_validate_metric_domains() -> None:
     MemoryAllocatorScopePhaseDecomposition("all", allocator_components)
     pool_key = MemoryPoolKey(0, (0, 0))
     MemoryPoolPhaseDecomposition(pool_key, pool_key, allocator_components)
-    MemoryDevicePhaseDecomposition(0, device_components)
+    MemoryDevicePhaseDecomposition(0, 0, device_components)
     with pytest.raises(ValueError, match="allocator metric"):
         MemoryAllocatorScopePhaseDecomposition("all", device_components)
     with pytest.raises(ValueError, match="pool decomposition"):
         MemoryPoolPhaseDecomposition(pool_key, pool_key, device_components)
     with pytest.raises(ValueError, match="device memory metric"):
-        MemoryDevicePhaseDecomposition(0, allocator_components)
+        MemoryDevicePhaseDecomposition(0, 0, allocator_components)
 
 
 def test_device_memory_sample_validates_and_derives_used() -> None:
@@ -317,7 +317,7 @@ def test_summarize_devices_groups_pool_stats_by_device() -> None:
     assert by_device[1].reserved_bytes == 40
 
 
-def test_same_run_comparison_reports_unattributed_device_growth() -> None:
+def test_same_run_comparison_reports_cuda_allocator_residual_growth() -> None:
     run = make_run(
         [
             snapshot(segment(active=100, total=100)),
@@ -328,22 +328,28 @@ def test_same_run_comparison_reports_unattributed_device_growth() -> None:
     )
     result = run.compare("before", "after")
     (row,) = result.device_comparisons
-    assert row.device_index == 0
+    assert row.reference_device_index == row.candidate_device_index == 0
     assert row.reference_allocator_reserved_bytes == 100
     assert row.candidate_allocator_reserved_bytes == 100
-    assert row.reference_unattributed_device_bytes == 0
-    assert row.candidate_unattributed_device_bytes == 200
+    assert row.reference_cuda_allocator_residual_bytes == 0
+    assert row.candidate_cuda_allocator_residual_bytes == 200
     assert row.delta_used_bytes == 200
     assert row.delta_allocator_reserved_bytes == 0
-    assert row.delta_unattributed_device_bytes == 200
+    assert row.delta_cuda_allocator_residual_bytes == 200
     assert row.changed
 
     text = result.to_text()
-    assert "devices (device-wide, includes other processes):" in text
-    assert "unattributed device: 0 B -> 200 B (delta +200 B)" in text
+    assert (
+        "CUDA scope: device-wide, includes other processes; "
+        "residual = CUDA used - allocator reserved" in text
+    )
+    assert "residual: 0 B -> 200 B (+200 B)" in text
 
     payload = result.to_dict()
-    assert payload["device_comparisons"][0]["delta"]["unattributed_device_bytes"] == 200
+    assert (
+        payload["device_comparisons"][0]["delta"]["cuda_allocator_residual_bytes"]
+        == 200
+    )
 
 
 def test_comparison_reports_cuda_visible_capacity_change() -> None:
@@ -360,7 +366,7 @@ def test_comparison_reports_cuda_visible_capacity_change() -> None:
     assert row.delta_used_bytes == 200
     assert row.delta_free_bytes == -100
     assert row.delta_total_bytes == 100
-    assert "CUDA-visible capacity changed" in result.to_text()
+    assert "CUDA total: 1000 B -> 1.07 KiB (+100 B)" in result.to_text()
 
 
 def test_phase_comparison_decomposes_complete_device_samples(
@@ -391,10 +397,10 @@ def test_phase_comparison_decomposes_complete_device_samples(
     assert used.end_gap_bytes == 80
     assert used.identity_holds
     assert by_metric["total_bytes"].components.end_gap_bytes == 0
-    assert "device[0] used_bytes" in report.to_text()
+    assert "device[0] -> device[0] used_bytes" in report.to_text()
     changed_text = report.to_text(include_unchanged=False)
-    assert "device[0] used_bytes" in changed_text
-    assert "device[0] total_bytes" not in changed_text
+    assert "device[0] -> device[0] used_bytes" in changed_text
+    assert "device[0] -> device[0] total_bytes" not in changed_text
 
     paths = report.write(tmp_path / "phase")
     assert paths["devices"].name == "devices.csv"
@@ -442,39 +448,55 @@ def test_independent_comparison_marks_missing_side() -> None:
         device_memory_provider=lambda device: (80, 100),
     )
     result = compare_snapshots(reference_probe.snapshot(), candidate_probe.snapshot())
-    by_device = {row.device_index: row for row in result.device_comparisons}
+    by_device = {
+        row.reference_device_index
+        if row.reference_device_index is not None
+        else row.candidate_device_index: row
+        for row in result.device_comparisons
+    }
     assert set(by_device) == {0, 1}
     assert by_device[0].delta_used_bytes == 10
     assert by_device[1].candidate is None
     assert by_device[1].delta_used_bytes is None
-    assert by_device[1].delta_unattributed_device_bytes is None
+    assert by_device[1].delta_cuda_allocator_residual_bytes is None
     assert by_device[1].changed
 
     text = result.to_text()
-    assert "candidate sample unavailable" in text
-    assert "reference: CUDA used 10 B, free 90 B, total 100 B" in text
+    assert "device[1] [reference_only]" in text
+    assert "CUDA used: 10 B -> n/a" in text
 
 
-def test_unsampled_endpoints_render_no_devices_section() -> None:
+def test_unsampled_endpoints_render_allocator_only_tree() -> None:
     run = make_run(
         [snapshot(segment(active=10)), snapshot(segment(active=20))],
         labels=("before", "after"),
     )
     result = run.compare("before", "after")
-    assert result.device_comparisons == ()
-    assert "devices (device-wide" not in result.to_text()
-    assert result.to_dict()["device_comparisons"] == []
+    (row,) = result.device_comparisons
+    assert row.reference is None and row.candidate is None
+    assert row.reference_allocator.reserved_bytes == 10
+    assert row.candidate_allocator.reserved_bytes == 20
+    text = result.to_text()
+    assert "CUDA scope:" not in text
+    assert "CUDA used:" not in text
+    assert "residual" not in text
+    assert "  device[0]\n    allocator:" in text
+    assert result.to_dict()["device_comparisons"][0]["reference"] is None
 
 
-_DEVICE_CSV_COLUMNS = (
-    "device_index,"
-    "reference_free_bytes,reference_total_bytes,reference_used_bytes,"
-    "reference_allocator_reserved_bytes,reference_unattributed_device_bytes,"
-    "candidate_free_bytes,candidate_total_bytes,candidate_used_bytes,"
-    "candidate_allocator_reserved_bytes,candidate_unattributed_device_bytes,"
-    "delta_used_bytes,delta_free_bytes,delta_total_bytes,"
-    "delta_allocator_reserved_bytes,delta_unattributed_device_bytes"
-)
+def _device_csv_columns() -> str:
+    from torch_cudagraph_debug.memory_debug import MemoryStats
+
+    stats_keys = list(MemoryStats().to_dict())
+    columns = ["reference_device_index", "candidate_device_index", "match"]
+    for prefix in ("reference", "candidate"):
+        columns.extend(f"{prefix}_{name}_bytes" for name in ("free", "total", "used"))
+        columns.append(f"{prefix}_cuda_allocator_residual_bytes")
+        columns.extend(f"{prefix}_allocator_{key}" for key in stats_keys)
+    columns.extend(f"delta_{name}_bytes" for name in ("used", "free", "total"))
+    columns.append("delta_cuda_allocator_residual_bytes")
+    columns.extend(f"delta_allocator_{key}" for key in stats_keys)
+    return ",".join(columns)
 
 
 def test_comparison_write_emits_devices_csv(tmp_path: Path) -> None:
@@ -487,18 +509,21 @@ def test_comparison_write_emits_devices_csv(tmp_path: Path) -> None:
     paths = sampled.write(output)
     assert paths["devices"].name == "devices.csv"
     header = (output / "devices.csv").read_text(encoding="utf-8").splitlines()[0]
-    assert header == _DEVICE_CSV_COLUMNS
-    assert "Devices (device-wide" in (output / "report.html").read_text(
-        encoding="utf-8"
-    )
+    assert header == _device_csv_columns()
+    html = (output / "report.html").read_text(encoding="utf-8")
+    assert "<h2>Devices</h2>" in html
+    assert "CUDA scope: device-wide" in html
 
+    # Pool-only devices still produce device rows, so the CSV persists even
+    # without CUDA Runtime samples; the sample columns stay empty.
     unsampled = make_run(
         [snapshot(segment(active=10)), snapshot(segment(active=20))],
         labels=("before", "after"),
     ).compare("before", "after")
     unsampled_paths = unsampled.write(output, overwrite=True)
-    assert "devices" not in unsampled_paths
-    assert not (output / "devices.csv").exists()
+    assert unsampled_paths["devices"].name == "devices.csv"
+    rows = (output / "devices.csv").read_text(encoding="utf-8").splitlines()
+    assert rows[1].startswith("0,0,same_run,,,")
 
 
 def test_timeline_device_entries_never_fabricate_deltas() -> None:
@@ -513,14 +538,16 @@ def test_timeline_device_entries_never_fabricate_deltas() -> None:
     )
     timeline = run.timeline()
     entries = {entry.point_label: entry for entry in timeline.device_entries}
-    assert set(entries) == {"first", "third"}
+    assert set(entries) == {"first", "second", "third"}
     assert entries["first"].delta_used_bytes is None
+    assert entries["second"].sample is None
+    assert entries["second"].delta_used_bytes is None
     # The previous point carries no sample, so the third point must not
     # report a delta computed against the first point or a fabricated zero.
     assert entries["third"].delta_used_bytes is None
 
 
-def test_timeline_device_entries_track_unattributed_device_growth(
+def test_timeline_device_entries_track_cuda_allocator_residual_growth(
     tmp_path: Path,
 ) -> None:
     run = make_run(
@@ -534,21 +561,175 @@ def test_timeline_device_entries_track_unattributed_device_growth(
     timeline = run.timeline()
     first, second = timeline.device_entries
     assert first.allocator_reserved_bytes == 100
-    assert first.unattributed_device_bytes == 0
+    assert first.cuda_allocator_residual_bytes == 0
     assert second.allocator_reserved_bytes == 200
     assert second.delta_used_bytes == 300
     assert second.delta_allocator_reserved_bytes == 100
-    assert second.delta_unattributed_device_bytes == 200
+    assert second.delta_cuda_allocator_residual_bytes == 200
 
     text = timeline.to_text()
-    assert "device[0] (device-wide) CUDA used=" in text
-    assert timeline.to_dict()["device_entries"][1]["delta"] == {
+    assert "CUDA used: 400 B (+300 B)" in text
+    assert "residual: 200 B (+200 B)" in text
+    entry_payload = timeline.to_dict()["device_entries"][1]
+    assert entry_payload["sample_delta"] == {
         "used_bytes": 300,
         "free_bytes": -300,
         "total_bytes": 0,
-        "allocator_reserved_bytes": 100,
-        "unattributed_device_bytes": 200,
+        "cuda_allocator_residual_bytes": 200,
     }
+    assert entry_payload["allocator_delta"]["reserved_bytes"] == 100
     output = tmp_path / "timeline"
     paths = timeline.write(output)
     assert paths["devices"].name == "devices.csv"
+
+
+def test_device_mapping_pairs_cross_device_default_pools() -> None:
+    reference_probe = MemoryProbe._from_snapshot_provider(
+        lambda marker: snapshot(segment(active=10, device=0))
+    )
+    candidate_probe = MemoryProbe._from_snapshot_provider(
+        lambda marker: snapshot(segment(active=30, device=1))
+    )
+
+    result = compare_snapshots(
+        reference_probe.snapshot(),
+        candidate_probe.snapshot(),
+        device_mapping={0: 1},
+    )
+
+    (device,) = result.device_comparisons
+    assert (device.reference_device_index, device.candidate_device_index) == (0, 1)
+    assert device.match == "mapped"
+    (pool,) = result.pool_comparisons
+    assert pool.reference_key == MemoryPoolKey(0, (0, 0))
+    assert pool.candidate_key == MemoryPoolKey(1, (0, 0))
+    assert pool.match == "default"
+
+
+def test_pool_mapping_derives_device_pair_and_rejects_conflicts() -> None:
+    reference_probe = MemoryProbe._from_snapshot_provider(
+        lambda marker: snapshot(segment(active=10, device=0))
+    )
+    candidate_probe = MemoryProbe._from_snapshot_provider(
+        lambda marker: snapshot(
+            segment(active=20, device=1),
+            segment(active=30, device=2, address=5000),
+        )
+    )
+    reference = reference_probe.snapshot()
+    candidate = candidate_probe.snapshot()
+
+    derived = compare_snapshots(
+        reference,
+        candidate,
+        pool_mapping={MemoryPoolKey(0, (0, 0)): MemoryPoolKey(1, (0, 0))},
+    )
+    assert derived.device_comparisons[0].match == "pool_mapping"
+    assert (
+        derived.device_comparisons[0].reference_device_index,
+        derived.device_comparisons[0].candidate_device_index,
+    ) == (0, 1)
+
+    with pytest.raises(ValueError, match="conflicting with device"):
+        compare_snapshots(
+            reference,
+            candidate,
+            device_mapping={0: 1},
+            pool_mapping={MemoryPoolKey(0, (0, 0)): MemoryPoolKey(2, (0, 0))},
+        )
+
+
+def test_device_mapping_is_one_to_one() -> None:
+    reference_probe = MemoryProbe._from_snapshot_provider(
+        lambda marker: snapshot(
+            segment(active=10, device=0),
+            segment(active=20, device=1, address=5000),
+        )
+    )
+    candidate_probe = MemoryProbe._from_snapshot_provider(
+        lambda marker: snapshot(segment(active=30, device=2))
+    )
+    with pytest.raises(ValueError, match="candidate device 2"):
+        compare_snapshots(
+            reference_probe.snapshot(),
+            candidate_probe.snapshot(),
+            device_mapping={0: 2, 1: 2},
+        )
+
+
+def test_phase_device_mapping_retains_both_device_indices() -> None:
+    baseline = make_run(
+        [
+            snapshot(segment(active=10, device=0)),
+            snapshot(segment(active=10, device=0)),
+        ],
+        name="baseline",
+        labels=("start", "end"),
+        device_memory=[{0: (90, 100)}, {0: (80, 100)}],
+    )
+    candidate = make_run(
+        [
+            snapshot(segment(active=10, device=1)),
+            snapshot(segment(active=10, device=1)),
+        ],
+        name="candidate",
+        labels=("start", "end"),
+        device_memory=[{1: (70, 100)}, {1: (50, 100)}],
+    )
+
+    report = compare_phases(
+        baseline.between("start", "end"),
+        candidate.between("start", "end"),
+        device_mapping={0: 1},
+    )
+
+    assert report.device_decomposition
+    assert {
+        (row.baseline_device_index, row.candidate_device_index)
+        for row in report.device_decomposition
+    } == {(0, 1)}
+
+
+def test_cuda_allocator_residual_is_signed_without_warning() -> None:
+    run = make_run(
+        [
+            snapshot(segment(active=100, total=100)),
+            snapshot(segment(active=80, total=80)),
+        ],
+        labels=("before", "after"),
+        device_memory=[{0: (950, 1000)}, {0: (960, 1000)}],
+    )
+
+    result = run.compare("before", "after")
+    (row,) = result.device_comparisons
+    assert row.reference_cuda_allocator_residual_bytes == -50
+    assert row.candidate_cuda_allocator_residual_bytes == -40
+    assert row.delta_cuda_allocator_residual_bytes == 10
+    assert "residual: -50 B -> -40 B (+10 B)" in result.to_text()
+    assert not any("residual" in warning for warning in result.warnings)
+
+
+def test_cuda_allocator_residual_can_decrease_with_external_usage() -> None:
+    run = make_run(
+        [
+            snapshot(segment(active=100, total=100)),
+            snapshot(segment(active=100, total=100)),
+        ],
+        labels=("before", "after"),
+        device_memory=[{0: (700, 1000)}, {0: (800, 1000)}],
+    )
+    (row,) = run.compare("before", "after").device_comparisons
+    assert row.reference_cuda_allocator_residual_bytes == 200
+    assert row.candidate_cuda_allocator_residual_bytes == 100
+    assert row.delta_cuda_allocator_residual_bytes == -100
+
+
+def test_phase_components_validate_metric_and_integer_fields() -> None:
+    with pytest.raises(ValueError, match="unknown phase metric"):
+        MemoryPhaseComponents("unknown", 0, 0, 0, 0)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="start_gap_bytes"):
+        MemoryPhaseComponents("used_bytes", True, 0, 0, 0)
+    with pytest.raises(ValueError, match="baseline_device_index"):
+        MemoryDevicePhaseDecomposition(
+            True, 0, MemoryPhaseComponents("used_bytes", 0, 0, 0, 0)
+        )

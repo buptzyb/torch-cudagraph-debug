@@ -897,3 +897,8 @@ def test_synchronize_tensor_results_rejects_capture(
         collector_module.synchronize_tensor_results(torch.device("cuda:0"), True)
 
     collector_module.synchronize_tensor_results(torch.device("cuda:0"), False)
+
+
+def test_tensor_probe_name_must_be_a_non_empty_string() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        TensorProbe(1, [RecordAction()])  # type: ignore[arg-type]

@@ -31,8 +31,8 @@ class MemoryProbe:
         devices: DeviceSelector = None,
         synchronize: SynchronizeTarget = True,
     ) -> None:
-        if not name:
-            raise ValueError("name must be non-empty")
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must be a non-empty string")
         self.name = name
         self.synchronize = synchronize
         self._probe_id = uuid.uuid4().hex

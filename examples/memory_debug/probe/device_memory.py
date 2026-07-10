@@ -48,7 +48,8 @@ def _device_row(comparison, device_index: int):
     return next(
         item
         for item in comparison.device_comparisons
-        if item.device_index == device_index
+        if item.reference_device_index == device_index
+        and item.candidate_device_index == device_index
     )
 
 
@@ -78,7 +79,7 @@ def main() -> None:
     tensor_change = probe.compare(baseline, after_tensor)
     tensor_row = _device_row(tensor_change, device_index)
     assert tensor_row.delta_allocator_reserved_bytes >= BUFFER_BYTES
-    assert tensor_row.delta_unattributed_device_bytes is not None
+    assert tensor_row.delta_cuda_allocator_residual_bytes is not None
     assert tensor_row.delta_total_bytes is not None
 
     # A raw cudaMalloc bypasses the caching allocator, standing in for the
@@ -95,7 +96,7 @@ def main() -> None:
         raw_change = probe.compare(after_tensor, after_raw)
         raw_row = _device_row(raw_change, device_index)
         assert raw_row.delta_allocator_reserved_bytes == 0
-        assert raw_row.delta_unattributed_device_bytes is not None
+        assert raw_row.delta_cuda_allocator_residual_bytes is not None
         assert tensor.numel() == BUFFER_BYTES
 
         print("=== Tensor allocation: the allocator explains the growth ===")

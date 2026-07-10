@@ -475,7 +475,7 @@ def format_delta_bytes(value: int) -> str:
 def format_comparison(reference: int, candidate: int, delta: int) -> str:
     return (
         f"{format_bytes(reference)} -> {format_bytes(candidate)} "
-        f"(delta {format_delta_bytes(delta)})"
+        f"({format_delta_bytes(delta)})"
     )
 
 

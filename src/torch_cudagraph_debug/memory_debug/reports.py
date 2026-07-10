@@ -14,6 +14,7 @@ from .._reporting import (
     atomic_write_text,
     prepare_output_dir,
 )
+from ._pool_identity import DEFAULT_POOL_ID
 from .allocator_snapshot import (
     format_bytes,
     format_comparison,
@@ -486,13 +487,23 @@ class _MemoryStateComparison:
             if include_unchanged or item.changed
         ]
 
+    def _report_tree(self) -> tuple[_ReportTreeNode, ...]:
+        return _build_comparison_tree(
+            self.device_comparisons,
+            self.pool_comparisons,
+            self.observation_comparisons,
+        )
+
     def pool_comparison_rows(
         self, *, include_unchanged: bool = True
     ) -> list[dict[str, object]]:
         return [
             item.to_row()
-            for item in self.pool_comparisons
-            if include_unchanged or item.changed
+            for item in _report_tree_payloads(
+                self._report_tree(),
+                kind="pool",
+                include_unchanged=include_unchanged,
+            )
         ]
 
     def observation_comparison_rows(
@@ -500,8 +511,11 @@ class _MemoryStateComparison:
     ) -> list[dict[str, object]]:
         return [
             item.to_row()
-            for item in self.observation_comparisons
-            if include_unchanged or item.changed
+            for item in _report_tree_payloads(
+                self._report_tree(),
+                kind="stream",
+                include_unchanged=include_unchanged,
+            )
         ]
 
     def device_comparison_rows(
@@ -509,8 +523,11 @@ class _MemoryStateComparison:
     ) -> list[dict[str, object]]:
         return [
             item.to_row()
-            for item in self.device_comparisons
-            if include_unchanged or item.changed
+            for item in _report_tree_payloads(
+                self._report_tree(),
+                kind="device",
+                include_unchanged=include_unchanged,
+            )
         ]
 
     def allocation_stack_comparison_rows(self) -> list[dict[str, object]]:
@@ -641,6 +658,7 @@ class _MemoryStateComparison:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        depth: TreeDepth | None = None,
     ) -> str:
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
@@ -648,6 +666,7 @@ class _MemoryStateComparison:
             limit=limit,
             stack_depth=stack_depth,
         )
+        tree_depth = _resolve_tree_depth(depth)
         reference_label = _state_label(self.reference)
         candidate_label = _state_label(self.candidate)
         lines = [
@@ -655,57 +674,34 @@ class _MemoryStateComparison:
             f"({_state_scope(self.reference, self.candidate)})"
         ]
         lines.append(f"  address lifecycle: {self.lifecycle_confidence}")
+        if any(
+            item.reference is not None or item.candidate is not None
+            for item in self.device_comparisons
+        ):
+            lines.append(f"  {_CUDA_SCOPE_NOTE}")
         lines.extend(f"  warning: {warning}" for warning in self.warnings)
-        lines.append("  allocator totals:")
-        selected_allocator_scopes = [
-            item
-            for item in self.allocator_scope_comparisons
-            if include_unchanged or item.changed
-        ]
-        if not selected_allocator_scopes:
-            lines.append("    no changed totals")
-        for item in selected_allocator_scopes:
-            lines.extend(_scope_text(item))
-        lines.append("  pools:")
-        selected_pool_comparisons = [
-            item for item in self.pool_comparisons if include_unchanged or item.changed
-        ]
-        if not selected_pool_comparisons:
-            lines.append("    no changed pools")
-        for item in selected_pool_comparisons:
-            lines.extend(_pool_text(item))
-        lines.append("  device/pool/stream observations:")
-        selected_observation_comparisons = [
-            item
-            for item in self.observation_comparisons
-            if include_unchanged or item.changed
-        ]
-        if not selected_observation_comparisons:
-            lines.append("    no changed device/pool/stream observations")
-        for item in selected_observation_comparisons:
-            lines.extend(_observation_text(item))
-        if self.device_comparisons:
-            lines.append("  devices (device-wide, includes other processes):")
-            selected_device_comparisons = [
-                item
-                for item in self.device_comparisons
-                if include_unchanged or item.changed
-            ]
-            if not selected_device_comparisons:
-                lines.append("    no changed devices")
-            for item in selected_device_comparisons:
-                lines.extend(_device_text(item))
+        lines.append("")
+        lines.extend(
+            _comparison_tree_lines(
+                self.device_comparisons,
+                self.pool_comparisons,
+                self.observation_comparisons,
+                include_unchanged=include_unchanged,
+                depth=tree_depth,
+            )
+        )
 
+        trailer: list[str] = []
         if (
             self.reference_stack_coverage is not None
             and self.candidate_stack_coverage is not None
         ):
-            lines.append(
+            trailer.append(
                 "  allocation stack coverage: "
                 f"{self.reference_stack_coverage.ratio:.1%} -> "
                 f"{self.candidate_stack_coverage.ratio:.1%}"
             )
-        lines.extend(
+        trailer.extend(
             self._attribution_text_lines(
                 indent="  ",
                 limit=limit,
@@ -713,13 +709,16 @@ class _MemoryStateComparison:
             )
         )
         if self.allocation_lifetimes is not None:
-            lines.extend(
+            trailer.extend(
                 self.allocation_lifetimes.summary_lines(
                     indent="  ",
                     limit=limit,
                     stack_depth=stack_depth,
                 )
             )
+        if trailer:
+            lines.append("")
+            lines.extend(trailer)
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -774,6 +773,7 @@ class _MemoryStateComparison:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        depth: TreeDepth | None = None,
     ) -> str:
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
@@ -781,6 +781,7 @@ class _MemoryStateComparison:
             limit=limit,
             stack_depth=stack_depth,
         )
+        tree_depth = _resolve_tree_depth(depth)
         stack_rows = self._display_allocation_stack_comparison_rows(
             limit=limit,
             stack_depth=stack_depth,
@@ -800,37 +801,29 @@ class _MemoryStateComparison:
             if self.allocation_lifetimes is not None
             else []
         )
-        sections = [
-            "<h2>Allocator Totals</h2>",
-            _render_table(
-                self.allocator_scope_comparison_rows(
-                    include_unchanged=include_unchanged
+        sections = ["<h2>Devices</h2>"]
+        if any(
+            item.reference is not None or item.candidate is not None
+            for item in self.device_comparisons
+        ):
+            sections.append(f"<p>{escape(_CUDA_SCOPE_NOTE)}</p>")
+        sections.extend(
+            [
+                _render_report_tree_html(
+                    self._report_tree(),
+                    include_unchanged=include_unchanged,
+                    depth=tree_depth,
+                    empty=("No devices" if include_unchanged else "No changed devices"),
                 ),
-                "No changed totals",
-            ),
-            "<h2>Pools</h2>",
-            _render_table(
-                self.pool_comparison_rows(include_unchanged=include_unchanged),
-                "No changed pools",
-            ),
-            "<h2>Pool/Stream Observations</h2>",
-            _render_table(
-                self.observation_comparison_rows(include_unchanged=include_unchanged),
-                "No changed device/pool/stream observations",
-            ),
-        ]
-        if self.device_comparisons:
-            sections.extend(
-                [
-                    "<h2>Devices (device-wide, includes other processes)</h2>",
-                    _render_table(
-                        self.device_comparison_rows(
-                            include_unchanged=include_unchanged
-                        ),
-                        "No changed devices",
+                "<h2>Allocator Scopes</h2>",
+                _render_table(
+                    self.allocator_scope_comparison_rows(
+                        include_unchanged=include_unchanged
                     ),
-                ]
-            )
+                    "No changed allocator scopes",
+                ),
+            ]
+        )
         if stack_rows:
             sections.extend(
                 [
@@ -885,6 +878,7 @@ class _MemoryStateComparison:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        depth: TreeDepth | None = None,
         overwrite: bool = False,
     ) -> dict[str, Path]:
         limit, stack_depth = _resolve_display_options(
@@ -893,6 +887,7 @@ class _MemoryStateComparison:
             limit=limit,
             stack_depth=stack_depth,
         )
+        tree_depth = _resolve_tree_depth(depth)
         root = _prepare_output(output_dir, overwrite=overwrite)
         paths = _write_common(
             root,
@@ -900,12 +895,14 @@ class _MemoryStateComparison:
                 include_unchanged=include_unchanged,
                 limit=limit,
                 stack_depth=stack_depth,
+                depth=tree_depth,
             ),
             payload=self.to_dict(),
             html=self.to_html(
                 include_unchanged=include_unchanged,
                 limit=limit,
                 stack_depth=stack_depth,
+                depth=tree_depth,
             ),
             allocator_scopes=self.allocator_scope_comparison_rows(
                 include_unchanged=include_unchanged
@@ -980,13 +977,26 @@ class MemoryTimeline:
 
     @property
     def warnings(self) -> tuple[str, ...]:
+        point_warning_values = {
+            warning for point in self.run.points for warning in point.warnings
+        }
         values = [
+            f"point [{point.index}] {point.label}: {warning}"
+            for point in self.run.points
+            for warning in point.warnings
+        ]
+        values.extend(
             warning
             for comparison in self.point_comparisons
             for warning in comparison.warnings
-        ]
+            if warning not in point_warning_values
+        )
         if self.allocation_lifetimes is not None:
-            values.extend(self.allocation_lifetimes.warnings)
+            values.extend(
+                warning
+                for warning in self.allocation_lifetimes.warnings
+                if warning not in point_warning_values
+            )
         return tuple(dict.fromkeys(values))
 
     def allocator_scope_rows(
@@ -998,28 +1008,48 @@ class MemoryTimeline:
             if include_unchanged or (item.delta is not None and item.delta.changed)
         ]
 
-    def pool_rows(self, *, include_unchanged: bool = True) -> list[dict[str, object]]:
+    def _report_trees(self) -> tuple[tuple[_ReportTreeNode, ...], ...]:
+        pools_by_point: dict[int, list[MemoryPoolTimelineEntry]] = {}
+        observations_by_point: dict[int, list[MemoryObservationTimelineEntry]] = {}
+        devices_by_point: dict[int, list[MemoryDeviceTimelineEntry]] = {}
+        for item in self.pool_entries:
+            pools_by_point.setdefault(item.point_index, []).append(item)
+        for item in self.observation_entries:
+            observations_by_point.setdefault(item.point_index, []).append(item)
+        for item in self.device_entries:
+            devices_by_point.setdefault(item.point_index, []).append(item)
+        return tuple(
+            _build_timeline_point_tree(
+                devices_by_point.get(point.index, ()),
+                pools_by_point.get(point.index, ()),
+                observations_by_point.get(point.index, ()),
+            )
+            for point in self.run.points
+        )
+
+    def _tree_rows(
+        self, kind: str, *, include_unchanged: bool
+    ) -> list[dict[str, object]]:
         return [
             item.to_row()
-            for item in self.pool_entries
-            if include_unchanged or (item.delta is not None and item.delta.changed)
+            for tree in self._report_trees()
+            for item in _report_tree_payloads(
+                tree,
+                kind=kind,
+                include_unchanged=include_unchanged,
+            )
         ]
+
+    def pool_rows(self, *, include_unchanged: bool = True) -> list[dict[str, object]]:
+        return self._tree_rows("pool", include_unchanged=include_unchanged)
 
     def observation_rows(
         self, *, include_unchanged: bool = True
     ) -> list[dict[str, object]]:
-        return [
-            item.to_row()
-            for item in self.observation_entries
-            if include_unchanged or (item.delta is not None and item.delta.changed)
-        ]
+        return self._tree_rows("stream", include_unchanged=include_unchanged)
 
     def device_rows(self, *, include_unchanged: bool = True) -> list[dict[str, object]]:
-        return [
-            item.to_row()
-            for item in self.device_entries
-            if include_unchanged or _device_entry_changed(item)
-        ]
+        return self._tree_rows("device", include_unchanged=include_unchanged)
 
     def to_text(
         self,
@@ -1027,6 +1057,7 @@ class MemoryTimeline:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        depth: TreeDepth | None = None,
     ) -> str:
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
@@ -1034,16 +1065,14 @@ class MemoryTimeline:
             limit=limit,
             stack_depth=stack_depth,
         )
+        tree_depth = _resolve_tree_depth(depth)
         lines = [f"CUDA allocator memory timeline {self.run.name!r}"]
+        if any(item.sample is not None for item in self.device_entries):
+            lines.append(f"  {_CUDA_SCOPE_NOTE}")
         lines.extend(f"  warning: {warning}" for warning in self.warnings)
-        allocator_scopes_by_point: dict[
-            int, list[MemoryAllocatorScopeTimelineEntry]
-        ] = {}
         pools_by_point: dict[int, list[MemoryPoolTimelineEntry]] = {}
         observations_by_point: dict[int, list[MemoryObservationTimelineEntry]] = {}
         devices_by_point: dict[int, list[MemoryDeviceTimelineEntry]] = {}
-        for item in self.allocator_scope_entries:
-            allocator_scopes_by_point.setdefault(item.point_index, []).append(item)
         for item in self.pool_entries:
             pools_by_point.setdefault(item.point_index, []).append(item)
         for item in self.observation_entries:
@@ -1051,51 +1080,16 @@ class MemoryTimeline:
         for item in self.device_entries:
             devices_by_point.setdefault(item.point_index, []).append(item)
         for point in self.run.points:
-            point_lines = []
-            for item in allocator_scopes_by_point.get(point.index, []):
-                if not include_unchanged and (
-                    item.delta is None or not item.delta.changed
-                ):
-                    continue
-                point_lines.extend(
-                    _timeline_stats_text(
-                        f"total[{item.scope}]",
-                        item.stats,
-                        item.delta,
-                        indent="    ",
-                    )
-                )
-            for item in pools_by_point.get(point.index, []):
-                if not include_unchanged and (
-                    item.delta is None or not item.delta.changed
-                ):
-                    continue
-                point_lines.extend(
-                    _timeline_stats_text(
-                        item.key.label,
-                        item.stats,
-                        item.delta,
-                        indent="    ",
-                    )
-                )
-            for item in observations_by_point.get(point.index, []):
-                if not include_unchanged and (
-                    item.delta is None or not item.delta.changed
-                ):
-                    continue
-                point_lines.extend(
-                    _timeline_stats_text(
-                        item.key.label,
-                        item.stats,
-                        item.delta,
-                        indent="      ",
-                    )
-                )
-            for item in devices_by_point.get(point.index, []):
-                if not include_unchanged and not _device_entry_changed(item):
-                    continue
-                point_lines.append(_timeline_device_text(item, indent="    "))
+            point_lines = _timeline_point_tree_lines(
+                devices_by_point.get(point.index, []),
+                pools_by_point.get(point.index, []),
+                observations_by_point.get(point.index, []),
+                include_unchanged=include_unchanged,
+                depth=tree_depth,
+                indent="  ",
+            )
             if point_lines:
+                lines.append("")
                 lines.append(f"  [{point.index}] {point.label}")
                 lines.extend(point_lines)
         for comparison in self.point_comparisons:
@@ -1157,6 +1151,7 @@ class MemoryTimeline:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        depth: TreeDepth | None = None,
     ) -> str:
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
@@ -1164,7 +1159,7 @@ class MemoryTimeline:
             limit=limit,
             stack_depth=stack_depth,
         )
-        pool_entries = self.pool_rows(include_unchanged=include_unchanged)
+        tree_depth = _resolve_tree_depth(depth)
         # Charts must plot the true per-point series; the include_unchanged
         # filter is a table concern and would bend or drop chart lines.
         chart_entries = self.pool_rows(include_unchanged=True)
@@ -1207,38 +1202,52 @@ class MemoryTimeline:
             if self.allocation_lifetimes is not None
             else []
         )
-        sections = [
-            "<h2>Allocator Totals</h2>",
-            _render_table(
-                self.allocator_scope_rows(include_unchanged=include_unchanged),
-                "No memory points",
-            ),
-            "<h2>Allocated Memory</h2>",
-            _timeline_svg(chart_entries, "state_allocated_bytes"),
-            "<h2>Reserved Memory</h2>",
-            _timeline_svg(chart_entries, "state_reserved_bytes"),
-            "<h2>Active Memory</h2>",
-            _timeline_svg(chart_entries, "state_active_bytes"),
-            "<h2>Requested Memory</h2>",
-            _timeline_svg(chart_entries, "state_requested_bytes"),
-            "<h2>Pool Timeline</h2>",
-            _render_table(pool_entries, "No memory points"),
-            "<h2>Pool/Stream Timeline</h2>",
-            _render_table(
-                self.observation_rows(include_unchanged=include_unchanged),
-                "No memory points",
-            ),
-        ]
-        if self.device_entries:
+        sections = ["<h2>Devices</h2>"]
+        if any(item.sample is not None for item in self.device_entries):
+            sections.append(f"<p>{escape(_CUDA_SCOPE_NOTE)}</p>")
+        rendered_points = 0
+        for point, tree in zip(self.run.points, self._report_trees()):
+            if not _prune_report_tree(
+                tree,
+                include_unchanged=include_unchanged,
+                depth=tree_depth,
+            ):
+                continue
+            rendered_points += 1
             sections.extend(
                 [
-                    "<h2>Device Timeline (device-wide, includes other processes)</h2>",
-                    _render_table(
-                        self.device_rows(include_unchanged=include_unchanged),
-                        "No device memory samples",
+                    f"<h3>[{point.index}] {escape(point.label)}</h3>",
+                    _render_report_tree_html(
+                        tree,
+                        include_unchanged=include_unchanged,
+                        depth=tree_depth,
+                        empty="No devices",
                     ),
                 ]
             )
+        if rendered_points == 0:
+            sections.append(
+                "<p>No devices</p>"
+                if include_unchanged
+                else "<p>No changed devices</p>"
+            )
+        sections.extend(
+            [
+                "<h2>Allocated Memory</h2>",
+                _timeline_svg(chart_entries, "state_allocated_bytes"),
+                "<h2>Reserved Memory</h2>",
+                _timeline_svg(chart_entries, "state_reserved_bytes"),
+                "<h2>Active Memory</h2>",
+                _timeline_svg(chart_entries, "state_active_bytes"),
+                "<h2>Requested Memory</h2>",
+                _timeline_svg(chart_entries, "state_requested_bytes"),
+                "<h2>Allocator Scopes</h2>",
+                _render_table(
+                    self.allocator_scope_rows(include_unchanged=include_unchanged),
+                    "No memory points",
+                ),
+            ]
+        )
         if allocation_stack_rows:
             sections.extend(
                 [
@@ -1290,6 +1299,7 @@ class MemoryTimeline:
         include_unchanged: bool = True,
         limit: int | None = None,
         stack_depth: int | None = None,
+        depth: TreeDepth | None = None,
         overwrite: bool = False,
     ) -> dict[str, Path]:
         limit, stack_depth = _resolve_display_options(
@@ -1298,6 +1308,7 @@ class MemoryTimeline:
             limit=limit,
             stack_depth=stack_depth,
         )
+        tree_depth = _resolve_tree_depth(depth)
         root = _prepare_output(output_dir, overwrite=overwrite)
         paths = _write_common(
             root,
@@ -1305,12 +1316,14 @@ class MemoryTimeline:
                 include_unchanged=include_unchanged,
                 limit=limit,
                 stack_depth=stack_depth,
+                depth=tree_depth,
             ),
             payload=self.to_dict(),
             html=self.to_html(
                 include_unchanged=include_unchanged,
                 limit=limit,
                 stack_depth=stack_depth,
+                depth=tree_depth,
             ),
             allocator_scopes=self.allocator_scope_rows(
                 include_unchanged=include_unchanged
@@ -1445,7 +1458,8 @@ class MemoryPhaseComparison:
         for row in device_rows:
             lines.append(
                 "    "
-                f"device[{row['device_index']}] {row['metric']}: "
+                f"device[{row['baseline_device_index']}] -> "
+                f"device[{row['candidate_device_index']}] {row['metric']}: "
                 f"end_gap {format_delta_bytes(int(row['end_gap_bytes']))} = "
                 f"start_gap {format_delta_bytes(int(row['start_gap_bytes']))} + "
                 f"candidate_change {format_delta_bytes(int(row['candidate_change_bytes']))} - "
@@ -1856,8 +1870,8 @@ class MemoryRunGroupSummary:
                     f"{format_bytes(item.sample.used_bytes)} of "
                     f"{format_bytes(item.sample.total_bytes)}, allocator reserved "
                     f"{format_bytes(item.allocator_reserved_bytes)}, "
-                    f"unattributed device "
-                    f"{format_bytes(item.unattributed_device_bytes)}"
+                    f"residual "
+                    f"{format_bytes(item.cuda_allocator_residual_bytes)}"
                 )
         return "\n".join(lines)
 
@@ -2048,7 +2062,7 @@ class MemoryRunGroupPhaseComparison:
             for row in device_rows:
                 lines.append(
                     "  "
-                    f"rank {row['rank']} device[{row['device_index']}] "
+                    f"rank {row['rank']} device[{row['baseline_device_index']}] -> device[{row['candidate_device_index']}] "
                     f"{row['metric']}: end gap "
                     f"{format_delta_bytes(int(row['end_gap_bytes']))}; "
                     f"change gap "
@@ -2323,98 +2337,61 @@ def _display_event_row(
     return row
 
 
-def _pool_text(item: MemoryPoolComparison) -> list[str]:
-    reference = item.reference_key.label if item.reference_key else "<none>"
-    candidate = item.candidate_key.label if item.candidate_key else "<none>"
-    return [
-        f"    {reference} -> {candidate} [{item.match}]",
-        *_comparison_stats_text(
-            item.reference, item.candidate, item.delta, item.lifecycle, indent="      "
-        ),
-    ]
+TreeDepth = Literal["device", "pool", "stream"]
+_TREE_DEPTHS: tuple[TreeDepth, ...] = ("device", "pool", "stream")
+_CUDA_SCOPE_NOTE = (
+    "CUDA scope: device-wide, includes other processes; residual = CUDA used - "
+    "allocator reserved. CUDA and allocator measurements are consecutive, not atomic."
+)
+_RENDERED_MATCH_TAGS = frozenset(
+    {"mapped", "pool_mapping", "reference_only", "candidate_only"}
+)
+_DIAGNOSTIC_METRICS: tuple[tuple[str, str, bool], ...] = (
+    ("inactive", "inactive_bytes", True),
+    ("awaiting free", "awaiting_free_bytes", True),
+    ("fragmentation", "internal_fragmentation_bytes", True),
+    ("segments", "segment_count", False),
+    ("blocks", "block_count", False),
+    ("inactive blocks", "inactive_block_count", False),
+    ("largest inactive block", "largest_inactive_block_bytes", True),
+    ("expandable segments", "expandable_segment_count", False),
+    ("expandable reserved", "expandable_reserved_bytes", True),
+    ("expandable inactive", "expandable_inactive_bytes", True),
+)
 
 
-def _observation_text(item: MemoryObservationComparison) -> list[str]:
-    reference = item.reference_key.label if item.reference_key else "<none>"
-    candidate = item.candidate_key.label if item.candidate_key else "<none>"
-    return [
-        f"    {reference} -> {candidate} [{item.match}]",
-        *_comparison_stats_text(
-            item.reference, item.candidate, item.delta, item.lifecycle, indent="      "
-        ),
-    ]
+def _resolve_tree_depth(value: TreeDepth | None) -> TreeDepth:
+    resolved = "stream" if value is None else value
+    if resolved not in _TREE_DEPTHS:
+        raise ValueError("depth must be one of 'device', 'pool', or 'stream'")
+    return cast(TreeDepth, resolved)
 
 
-def _device_text(item: MemoryDeviceComparison) -> list[str]:
-    lines = [f"    device[{item.device_index}]"]
-    if item.reference is not None and item.candidate is not None:
-        lines.extend(
-            (
-                "      CUDA used: "
-                + format_comparison(
-                    item.reference.used_bytes,
-                    item.candidate.used_bytes,
-                    cast(int, item.delta_used_bytes),
-                ),
-                "      CUDA free: "
-                + format_comparison(
-                    item.reference.free_bytes,
-                    item.candidate.free_bytes,
-                    cast(int, item.delta_free_bytes),
-                ),
-                "      CUDA-visible total: "
-                + format_comparison(
-                    item.reference.total_bytes,
-                    item.candidate.total_bytes,
-                    cast(int, item.delta_total_bytes),
-                ),
-                "      allocator reserved: "
-                + format_comparison(
-                    item.reference_allocator_reserved_bytes,
-                    item.candidate_allocator_reserved_bytes,
-                    item.delta_allocator_reserved_bytes,
-                ),
-                "      unattributed device: "
-                + format_comparison(
-                    cast(int, item.reference_unattributed_device_bytes),
-                    cast(int, item.candidate_unattributed_device_bytes),
-                    cast(int, item.delta_unattributed_device_bytes),
-                ),
-            )
-        )
-        if item.delta_total_bytes:
-            lines.append(
-                "      note: CUDA-visible capacity changed; CUDA used growth "
-                "is not allocation growth alone"
-            )
-        return lines
-    for side, sample, reserved in (
-        ("reference", item.reference, item.reference_allocator_reserved_bytes),
-        ("candidate", item.candidate, item.candidate_allocator_reserved_bytes),
-    ):
-        if sample is None:
-            lines.append(f"      {side} sample unavailable")
-        else:
-            lines.append(
-                f"      {side}: CUDA used {format_bytes(sample.used_bytes)}, "
-                f"free {format_bytes(sample.free_bytes)}, total "
-                f"{format_bytes(sample.total_bytes)}, allocator reserved "
-                f"{format_bytes(reserved)}, unattributed device "
-                f"{format_bytes(sample.used_bytes - reserved)}"
-            )
-    return lines
+def _match_tag(match: str) -> str:
+    return f" [{match}]" if match in _RENDERED_MATCH_TAGS else ""
 
 
-def _scope_text(item: MemoryAllocatorScopeComparison) -> list[str]:
-    return [
-        f"    total[{item.scope}]",
-        *_comparison_stats_text(
-            item.reference, item.candidate, item.delta, None, indent="      "
-        ),
-    ]
+def _tree_pool_label(pool_id: Any) -> str:
+    scope = "default" if tuple(pool_id) == DEFAULT_POOL_ID else "private"
+    return f"{pool_id_label(pool_id)} ({scope})"
 
 
-def _comparison_stats_text(
+def _format_delta_count(value: int) -> str:
+    return f"{value:+d}" if value else "0"
+
+
+def _lifecycle_line(lifecycle: Any | None, *, indent: str) -> list[str]:
+    if lifecycle is None or not lifecycle.changed:
+        return []
+    lifecycle_values = ", ".join(
+        f"{name.removesuffix('_bytes').replace('_', ' ')}={format_bytes(int(value))}"
+        for name, value in lifecycle.to_dict().items()
+        if value
+    )
+    return [f"{indent}lifecycle: {lifecycle_values}"]
+
+
+def _comparison_stat_block(
     reference: Any,
     candidate: Any,
     delta: Any,
@@ -2423,28 +2400,17 @@ def _comparison_stats_text(
     indent: str,
 ) -> list[str]:
     lines = [
+        f"{indent}reserved: "
+        f"{format_comparison(reference.reserved_bytes, candidate.reserved_bytes, delta.reserved_bytes)}",
         f"{indent}allocated: "
         f"{format_comparison(reference.allocated_bytes, candidate.allocated_bytes, delta.allocated_bytes)}, "
-        f"reserved: "
-        f"{format_comparison(reference.reserved_bytes, candidate.reserved_bytes, delta.reserved_bytes)}",
-        f"{indent}active: "
+        f"active: "
         f"{format_comparison(reference.active_bytes, candidate.active_bytes, delta.active_bytes)}, "
         f"requested: "
         f"{format_comparison(reference.requested_bytes, candidate.requested_bytes, delta.requested_bytes)}",
     ]
     diagnostics = []
-    for label, name, is_bytes in (
-        ("inactive", "inactive_bytes", True),
-        ("awaiting free", "awaiting_free_bytes", True),
-        ("fragmentation", "internal_fragmentation_bytes", True),
-        ("segments", "segment_count", False),
-        ("blocks", "block_count", False),
-        ("inactive blocks", "inactive_block_count", False),
-        ("largest inactive block", "largest_inactive_block_bytes", True),
-        ("expandable segments", "expandable_segment_count", False),
-        ("expandable reserved", "expandable_reserved_bytes", True),
-        ("expandable inactive", "expandable_inactive_bytes", True),
-    ):
+    for label, name, is_bytes in _DIAGNOSTIC_METRICS:
         change = int(getattr(delta, name))
         if not change:
             continue
@@ -2453,19 +2419,12 @@ def _comparison_stats_text(
         value = (
             format_comparison(before, after, change)
             if is_bytes
-            else f"{before} -> {after} (delta {change:+d})"
+            else f"{before} -> {after} ({_format_delta_count(change)})"
         )
         diagnostics.append(f"{label}={value}")
     if diagnostics:
         lines.append(f"{indent}diagnostics: " + ", ".join(diagnostics))
-    if lifecycle is not None and lifecycle.changed:
-        lifecycle_values = ", ".join(
-            f"{name.removesuffix('_bytes').replace('_', ' ')}="
-            f"{format_bytes(int(value))}"
-            for name, value in lifecycle.to_dict().items()
-            if value
-        )
-        lines.append(f"{indent}lifecycle: {lifecycle_values}")
+    lines.extend(_lifecycle_line(lifecycle, indent=indent))
     return lines
 
 
@@ -2484,41 +2443,427 @@ def _stack_delta_text(
         f"size={format_comparison(item.reference_size_bytes, item.candidate_size_bytes, item.delta_size_bytes)}, "
         f"requested={format_comparison(item.reference_requested_bytes, item.candidate_requested_bytes, item.delta_requested_bytes)}, "
         f"count={item.reference_count} -> {item.candidate_count} "
-        f"(delta {item.delta_count:+d}) at "
+        f"({_format_delta_count(item.delta_count)}) at "
         f"{item.display_stack(stack_depth)}"
     )
 
 
-def _device_entry_changed(item: MemoryDeviceTimelineEntry) -> bool:
-    return item.delta_used_bytes is not None and bool(
-        item.delta_used_bytes
-        or item.delta_free_bytes
-        or item.delta_total_bytes
-        or item.delta_allocator_reserved_bytes
-        or item.delta_unattributed_device_bytes
+@dataclass
+class _ReportTreeNode:
+    """Private report tree shared by comparisons and timelines."""
+
+    kind: str
+    identity: tuple[object, ...]
+    label: str
+    details: tuple[str, ...] = ()
+    payload: Any | None = None
+    changed_self: bool = False
+    children: list["_ReportTreeNode"] = field(default_factory=list)
+
+    @property
+    def changed_subtree(self) -> bool:
+        return self.changed_self or any(
+            child.changed_subtree for child in self.children
+        )
+
+
+def _tree_kind_visible(kind: str, depth: TreeDepth) -> bool:
+    if kind == "stream":
+        return depth == "stream"
+    if kind == "pool":
+        return depth in ("pool", "stream")
+    return True
+
+
+def _prune_report_tree(
+    nodes: Sequence[_ReportTreeNode],
+    *,
+    include_unchanged: bool,
+    depth: TreeDepth,
+) -> tuple[_ReportTreeNode, ...]:
+    """Prune once, bottom-up, while retaining changed descendants' parents."""
+
+    def prune(node: _ReportTreeNode) -> _ReportTreeNode | None:
+        if not _tree_kind_visible(node.kind, depth):
+            return None
+        children = [
+            selected
+            for child in node.children
+            if (selected := prune(child)) is not None
+        ]
+        if not include_unchanged and not node.changed_self and not children:
+            return None
+        return _ReportTreeNode(
+            kind=node.kind,
+            identity=node.identity,
+            label=node.label,
+            details=node.details,
+            payload=node.payload,
+            changed_self=node.changed_self,
+            children=children,
+        )
+
+    return tuple(selected for node in nodes if (selected := prune(node)) is not None)
+
+
+def _report_tree_payloads(
+    nodes: Sequence[_ReportTreeNode],
+    *,
+    kind: str,
+    include_unchanged: bool,
+) -> tuple[Any, ...]:
+    selected = _prune_report_tree(
+        nodes,
+        include_unchanged=include_unchanged,
+        depth="stream",
     )
+    payloads: list[Any] = []
+
+    def visit(node: _ReportTreeNode) -> None:
+        if node.kind == kind and node.payload is not None:
+            payloads.append(node.payload)
+        for child in node.children:
+            visit(child)
+
+    for node in selected:
+        visit(node)
+    return tuple(payloads)
 
 
-def _timeline_device_text(item: MemoryDeviceTimelineEntry, *, indent: str) -> str:
-    def render(current: int, delta: int | None) -> str:
-        if delta is None:
-            return format_bytes(current)
-        return f"{format_bytes(current)} (delta {format_delta_bytes(delta)})"
+def _render_report_tree_text(
+    nodes: Sequence[_ReportTreeNode],
+    *,
+    include_unchanged: bool,
+    depth: TreeDepth,
+    indent: str = "  ",
+    empty: str,
+) -> list[str]:
+    selected = _prune_report_tree(
+        nodes,
+        include_unchanged=include_unchanged,
+        depth=depth,
+    )
+    if not selected:
+        return [f"{indent}{empty}"]
+    lines: list[str] = []
+
+    def render(node: _ReportTreeNode, level: int) -> None:
+        prefix = indent + "  " * level
+        lines.append(f"{prefix}{node.label}")
+        lines.extend(f"{prefix}  {detail}" for detail in node.details)
+        for child in node.children:
+            render(child, level + 1)
+
+    for node in selected:
+        render(node, 0)
+    return lines
+
+
+def _render_report_tree_html(
+    nodes: Sequence[_ReportTreeNode],
+    *,
+    include_unchanged: bool,
+    depth: TreeDepth,
+    empty: str,
+) -> str:
+    selected = _prune_report_tree(
+        nodes,
+        include_unchanged=include_unchanged,
+        depth=depth,
+    )
+    if not selected:
+        return f"<p>{escape(empty)}</p>"
+
+    def render(node: _ReportTreeNode) -> str:
+        details = "".join(
+            f'<div class="tree-detail">{escape(detail)}</div>'
+            for detail in node.details
+        )
+        children = (
+            '<ul class="memory-tree">'
+            + "".join(render(child) for child in node.children)
+            + "</ul>"
+            if node.children
+            else ""
+        )
+        return (
+            f'<li data-kind="{escape(node.kind)}">'
+            f'<div class="tree-label">{escape(node.label)}</div>'
+            f"{details}{children}</li>"
+        )
 
     return (
-        f"{indent}device[{item.device_index}] (device-wide) "
-        f"CUDA used={render(item.sample.used_bytes, item.delta_used_bytes)}, "
-        f"free={render(item.sample.free_bytes, item.delta_free_bytes)}, "
-        f"total={render(item.sample.total_bytes, item.delta_total_bytes)}, "
-        "allocator reserved="
-        f"{render(item.allocator_reserved_bytes, item.delta_allocator_reserved_bytes)}, "
-        "unattributed device="
-        f"{render(item.unattributed_device_bytes, item.delta_unattributed_device_bytes)}"
+        '<ul class="memory-tree">'
+        + "".join(render(node) for node in selected)
+        + "</ul>"
     )
 
 
-def _timeline_stats_text(
+def _pair_value_line(
     label: str,
+    reference: int | None,
+    candidate: int | None,
+) -> str:
+    if reference is None:
+        return f"{label}: n/a -> {format_bytes(cast(int, candidate))}"
+    if candidate is None:
+        return f"{label}: {format_bytes(reference)} -> n/a"
+    return f"{label}: {format_comparison(reference, candidate, candidate - reference)}"
+
+
+def _device_pair_label(row: MemoryDeviceComparison) -> str:
+    reference = row.reference_device_index
+    candidate = row.candidate_device_index
+    if reference is None:
+        return f"device[{candidate}] [candidate_only]"
+    if candidate is None:
+        return f"device[{reference}] [reference_only]"
+    label = f"device[{reference}]"
+    if reference != candidate:
+        label += f" -> device[{candidate}]"
+    return label + _match_tag(row.match)
+
+
+def _comparison_sample_changed(row: MemoryDeviceComparison) -> bool:
+    if (row.reference is None) != (row.candidate is None):
+        return True
+    return bool(row.delta_used_bytes or row.delta_free_bytes or row.delta_total_bytes)
+
+
+def _comparison_pool_node(
+    row: MemoryPoolComparison,
+    observations: Sequence[MemoryObservationComparison],
+) -> _ReportTreeNode:
+    reference_key = row.reference_key
+    candidate_key = row.candidate_key
+    if (
+        reference_key is not None
+        and candidate_key is not None
+        and reference_key.pool_id != candidate_key.pool_id
+    ):
+        label = (
+            f"{_tree_pool_label(reference_key.pool_id)} -> "
+            f"{_tree_pool_label(candidate_key.pool_id)}"
+        )
+    else:
+        key = reference_key if reference_key is not None else candidate_key
+        label = _tree_pool_label(cast(Any, key).pool_id)
+    node = _ReportTreeNode(
+        kind="pool",
+        identity=(reference_key, candidate_key),
+        label=label + _match_tag(row.match),
+        details=tuple(
+            _comparison_stat_block(
+                row.reference,
+                row.candidate,
+                row.delta,
+                row.lifecycle,
+                indent="",
+            )
+        ),
+        payload=row,
+        changed_self=row.changed,
+    )
+    for observation in observations:
+        key = observation.reference_key or observation.candidate_key
+        node.children.append(
+            _ReportTreeNode(
+                kind="stream",
+                identity=(observation.reference_key, observation.candidate_key),
+                label=stream_label(cast(Any, key).stream)
+                + _match_tag(observation.match),
+                details=tuple(
+                    _comparison_stat_block(
+                        observation.reference,
+                        observation.candidate,
+                        observation.delta,
+                        observation.lifecycle,
+                        indent="",
+                    )
+                ),
+                payload=observation,
+                changed_self=observation.changed,
+            )
+        )
+    return node
+
+
+def _build_comparison_tree(
+    device_rows: Sequence[MemoryDeviceComparison],
+    pool_rows: Sequence[MemoryPoolComparison],
+    observation_rows: Sequence[MemoryObservationComparison],
+) -> tuple[_ReportTreeNode, ...]:
+    observations_by_reference: dict[Any, list[MemoryObservationComparison]] = {}
+    observations_by_candidate: dict[Any, list[MemoryObservationComparison]] = {}
+    for observation in observation_rows:
+        if observation.reference_key is not None:
+            observations_by_reference.setdefault(
+                observation.reference_key.pool_key, []
+            ).append(observation)
+        if observation.candidate_key is not None:
+            observations_by_candidate.setdefault(
+                observation.candidate_key.pool_key, []
+            ).append(observation)
+
+    pool_nodes: list[tuple[MemoryPoolComparison, _ReportTreeNode]] = []
+    for pool in pool_rows:
+        observations = (
+            observations_by_reference.get(pool.reference_key, [])
+            if pool.reference_key is not None
+            else observations_by_candidate.get(pool.candidate_key, [])
+        )
+        pool_nodes.append((pool, _comparison_pool_node(pool, observations)))
+
+    roots: list[
+        tuple[MemoryDeviceComparison | None, _ReportTreeNode, _ReportTreeNode]
+    ] = []
+    for row in device_rows:
+        root = _ReportTreeNode(
+            kind="device",
+            identity=(row.reference_device_index, row.candidate_device_index),
+            label=_device_pair_label(row),
+            payload=row,
+            changed_self=_comparison_sample_changed(row),
+        )
+        allocator = _ReportTreeNode(
+            kind="allocator",
+            identity=("allocator", *root.identity),
+            label="allocator:",
+            details=tuple(
+                _comparison_stat_block(
+                    row.reference_allocator,
+                    row.candidate_allocator,
+                    row.allocator_delta,
+                    None,
+                    indent="",
+                )
+            ),
+            changed_self=row.allocator_delta.changed,
+        )
+        sampled = row.reference is not None or row.candidate is not None
+        if sampled:
+            total = _ReportTreeNode(
+                kind="cuda_total",
+                identity=("cuda_total", *root.identity),
+                label=_pair_value_line(
+                    "CUDA total",
+                    row.reference.total_bytes if row.reference else None,
+                    row.candidate.total_bytes if row.candidate else None,
+                ),
+                changed_self=(
+                    (row.reference is None) != (row.candidate is None)
+                    or bool(row.delta_total_bytes)
+                ),
+            )
+            residual = _ReportTreeNode(
+                kind="residual",
+                identity=("residual", *root.identity),
+                label=_pair_value_line(
+                    "residual",
+                    row.reference_cuda_allocator_residual_bytes,
+                    row.candidate_cuda_allocator_residual_bytes,
+                ),
+                changed_self=(
+                    (row.reference is None) != (row.candidate is None)
+                    or bool(row.delta_cuda_allocator_residual_bytes)
+                ),
+            )
+            used = _ReportTreeNode(
+                kind="cuda_used",
+                identity=("cuda_used", *root.identity),
+                label=_pair_value_line(
+                    "CUDA used",
+                    row.reference.used_bytes if row.reference else None,
+                    row.candidate.used_bytes if row.candidate else None,
+                ),
+                changed_self=(
+                    (row.reference is None) != (row.candidate is None)
+                    or bool(row.delta_used_bytes)
+                ),
+                children=[residual, allocator],
+            )
+            root.children.extend((total, used))
+        else:
+            root.children.append(allocator)
+        roots.append((row, root, allocator))
+
+    for pool, pool_node in pool_nodes:
+        reference_device = (
+            pool.reference_key.device_index if pool.reference_key is not None else None
+        )
+        candidate_device = (
+            pool.candidate_key.device_index if pool.candidate_key is not None else None
+        )
+        parent = next(
+            (
+                allocator
+                for _row, root, allocator in roots
+                if (
+                    (reference_device is None or root.identity[0] == reference_device)
+                    and (
+                        candidate_device is None or root.identity[1] == candidate_device
+                    )
+                )
+            ),
+            None,
+        )
+        if parent is None:
+            if reference_device is None:
+                label = f"device[{candidate_device}] [candidate_only]"
+            elif candidate_device is None:
+                label = f"device[{reference_device}] [reference_only]"
+            elif reference_device == candidate_device:
+                label = f"device[{reference_device}]"
+            else:
+                label = f"device[{reference_device}] -> device[{candidate_device}]"
+            root = _ReportTreeNode(
+                kind="device",
+                identity=(reference_device, candidate_device),
+                label=label,
+            )
+            parent = _ReportTreeNode(
+                kind="allocator",
+                identity=("allocator", *root.identity),
+                label="allocator:",
+            )
+            root.children.append(parent)
+            roots.append((None, root, parent))
+        parent.children.append(pool_node)
+
+    for row, _root, allocator in roots:
+        if row is not None:
+            continue
+        reference_allocator = MemoryStats.combine(
+            child.payload.reference for child in allocator.children
+        )
+        candidate_allocator = MemoryStats.combine(
+            child.payload.candidate for child in allocator.children
+        )
+        delta = MemoryStatsDelta.between(
+            reference_allocator,
+            candidate_allocator,
+        )
+        allocator.details = tuple(
+            _comparison_stat_block(
+                reference_allocator,
+                candidate_allocator,
+                delta,
+                None,
+                indent="",
+            )
+        )
+        allocator.changed_self = delta.changed
+
+    return tuple(root for _row, root, _allocator in roots)
+
+
+def _timeline_value_line(label: str, current: int, delta: int | None) -> str:
+    if delta is None:
+        return f"{label}: {format_bytes(current)}"
+    return f"{label}: {format_bytes(current)} ({format_delta_bytes(delta)})"
+
+
+def _timeline_stat_block(
     stats: MemoryStats,
     delta: MemoryStatsDelta | None,
     *,
@@ -2529,30 +2874,17 @@ def _timeline_stats_text(
         if delta is None:
             return format_bytes(current)
         return (
-            f"{format_bytes(current)} "
-            f"(delta {format_delta_bytes(int(getattr(delta, name)))})"
+            f"{format_bytes(current)} ({format_delta_bytes(int(getattr(delta, name)))})"
         )
 
     lines = [
-        f"{indent}{label} "
-        f"allocated={render_bytes('allocated_bytes')}, "
-        f"reserved={render_bytes('reserved_bytes')}, "
-        f"active={render_bytes('active_bytes')}, "
-        f"requested={render_bytes('requested_bytes')}"
+        f"{indent}reserved: {render_bytes('reserved_bytes')}",
+        f"{indent}allocated: {render_bytes('allocated_bytes')}, "
+        f"active: {render_bytes('active_bytes')}, "
+        f"requested: {render_bytes('requested_bytes')}",
     ]
     diagnostics = []
-    for diagnostic_label, name, is_bytes in (
-        ("inactive", "inactive_bytes", True),
-        ("awaiting free", "awaiting_free_bytes", True),
-        ("internal fragmentation", "internal_fragmentation_bytes", True),
-        ("segments", "segment_count", False),
-        ("blocks", "block_count", False),
-        ("inactive blocks", "inactive_block_count", False),
-        ("largest inactive block", "largest_inactive_block_bytes", True),
-        ("expandable segments", "expandable_segment_count", False),
-        ("expandable reserved", "expandable_reserved_bytes", True),
-        ("expandable inactive", "expandable_inactive_bytes", True),
-    ):
+    for diagnostic_label, name, is_bytes in _DIAGNOSTIC_METRICS:
         current = int(getattr(stats, name))
         if delta is None:
             if not current:
@@ -2563,14 +2895,179 @@ def _timeline_stats_text(
             if not change:
                 continue
             rendered = (
-                f"{format_bytes(current)} (delta {format_delta_bytes(change)})"
+                f"{format_bytes(current)} ({format_delta_bytes(change)})"
                 if is_bytes
-                else f"{current} (delta {change:+d})"
+                else f"{current} ({_format_delta_count(change)})"
             )
         diagnostics.append(f"{diagnostic_label}={rendered}")
     if diagnostics:
-        lines.append(f"{indent}  diagnostics: " + ", ".join(diagnostics))
+        lines.append(f"{indent}diagnostics: " + ", ".join(diagnostics))
     return lines
+
+
+def _timeline_entry_changed(item: Any) -> bool:
+    return item.delta is not None and item.delta.changed
+
+
+def _timeline_device_changed(item: MemoryDeviceTimelineEntry) -> bool:
+    return bool(
+        item.delta_used_bytes or item.delta_free_bytes or item.delta_total_bytes
+    )
+
+
+def _build_timeline_point_tree(
+    device_entries: Sequence[MemoryDeviceTimelineEntry],
+    pool_entries: Sequence[MemoryPoolTimelineEntry],
+    observation_entries: Sequence[MemoryObservationTimelineEntry],
+) -> tuple[_ReportTreeNode, ...]:
+    observations_by_pool: dict[Any, list[MemoryObservationTimelineEntry]] = {}
+    for observation in observation_entries:
+        observations_by_pool.setdefault(observation.key.pool_key, []).append(
+            observation
+        )
+    pools_by_device: dict[int, list[_ReportTreeNode]] = {}
+    for pool in pool_entries:
+        pool_node = _ReportTreeNode(
+            kind="pool",
+            identity=(pool.point_index, pool.key),
+            label=_tree_pool_label(pool.key.pool_id),
+            details=tuple(_timeline_stat_block(pool.stats, pool.delta, indent="")),
+            payload=pool,
+            changed_self=_timeline_entry_changed(pool),
+        )
+        for observation in observations_by_pool.get(pool.key, []):
+            pool_node.children.append(
+                _ReportTreeNode(
+                    kind="stream",
+                    identity=(observation.point_index, observation.key),
+                    label=stream_label(observation.key.stream),
+                    details=tuple(
+                        _timeline_stat_block(
+                            observation.stats,
+                            observation.delta,
+                            indent="",
+                        )
+                    ),
+                    payload=observation,
+                    changed_self=_timeline_entry_changed(observation),
+                )
+            )
+        pools_by_device.setdefault(pool.key.device_index, []).append(pool_node)
+
+    roots: list[_ReportTreeNode] = []
+    for entry in device_entries:
+        root = _ReportTreeNode(
+            kind="device",
+            identity=(entry.point_index, entry.device_index),
+            label=f"device[{entry.device_index}]",
+            payload=entry,
+            changed_self=_timeline_device_changed(entry),
+        )
+        allocator = _ReportTreeNode(
+            kind="allocator",
+            identity=(entry.point_index, entry.device_index, "allocator"),
+            label="allocator:",
+            details=tuple(_timeline_stat_block(entry.stats, entry.delta, indent="")),
+            changed_self=(entry.delta is not None and entry.delta.changed),
+            children=pools_by_device.pop(entry.device_index, []),
+        )
+        if entry.sample is not None:
+            total = _ReportTreeNode(
+                kind="cuda_total",
+                identity=(entry.point_index, entry.device_index, "cuda_total"),
+                label=_timeline_value_line(
+                    "CUDA total",
+                    entry.sample.total_bytes,
+                    entry.delta_total_bytes,
+                ),
+                changed_self=bool(entry.delta_total_bytes),
+            )
+            residual = _ReportTreeNode(
+                kind="residual",
+                identity=(entry.point_index, entry.device_index, "residual"),
+                label=_timeline_value_line(
+                    "residual",
+                    cast(int, entry.cuda_allocator_residual_bytes),
+                    entry.delta_cuda_allocator_residual_bytes,
+                ),
+                changed_self=bool(entry.delta_cuda_allocator_residual_bytes),
+            )
+            used = _ReportTreeNode(
+                kind="cuda_used",
+                identity=(entry.point_index, entry.device_index, "cuda_used"),
+                label=_timeline_value_line(
+                    "CUDA used", entry.sample.used_bytes, entry.delta_used_bytes
+                ),
+                changed_self=bool(entry.delta_used_bytes),
+                children=[residual, allocator],
+            )
+            root.children.extend((total, used))
+        else:
+            root.children.append(allocator)
+        roots.append(root)
+
+    for device, pools in sorted(pools_by_device.items()):
+        allocator = _ReportTreeNode(
+            kind="allocator",
+            identity=(pool_entries[0].point_index, device, "allocator"),
+            label="allocator:",
+            changed_self=any(pool.changed_subtree for pool in pools),
+            children=pools,
+        )
+        roots.append(
+            _ReportTreeNode(
+                kind="device",
+                identity=(pool_entries[0].point_index, device),
+                label=f"device[{device}]",
+                children=[allocator],
+            )
+        )
+    return tuple(roots)
+
+
+def _comparison_tree_lines(
+    device_rows: Sequence[MemoryDeviceComparison],
+    pool_rows: Sequence[MemoryPoolComparison],
+    observation_rows: Sequence[MemoryObservationComparison],
+    *,
+    include_unchanged: bool,
+    depth: TreeDepth,
+) -> list[str]:
+    return _render_report_tree_text(
+        _build_comparison_tree(device_rows, pool_rows, observation_rows),
+        include_unchanged=include_unchanged,
+        depth=depth,
+        empty="no devices" if include_unchanged else "no changed devices",
+    )
+
+
+def _timeline_point_tree_lines(
+    device_entries: Sequence[MemoryDeviceTimelineEntry],
+    pool_entries: Sequence[MemoryPoolTimelineEntry],
+    observation_entries: Sequence[MemoryObservationTimelineEntry],
+    *,
+    include_unchanged: bool,
+    depth: TreeDepth,
+    indent: str,
+) -> list[str]:
+    tree = _build_timeline_point_tree(
+        device_entries,
+        pool_entries,
+        observation_entries,
+    )
+    if not _prune_report_tree(
+        tree,
+        include_unchanged=include_unchanged,
+        depth=depth,
+    ):
+        return []
+    return _render_report_tree_text(
+        tree,
+        include_unchanged=include_unchanged,
+        depth=depth,
+        indent=indent,
+        empty="no devices",
+    )
 
 
 def _prepare_output(
@@ -2661,6 +3158,10 @@ def _html_document(
     th, td {{ border-bottom: 1px solid #e5e7eb; padding: 7px 9px; text-align: right; white-space: nowrap; }}
     th {{ background: #f3f4f6; color: #374151; }}
     td:first-child, th:first-child {{ text-align: left; }}
+    .memory-tree {{ list-style: none; margin: 8px 0 0; padding-left: 22px; border-left: 1px solid #d1d5db; }}
+    .memory-tree > li {{ margin: 8px 0; }}
+    .tree-label {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }}
+    .tree-detail {{ margin: 3px 0 0 14px; color: #374151; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }}
     .empty {{ color: #6b7280; }}
   </style>
 </head>

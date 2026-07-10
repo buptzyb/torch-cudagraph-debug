@@ -575,6 +575,8 @@ class TensorRun:
         }
 
     def point(self, ref: str | int | TensorPoint) -> TensorPoint:
+        if isinstance(ref, bool):
+            raise TypeError("tensor point reference must not be a boolean")
         if isinstance(ref, TensorPoint):
             if ref.run_id != self.run_id:
                 raise TensorOwnershipError(

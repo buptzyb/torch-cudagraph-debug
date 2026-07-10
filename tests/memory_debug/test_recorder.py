@@ -788,3 +788,9 @@ def test_invalid_allocator_schema_in_payloads_raises_bundle_error(
             "after",
             attribution=MemoryAttributionOptions(events=True),
         )
+
+
+def test_memory_run_rejects_boolean_point_reference() -> None:
+    run = make_run([snapshot(segment(active=10))], labels=("point",))
+    with pytest.raises(TypeError, match="must not be a boolean"):
+        run.point(True)

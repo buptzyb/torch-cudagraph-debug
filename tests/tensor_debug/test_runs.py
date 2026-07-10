@@ -498,3 +498,9 @@ def test_tensor_models_reject_unserializable_identity_and_time_states() -> None:
     after_finish = replace(point, timestamp=run.finished_at + 1)
     with pytest.raises(ValueError, match="must not follow finished_at"):
         replace(run, points=(after_finish,))
+
+
+def test_tensor_run_rejects_boolean_point_reference() -> None:
+    run = make_tensor_run([("point", [("x", torch.ones(1), "full")])])
+    with pytest.raises(TypeError, match="must not be a boolean"):
+        run.point(True)

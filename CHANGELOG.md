@@ -67,9 +67,12 @@ memory-debug domain.
   `torch.cuda.mem_get_info` reading per selected device, including points inside
   CUDA Graph capture. Comparisons, timelines, phases, and run groups report
   CUDA used/free/total, current-process allocator reserved, and device-global
-  `unattributed_device_bytes`; nonzero total-capacity deltas remain explicit.
+  `cuda_allocator_residual_bytes`; nonzero total-capacity deltas remain explicit.
   Per-device query failures preserve allocator state and add a warning. Reports
   add device sections and device-specific CSV artifacts.
+- Explicit one-to-one cross-run CUDA device mapping, device pairs inferred from
+  pool mappings, unclaimed same-index fallback, paired endpoint indices in
+  phase and rank reports, and `--device-map` CLI forms.
 - Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
   summary and rank-paired phase analysis without summing memory across GPUs.
 - Canonical gzip JSON run bundles with atomic writes, exact manifest fields,
@@ -80,8 +83,13 @@ memory-debug domain.
   attributed analyses load only required allocator states and point-owned event
   chunks while retaining bounded compact indexes.
 - Result-owned text, nested JSON, flattened CSV, and standalone HTML reports.
-  `include_unchanged=False` consistently filters text, HTML, and CSV while
-  JSON remains complete.
+  Comparison and timeline text and HTML share one device tree:
+  `CUDA used = residual + allocator reserved`, allocator = sum of pools, and
+  pool = sum of streams. Interior nodes lead with `reserved:` and sparse
+  diagnostics. `depth` (`device`/`pool`/`stream`, exposed as `--depth` on
+  `timeline` and `compare-points`) truncates text and HTML only.
+  `include_unchanged=False` uses one bottom-up pruning pass for text, HTML, and
+  flat CSV parent-context rows; JSON remains complete.
 - Consistent allocated, reserved, active, and requested metrics at allocator,
   device/pool, and device/pool/stream scope, with structural and
   fragmentation details shown as diagnostics when they explain a change.

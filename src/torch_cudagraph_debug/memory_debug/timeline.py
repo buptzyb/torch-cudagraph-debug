@@ -145,69 +145,90 @@ class MemoryObservationTimelineEntry:
 
 @dataclass(frozen=True)
 class MemoryDeviceTimelineEntry:
-    """One device-wide CUDA Runtime memory state in a timeline.
+    """One device node state in a timeline: the optional device-wide CUDA
+    Runtime sample plus this process's allocator rollup for that device.
 
     The sample comes from ``torch.cuda.mem_get_info`` and covers the whole
-    device, including the CUDA context and every other process on the GPU.
-    Deltas compare against the previous point and are ``None`` together when
-    that point did not sample this device: a missing sample means unknown,
-    never zero.
+    device, including the CUDA context and every other process on the GPU;
+    it is ``None`` when the point did not sample this device. Sample deltas
+    compare against the previous point and are ``None`` together when either
+    endpoint lacks the sample: a missing sample means unknown, never zero.
+    The allocator rollup is always present (all-zero without pools); its
+    delta is ``None`` only at the first point.
     """
 
     point_index: int
     point_label: str
     device_index: int
-    sample: DeviceMemorySample
-    allocator_reserved_bytes: int
+    sample: DeviceMemorySample | None
+    stats: MemoryStats
+    delta: MemoryStatsDelta | None
     delta_used_bytes: int | None
     delta_free_bytes: int | None
     delta_total_bytes: int | None
-    delta_allocator_reserved_bytes: int | None
-    delta_unattributed_device_bytes: int | None
+    delta_cuda_allocator_residual_bytes: int | None
 
     @property
-    def unattributed_device_bytes(self) -> int:
-        return self.sample.used_bytes - self.allocator_reserved_bytes
+    def allocator_reserved_bytes(self) -> int:
+        return self.stats.reserved_bytes
+
+    @property
+    def delta_allocator_reserved_bytes(self) -> int | None:
+        return None if self.delta is None else self.delta.reserved_bytes
+
+    @property
+    def cuda_allocator_residual_bytes(self) -> int | None:
+        if self.sample is None:
+            return None
+        return self.sample.used_bytes - self.stats.reserved_bytes
 
     def to_dict(self) -> dict[str, object]:
-        deltas = (
+        sample_deltas = (
             None
             if self.delta_used_bytes is None
             else {
                 "used_bytes": self.delta_used_bytes,
                 "free_bytes": self.delta_free_bytes,
                 "total_bytes": self.delta_total_bytes,
-                "allocator_reserved_bytes": self.delta_allocator_reserved_bytes,
-                "unattributed_device_bytes": self.delta_unattributed_device_bytes,
+                "cuda_allocator_residual_bytes": self.delta_cuda_allocator_residual_bytes,
             }
         )
         return {
             "point_index": self.point_index,
             "point_label": self.point_label,
             "device_index": self.device_index,
-            "state": {
-                **self.sample.to_dict(),
-                "allocator_reserved_bytes": self.allocator_reserved_bytes,
-                "unattributed_device_bytes": self.unattributed_device_bytes,
-            },
-            "delta": deltas,
+            "sample": self.sample.to_dict() if self.sample else None,
+            "cuda_allocator_residual_bytes": self.cuda_allocator_residual_bytes,
+            "allocator_state": self.stats.to_dict(),
+            "allocator_delta": self.delta.to_dict() if self.delta else None,
+            "sample_delta": sample_deltas,
         }
 
     def to_row(self) -> dict[str, object]:
+        sample = self.sample
+        delta_dict = self.delta.to_dict() if self.delta else None
         return {
             "point_index": self.point_index,
             "point_label": self.point_label,
             "device_index": self.device_index,
-            "state_free_bytes": self.sample.free_bytes,
-            "state_total_bytes": self.sample.total_bytes,
-            "state_used_bytes": self.sample.used_bytes,
-            "state_allocator_reserved_bytes": self.allocator_reserved_bytes,
-            "state_unattributed_device_bytes": self.unattributed_device_bytes,
+            "state_free_bytes": sample.free_bytes if sample else None,
+            "state_total_bytes": sample.total_bytes if sample else None,
+            "state_used_bytes": sample.used_bytes if sample else None,
+            "state_cuda_allocator_residual_bytes": self.cuda_allocator_residual_bytes,
+            **{
+                f"state_allocator_{key}": value
+                for key, value in self.stats.to_dict().items()
+            },
             "delta_used_bytes": self.delta_used_bytes,
             "delta_free_bytes": self.delta_free_bytes,
             "delta_total_bytes": self.delta_total_bytes,
-            "delta_allocator_reserved_bytes": self.delta_allocator_reserved_bytes,
-            "delta_unattributed_device_bytes": self.delta_unattributed_device_bytes,
+            "delta_cuda_allocator_residual_bytes": self.delta_cuda_allocator_residual_bytes,
+            **{
+                f"delta_allocator_{key}": (
+                    None if delta_dict is None else delta_dict[key]
+                )
+                for key in self.stats.to_dict()
+            },
         }
 
 
@@ -222,7 +243,7 @@ def _build_timeline(
     previous_allocator_scope_stats: Mapping[AllocatorScope, MemoryStats] | None = None
     previous_observations: Mapping[MemoryObservationKey, MemoryStats] | None = None
     previous_device_memory: Mapping[int, DeviceMemorySample] | None = None
-    previous_device_reserved: dict[int, MemoryStats] = {}
+    previous_device_stats: dict[int, MemoryStats] | None = None
     for point in run.points:
         current_pool_stats = point.pool_stats
         current_allocator_scope_stats = point.allocator_scope_stats
@@ -283,48 +304,63 @@ def _build_timeline(
                     ),
                 )
             )
-        current_device_reserved = summarize_devices(current_pool_stats)
+        current_device_stats = summarize_devices(current_pool_stats)
         empty = MemoryStats()
-        for device, sample in point.device_memory.items():
-            reserved = current_device_reserved.get(device, empty).reserved_bytes
+        device_indices = sorted(
+            {
+                *point.device_memory,
+                *current_device_stats,
+                *(previous_device_memory or ()),
+                *(previous_device_stats if previous_device_stats is not None else ()),
+            }
+        )
+        for device in device_indices:
+            sample = point.device_memory.get(device)
+            stats = current_device_stats.get(device, empty)
+            stats_delta = (
+                None
+                if previous_device_stats is None
+                else MemoryStatsDelta.between(
+                    previous_device_stats.get(device, empty), stats
+                )
+            )
             previous_sample = (
                 None
                 if previous_device_memory is None
                 else previous_device_memory.get(device)
             )
-            if previous_sample is None:
-                delta_used = delta_free = delta_total = delta_reserved = None
-                delta_unattributed_device_bytes = None
+            if sample is None or previous_sample is None:
+                delta_used = delta_free = delta_total = None
+                delta_cuda_allocator_residual_bytes = None
             else:
-                earlier_reserved = previous_device_reserved.get(
+                earlier_reserved = previous_device_stats.get(
                     device, empty
                 ).reserved_bytes
                 delta_used = sample.used_bytes - previous_sample.used_bytes
                 delta_free = sample.free_bytes - previous_sample.free_bytes
                 delta_total = sample.total_bytes - previous_sample.total_bytes
-                delta_reserved = reserved - earlier_reserved
-                delta_unattributed_device_bytes = (sample.used_bytes - reserved) - (
-                    previous_sample.used_bytes - earlier_reserved
-                )
+                delta_cuda_allocator_residual_bytes = (
+                    sample.used_bytes - stats.reserved_bytes
+                ) - (previous_sample.used_bytes - earlier_reserved)
             device_entries.append(
                 MemoryDeviceTimelineEntry(
                     point_index=point.index,
                     point_label=point.label,
                     device_index=device,
                     sample=sample,
-                    allocator_reserved_bytes=reserved,
+                    stats=stats,
+                    delta=stats_delta,
                     delta_used_bytes=delta_used,
                     delta_free_bytes=delta_free,
                     delta_total_bytes=delta_total,
-                    delta_allocator_reserved_bytes=delta_reserved,
-                    delta_unattributed_device_bytes=delta_unattributed_device_bytes,
+                    delta_cuda_allocator_residual_bytes=delta_cuda_allocator_residual_bytes,
                 )
             )
         previous_pool_stats = current_pool_stats
         previous_allocator_scope_stats = current_allocator_scope_stats
         previous_observations = point.observation_stats
         previous_device_memory = point.device_memory
-        previous_device_reserved = current_device_reserved
+        previous_device_stats = current_device_stats
 
     allocation_lifetimes = None
     comparison_options = replace(options, lifetimes=False)

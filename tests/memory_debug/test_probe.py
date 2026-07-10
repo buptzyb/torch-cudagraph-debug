@@ -314,3 +314,8 @@ def test_all_devices_probe_delays_binding_after_empty_provider_snapshot() -> Non
     assert first.observations == ()
     assert probe.devices == (1,)
     assert set(second.pool_stats) == {MemoryPoolKey(1, (0, 0))}
+
+
+def test_memory_probe_name_must_be_a_non_empty_string() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        MemoryProbe(1)  # type: ignore[arg-type]

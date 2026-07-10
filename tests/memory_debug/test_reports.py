@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,7 @@ def test_comparison_owns_all_report_formats(tmp_path: Path) -> None:
         "allocator_scopes",
         "pools",
         "observations",
+        "devices",
         "allocation_stack_comparisons",
     }
     for path in paths.values():
@@ -75,7 +77,7 @@ def test_comparison_owns_all_report_formats(tmp_path: Path) -> None:
     assert default["reference"]["allocated_bytes"] == 10
     assert default["candidate"]["allocated_bytes"] == 15
     assert default["delta"]["allocated_bytes"] == 5
-    assert "allocated: 10 B -> 15 B (delta +5 B)" in (output / "report.txt").read_text(
+    assert "allocated: 10 B -> 15 B (+5 B)" in (output / "report.txt").read_text(
         encoding="utf-8"
     )
 
@@ -180,6 +182,7 @@ def test_timeline_html_contains_charts_and_zero_delta_rows(
         "allocator_scopes",
         "pools",
         "observations",
+        "devices",
     }
     html = (output / "report.html").read_text(encoding="utf-8")
     assert "Allocated Memory" in html
@@ -330,11 +333,12 @@ def test_text_reports_show_core_metrics_at_pool_stream_scope() -> None:
     comparison_text = run.compare("before", "after").to_text()
     timeline_text = run.timeline().to_text()
 
-    assert "device/pool/stream observations:" in comparison_text
+    assert "stream[0]" in comparison_text
+    assert "stream[0]" in comparison_text
     assert "active: 10 B -> 12 B" in comparison_text
     assert "requested: 10 B -> 11 B" in comparison_text
-    assert "active=12 B (delta +2 B)" in timeline_text
-    assert "requested=11 B (delta +1 B)" in timeline_text
+    assert "active: 12 B (+2 B)" in timeline_text
+    assert "requested: 11 B (+1 B)" in timeline_text
 
 
 def test_structural_only_changes_remain_explainable_when_filtered() -> None:
@@ -357,7 +361,7 @@ def test_structural_only_changes_remain_explainable_when_filtered() -> None:
     text = run.timeline().to_text(include_unchanged=False)
 
     assert "[1] structural" in text
-    assert "blocks=2 (delta +1)" in text
+    assert "blocks=2 (+1)" in text
 
 
 def test_write_requires_explicit_overwrite_for_nonempty_directory(
@@ -618,3 +622,25 @@ def test_timeline_cohort_chart_respects_display_limit() -> None:
     structured = timeline.to_dict()["allocation_lifetimes"]
     assert first in json.dumps(structured)
     assert second in json.dumps(structured)
+
+
+def test_timeline_qualifies_all_point_warnings_and_deduplicates_components() -> None:
+    run = make_run(
+        [snapshot(segment(active=10)), snapshot(segment(active=20))],
+        labels=("start", "end"),
+    )
+    run = replace(
+        run,
+        points=(
+            replace(run.points[0], warnings=("sample failed",)),
+            replace(run.points[1], warnings=("sample failed",)),
+        ),
+    )
+
+    timeline = run.timeline(attribution=MemoryAttributionOptions(stacks=False))
+
+    assert timeline.warnings == (
+        "point [0] start: sample failed",
+        "point [1] end: sample failed",
+    )
+    assert timeline.to_text().count("sample failed") == 2

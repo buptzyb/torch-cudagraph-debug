@@ -177,71 +177,69 @@ Output from the tested run:
 ```text
 Memory comparison 'graph-capture@snapshot-0' -> 'graph-capture@snapshot-1' (same probe)
   address lifecycle: exact
-  allocator totals:
-    total[all]
-      allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 18.00 MiB (delta +18.00 MiB)
-      active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
-      diagnostics: inactive=0 B -> 2.00 MiB (delta +2.00 MiB), fragmentation=0 B -> 1008 B (delta +1008 B), segments=0 -> 2 (delta +2), blocks=0 -> 4 (delta +4), inactive blocks=0 -> 1 (delta +1), largest inactive block=0 B -> 2.00 MiB (delta +2.00 MiB)
-    total[default]
-      allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
-      active: 0 B -> 1.00 KiB (delta +1.00 KiB), requested: 0 B -> 16 B (delta +16 B)
-      diagnostics: inactive=0 B -> 2.00 MiB (delta +2.00 MiB), fragmentation=0 B -> 1008 B (delta +1008 B), segments=0 -> 1 (delta +1), blocks=0 -> 3 (delta +3), inactive blocks=0 -> 1 (delta +1), largest inactive block=0 B -> 2.00 MiB (delta +2.00 MiB)
-    total[private]
-      allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
-      active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
-      diagnostics: segments=0 -> 1 (delta +1), blocks=0 -> 1 (delta +1)
-  pools:
-    device[0]/pool[0,0] -> device[0]/pool[0,0] [same_probe]
-      allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
-      active: 0 B -> 1.00 KiB (delta +1.00 KiB), requested: 0 B -> 16 B (delta +16 B)
-      diagnostics: inactive=0 B -> 2.00 MiB (delta +2.00 MiB), fragmentation=0 B -> 1008 B (delta +1008 B), segments=0 -> 1 (delta +1), blocks=0 -> 3 (delta +3), inactive blocks=0 -> 1 (delta +1), largest inactive block=0 B -> 2.00 MiB (delta +2.00 MiB)
-      lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
-    device[0]/pool[1,0] -> device[0]/pool[1,0] [same_probe]
-      allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
-      active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
-      diagnostics: segments=0 -> 1 (delta +1), blocks=0 -> 1 (delta +1)
-      lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
-  device/pool/stream observations:
-    device[0]/pool[0,0]/stream[336943840] -> device[0]/pool[0,0]/stream[336943840] [same_probe]
-      allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
-      active: 0 B -> 1.00 KiB (delta +1.00 KiB), requested: 0 B -> 16 B (delta +16 B)
-      diagnostics: inactive=0 B -> 2.00 MiB (delta +2.00 MiB), fragmentation=0 B -> 1008 B (delta +1008 B), segments=0 -> 1 (delta +1), blocks=0 -> 3 (delta +3), inactive blocks=0 -> 1 (delta +1), largest inactive block=0 B -> 2.00 MiB (delta +2.00 MiB)
-      lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
-    device[0]/pool[1,0]/stream[336943840] -> device[0]/pool[1,0]/stream[336943840] [same_probe]
-      allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
-      active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
-      diagnostics: segments=0 -> 1 (delta +1), blocks=0 -> 1 (delta +1)
-      lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
-  devices (device-wide, includes other processes):
-    device[0]
-      CUDA used: 434.19 MiB -> 540.19 MiB (delta +106.00 MiB)
-      CUDA free: 43.97 GiB -> 43.87 GiB (delta -106.00 MiB)
-      CUDA-visible total: 44.39 GiB -> 44.39 GiB (delta 0 B)
-      allocator reserved: 0 B -> 18.00 MiB (delta +18.00 MiB)
-      unattributed device: 434.19 MiB -> 522.19 MiB (delta +88.00 MiB)
+  CUDA scope: device-wide, includes other processes; residual = CUDA used - allocator reserved. CUDA and allocator measurements are consecutive, not atomic.
+
+  device[0]
+    CUDA used: 434.19 MiB -> 540.19 MiB (+106.00 MiB)
+      residual: 434.19 MiB -> 522.19 MiB (+88.00 MiB)
+      allocator:
+        reserved: 0 B -> 18.00 MiB (+18.00 MiB)
+        allocated: 0 B -> 16.00 MiB (+16.00 MiB), active: 0 B -> 16.00 MiB (+16.00 MiB), requested: 0 B -> 16.00 MiB (+16.00 MiB)
+        diagnostics: inactive=0 B -> 2.00 MiB (+2.00 MiB), fragmentation=0 B -> 1008 B (+1008 B), segments=0 -> 2 (+2), blocks=0 -> 4 (+4), inactive blocks=0 -> 1 (+1), largest inactive block=0 B -> 2.00 MiB (+2.00 MiB)
+        pool[0,0] (default)
+          reserved: 0 B -> 2.00 MiB (+2.00 MiB)
+          allocated: 0 B -> 1.00 KiB (+1.00 KiB), active: 0 B -> 1.00 KiB (+1.00 KiB), requested: 0 B -> 16 B (+16 B)
+          diagnostics: inactive=0 B -> 2.00 MiB (+2.00 MiB), fragmentation=0 B -> 1008 B (+1008 B), segments=0 -> 1 (+1), blocks=0 -> 3 (+3), inactive blocks=0 -> 1 (+1), largest inactive block=0 B -> 2.00 MiB (+2.00 MiB)
+          lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
+          stream[939901248]
+            reserved: 0 B -> 2.00 MiB (+2.00 MiB)
+            allocated: 0 B -> 1.00 KiB (+1.00 KiB), active: 0 B -> 1.00 KiB (+1.00 KiB), requested: 0 B -> 16 B (+16 B)
+            diagnostics: inactive=0 B -> 2.00 MiB (+2.00 MiB), fragmentation=0 B -> 1008 B (+1008 B), segments=0 -> 1 (+1), blocks=0 -> 3 (+3), inactive blocks=0 -> 1 (+1), largest inactive block=0 B -> 2.00 MiB (+2.00 MiB)
+            lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
+        pool[1,0] (private)
+          reserved: 0 B -> 16.00 MiB (+16.00 MiB)
+          allocated: 0 B -> 16.00 MiB (+16.00 MiB), active: 0 B -> 16.00 MiB (+16.00 MiB), requested: 0 B -> 16.00 MiB (+16.00 MiB)
+          diagnostics: segments=0 -> 1 (+1), blocks=0 -> 1 (+1)
+          lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
+          stream[939901248]
+            reserved: 0 B -> 16.00 MiB (+16.00 MiB)
+            allocated: 0 B -> 16.00 MiB (+16.00 MiB), active: 0 B -> 16.00 MiB (+16.00 MiB), requested: 0 B -> 16.00 MiB (+16.00 MiB)
+            diagnostics: segments=0 -> 1 (+1), blocks=0 -> 1 (+1)
+            lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
 ```
 
 Read the report top-down:
 
-1. Every metric is `reference -> candidate (delta)`.
-2. `pools` identifies which device and pool changed;
-   `device/pool/stream observations` records the state associated with each CUDA
-   stream in that pool. The bracketed `[same_probe]` means the row was matched
-   by identity within this Probe.
-3. `total[all]` combines every device and pool, `total[default]` combines
-   each device's `pool[0,0]`, and `total[private]` combines all non-default
-   pools, including CUDA Graph pools.
-4. `requested` is the original active allocation request, `allocated` is
-   block space still owned by live allocations, `active` is space not yet
-   reusable, and `reserved` is the full segment capacity held by the caching
-   allocator.
-5. `diagnostics` explains the allocator structure behind the byte totals.
+1. Every value is `reference -> candidate (signed change)`; timeline text
+   renders `absolute (signed change)` instead.
+2. Each `device[N]` subtree is one decomposition whose levels sum: `CUDA used`
+   splits into the CUDA/allocator `residual` plus allocator `reserved`, allocator
+   `reserved` is the sum of its pools, and each pool is the sum of its streams.
+   The account balances at every level: 540.19 = 522.19 + 18.00 MiB here, and
+   18.00 = 2.00 + 16.00 MiB.
+3. `CUDA used` and `residual` are device-wide evidence. The residual is the
+   difference between consecutive CUDA Runtime and allocator measurements; it
+   may be positive or negative and can include concurrent activity, the CUDA
+   context, external allocations from this process, and every other process on
+   a shared GPU. Here 88 MiB of growth is not explained by allocator reserved;
+   this state-only report does not identify its owner.
+4. Interior nodes lead with `reserved:` — their share of the parent — and pack
+   the remaining base metrics on one line. `requested` is the original active
+   allocation request, `allocated` is block space still owned by live
+   allocations, `active` is space not yet reusable, and `reserved` is the
+   full segment capacity held by the caching allocator.
+5. `(default)` marks each device's `pool[0,0]`; every other pool id is
+   `(private)`, including CUDA Graph pools. Match tags appear only where a
+   matching decision carries information (`[mapped]`, `[pool_mapping]`,
+   `[reference_only]`, `[candidate_only]` in cross-run comparisons); same-probe
+   and same-run rows carry none.
+6. `diagnostics` explains the allocator structure behind the byte totals.
    `inactive` is `reserved - active`, capacity currently reusable within that
    pool; `fragmentation` is `active - requested`, allocator rounding inside
    active or awaiting-free blocks. Segment and block counts show how that
    capacity is divided, while inactive-block count and largest inactive block
    describe reusable blocks.
-6. `lifecycle` compares segment and active-block identity between the two
+7. `lifecycle` compares segment and active-block identity between the two
    snapshots. `new segment` and `newly active` report identities added at the
    candidate endpoint; `removed segment` and `became inactive` appear when
    reference segment or active-block identities are absent from the candidate
@@ -249,18 +247,11 @@ Read the report top-down:
    matching is `exact` or `approximate`. This snapshot-derived comparison does
    not require allocator event history and is distinct from event-backed
    `lifetimes()` analysis.
-7. `devices` pairs CUDA Runtime device-wide usage with allocator `reserved`
-   from the recording process. `unattributed device` is `CUDA used - allocator
-   reserved`; it can include external CUDA allocations and context state from
-   that process as well as allocations from other processes. Here 88 MiB of the
-   device-wide increase is not explained by the allocator snapshot, but this
-   state-only report does not identify its owner. A nonzero CUDA-visible total
-   delta is reported separately because used growth is then not allocation
-   growth alone.
 
-The main signal here is `total[private]`: graph capture added a 16 MiB active
-allocation in a private pool. The small default-pool change is separate
-allocator/runtime activity; this state-only report does not identify its owner.
+The main signal here is the `pool[1,0] (private)` subtree: graph capture added
+a 16 MiB active allocation in a private pool. The small default-pool change is
+separate allocator/runtime activity; this state-only report does not identify
+its owner.
 Private-pool capacity can remain reserved after its blocks become inactive; see
 the [guide](docs/memory_debug.md#interpreting-cuda-graph-private-pool-inactive-memory)
 and [focused example](examples/memory_debug/probe/private_pool_inactive.py) for

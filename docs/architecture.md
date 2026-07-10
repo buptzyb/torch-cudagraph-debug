@@ -73,17 +73,17 @@ The workflows use different containers but converge on the same domain leaf:
 ```mermaid
 flowchart LR
     TProbe["TensorProbe"] -->|returns| TS["TensorProbeSnapshot"]
-    TS -->|contains 1:N| TO["TensorObservation"]
+    TS -->|contains 0:N| TO["TensorObservation"]
     TR["TensorRecorder"] -->|produces| TRun["TensorRun"]
-    TRun -->|contains 1:N| TPoint["TensorPoint"]
-    TPoint -->|contains 1:N| TO
+    TRun -->|contains 0:N| TPoint["TensorPoint"]
+    TPoint -->|contains 0:N| TO
     TO -->|analyzed by| TC["Tensor comparisons and reports"]
 
     MProbe["MemoryProbe"] -->|returns| MS["MemoryProbeSnapshot"]
-    MS -->|contains 1:N| MO["MemoryObservation"]
+    MS -->|contains 0:N| MO["MemoryObservation"]
     MR["MemoryRecorder"] -->|produces| MRun["MemoryRun"]
-    MRun -->|contains 1:N| MPoint["MemoryPoint"]
-    MPoint -->|contains 1:N| MO
+    MRun -->|contains 0:N| MPoint["MemoryPoint"]
+    MPoint -->|contains 0:N| MO
     MO -->|analyzed by| MC["Memory comparisons and reports"]
 ```
 
