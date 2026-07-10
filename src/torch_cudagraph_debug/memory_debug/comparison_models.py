@@ -365,6 +365,8 @@ class MemoryDeviceComparison:
     def changed(self) -> bool:
         if self.match in ("reference_only", "candidate_only"):
             return True
+        if (self.reference is None) != (self.candidate is None):
+            return True
         return bool(
             self.delta_used_bytes
             or self.delta_free_bytes

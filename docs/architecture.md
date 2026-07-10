@@ -141,6 +141,9 @@ identity and time contract as bundle loaders.
 
 Tensor collectors own CUDA-visible storage. `snapshot()`, status queries, and
 `close()` accept the same bool/stream/device synchronization contract.
+Capture-only collection determines capture state on the collector's configured
+device before validating the source tensor. Calls outside capture remain
+transparent no-ops; active capture requires a CUDA tensor on that same device.
 Closing an enabled collector is invalid during capture and is valid only after
 every graph that references the collector can no longer replay.
 Captured callback payload addresses remain stable for the graph lifetime;
@@ -215,6 +218,18 @@ Recorder intervals use the ending snapshot's trace end because that snapshot's
 own marker is normally absent from its returned trace. A `complete` interval
 therefore assumes the application kept allocator history enabled continuously;
 the metadata API confirms setup, not history continuity.
+
+Lifetime replay tracks each allocation generation by its exact device and
+address. A generation created by an `alloc` event is provisional until its
+first endpoint snapshot: the event supplies the requested size, while the
+snapshot confirms the allocator-rounded block size and may fill an unknown
+pool, stream, or allocation stack. Once snapshot-confirmed, rounded size,
+requested size, known pool and stream, and a nonempty snapshot allocation stack
+must remain stable until `free_completed`; otherwise the complete event window
+and endpoint state contradict each other. Snapshot-internal duplicate active
+addresses and duplicate `free_requested` transitions are contradictions too.
+This distinction preserves legitimate event-to-block rounding without treating
+an unwitnessed generation change as the same allocation.
 
 ## Architectural Boundaries
 

@@ -142,7 +142,9 @@ allocation, copy, callback, print, record, or check work. In
 `when="always"`, eager calls execute debug work too. The first eager call
 locks one CUDA stream; an eager call from another stream is rejected. Eager
 calls may precede the probe's one graph capture, but eager calls after capture
-are rejected.
+are rejected. Capture state is determined on the probe's configured device;
+once that device is capturing, the source must be a CUDA tensor on the same
+device.
 
 The non-contiguous policy is probe-wide because all actions on one probe inspect
 the same source tensor:
@@ -359,6 +361,9 @@ values by semantic name and local invocation rather than global order.
 
 A check mismatch is sticky until the probe is destroyed. The first mismatch
 records the replay index, semantic observation key, and global order.
+Tolerance applies only when both values are finite. Positive and negative
+infinity match only the identical infinity; NaNs match only when
+`equal_nan=True`.
 
 `PrintAction` and `CheckAction` process tensor elements on a CUDA host callback.
 Their latency grows with payload size and also depends on dtype, formatting,
@@ -1141,7 +1146,12 @@ transient generations that are active in neither endpoint snapshot; incomplete
 history is rejected.
 
 An allocation generation is tracked by device, block address, size, requested
-size, pool, and stream. Its state transitions are:
+size, pool, and stream. An `alloc` event starts a provisional generation with
+its requested size. The first matching snapshot confirms the allocator-rounded
+size and canonical live-block stack and may fill missing pool or stream
+metadata. Later snapshots must preserve the confirmed identity until a
+free-complete/alloc sequence witnesses address reuse. Its state transitions
+are:
 
 ```text
 alloc -> free_requested -> free_completed
@@ -1151,12 +1161,12 @@ alloc -> free_requested -> free_completed
 `active_awaiting_free` until prior stream work completes. `free_completed` ends
 the generation because the allocator can then reuse the block. It does not imply
 that the containing segment was returned to CUDA. Address reuse after completion
-starts a new generation. Event size matching accepts either allocator-rounded
-block size or requested size because PyTorch traces may report the latter.
-Stream synchronization makes the dependency complete, but allocator bookkeeping
-may remain `active_awaiting_free` until a later allocator operation polls
-pending events and emits `free_completed`. A snapshot does not itself force that
-poll.
+starts a new generation. Free-transition event size matching accepts either
+allocator-rounded block size or requested size because PyTorch traces may report
+the latter. Stream synchronization makes the dependency complete, but allocator
+bookkeeping may remain `active_awaiting_free` until a later allocator operation
+polls pending events and emits `free_completed`. A snapshot does not itself
+force that poll.
 
 Instances are grouped into cohorts by device, pool, and the complete normalized
 allocation stack. `stack_depth` changes display only. Allocations without stack
@@ -1371,7 +1381,8 @@ reports:
   `cuda_allocator_residual_bytes = used_bytes - allocator_reserved_bytes`.
   The residual compares consecutive, non-atomic device-global and allocator
   measurements; positive and negative values are both valid and neither is
-  ownership attribution.
+  ownership attribution. A paired device whose sample exists at only one
+  endpoint is changed even though no device-memory delta is fabricated.
 - `MemoryAllocatorScopeTimelineEntry`, `MemoryPoolTimelineEntry`, and
   `MemoryObservationTimelineEntry` carry point identity, row identity, absolute
   stats, and the optional previous-point delta.

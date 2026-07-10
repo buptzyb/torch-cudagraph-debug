@@ -66,7 +66,7 @@ CheckResult check_typed(
             }
             const double abs_diff = std::abs(a - e);
             const double tolerance = atol + rtol * std::abs(e);
-            if (abs_diff <= tolerance) {
+            if (std::isfinite(a) && std::isfinite(e) && abs_diff <= tolerance) {
                 continue;
             }
 

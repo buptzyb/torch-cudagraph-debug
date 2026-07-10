@@ -85,6 +85,9 @@ order. After a graph replay, its `replay_index` identifies
 that replay. By default, `snapshot.tensor()` uses `snapshot.probe_name` as
 the observation name and `invocation_index=0`.
 The default `when="capture"` makes eager warmup calls transparent no-ops.
+Capture state is checked on the probe's configured device. Once that device is
+capturing, the observed value must be a CUDA tensor on the same device; CPU or
+cross-device inputs fail instead of being silently ignored.
 Use `when="always"` only when eager debug side effects are intentional. Its
 first eager call locks one CUDA stream; calls from another eager stream fail.
 Eager calls may run before the probe's capture, but not after capture has
@@ -429,6 +432,10 @@ probe = TensorProbe(
 
 For semantic binding independent of global capture order, pass a mapping from
 `TensorObservationKey(name, invocation_index)` to expected tensors.
+
+Relative and absolute tolerances apply only to finite values. Positive and
+negative infinity require an identical same-sign expected value. NaNs match
+only when `equal_nan=True`.
 
 Each capture-time call owns a globally ordered slot with its own pinned staging
 storage and a semantic `(name, invocation_index)` key.

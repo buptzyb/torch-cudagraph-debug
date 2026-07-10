@@ -466,6 +466,31 @@ def test_independent_comparison_marks_missing_side() -> None:
     assert "CUDA used: 10 B -> n/a" in text
 
 
+@pytest.mark.parametrize(
+    "device_memory",
+    [
+        [{0: (900, 1000)}, {}],
+        [{}, {0: (900, 1000)}],
+    ],
+)
+def test_paired_device_comparison_treats_sample_availability_as_a_change(
+    device_memory: list[dict[int, tuple[int, int]]],
+) -> None:
+    run = make_run(
+        [snapshot(segment(active=100)), snapshot(segment(active=100))],
+        labels=("before", "after"),
+        device_memory=device_memory,
+    )
+
+    result = run.compare("before", "after")
+    (row,) = result.device_comparisons
+
+    assert (row.reference is None) != (row.candidate is None)
+    assert row.allocator_delta.changed is False
+    assert row.changed is True
+    assert "device[0]" in result.to_text(include_unchanged=False)
+
+
 def test_unsampled_endpoints_render_allocator_only_tree() -> None:
     run = make_run(
         [snapshot(segment(active=10)), snapshot(segment(active=20))],

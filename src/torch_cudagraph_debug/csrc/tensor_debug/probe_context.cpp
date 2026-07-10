@@ -157,16 +157,9 @@ torch::Tensor ProbeContext::enqueue(
         throw std::runtime_error("observation name must be non-empty");
     }
 
-    if ((!tensor.defined() || !tensor.is_cuda()) && mode_ == ProbeMode::Capture) {
-        return tensor;
-    }
-    if (!tensor.defined() || !tensor.is_cuda()) {
-        validate_tensor(tensor);
-    }
-
-    c10::cuda::CUDAGuard device_guard(tensor.device());
+    c10::cuda::CUDAGuard device_guard(replay_index_.device());
     const c10::cuda::CUDAStream current_stream =
-        c10::cuda::getCurrentCUDAStream(tensor.get_device());
+        c10::cuda::getCurrentCUDAStream(replay_index_device_);
     cudaStream_t stream = current_stream.stream();
     cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
     TCGD_CUDA_CHECK(cudaStreamIsCapturing(stream, &capture_status));
@@ -174,6 +167,8 @@ torch::Tensor ProbeContext::enqueue(
     if (mode_ == ProbeMode::Capture && !is_capturing) {
         return tensor;
     }
+
+    validate_tensor(tensor);
 
     if (!is_capturing) {
         validate_eager_stream(stream);

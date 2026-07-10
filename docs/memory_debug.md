@@ -413,8 +413,9 @@ total, and residual values are device-global.
 Reports expose `delta_total_bytes` as well as used and free deltas. When
 CUDA-visible total capacity changes, used growth is not allocation growth alone:
 `delta_used_bytes = delta_total_bytes - delta_free_bytes`. A missing endpoint
-sample renders as `n/a` and produces no fabricated delta; devices whose pools
-exist without samples still render their allocator subtree.
+sample renders as `n/a` and produces no fabricated delta. Sample availability
+at only one endpoint still makes the device comparison changed, and devices
+whose pools exist without samples still render their allocator subtree.
 
 Allocation cohort lifetimes are an optional focused same-run analysis, not a
 replacement for those modes. To answer "what was live here, and when did it
@@ -471,11 +472,16 @@ to a guessed interval. `free_completed` means allocator-reusable; it does not
 mean the segment was returned to CUDA or that pool `reserved_bytes` decreased.
 
 Lifetime analysis requires complete allocator event history for the analyzed
-range and reconciles the event stream against every allocator state. When event
-replay finds contradictions, the raised `MemoryReconciliationError` summarizes
-each reason and device with the total count and up to three example
-addresses. The report describes
-allocator blocks, not Python tensor names or object ownership.
+range and reconciles the event stream against every allocator state. An `alloc`
+event first identifies a provisional generation by device, address, and
+requested size; its first snapshot may add allocator rounding and missing pool,
+stream, or stack metadata. Later snapshots must preserve that confirmed
+generation's rounded size, requested size, known pool and stream, and nonempty
+allocation stack until a `free_completed`/`alloc` sequence witnesses address
+reuse. Duplicate active addresses or duplicate `free_requested` transitions are
+also contradictions. The raised `MemoryReconciliationError` summarizes each
+reason and device with the total count and up to three example addresses. The
+report describes allocator blocks, not Python tensor names or object ownership.
 
 Synchronizing the recorded stream completes the CUDA work, but the caching
 allocator may not emit `free_completed` until a later allocator operation polls

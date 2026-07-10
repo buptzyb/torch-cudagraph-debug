@@ -21,13 +21,22 @@ memory-debug domain.
 - Tensor comparison and online checks preserve exact integer values and
   differences across the full `int64` range, and apply `equal_nan` without
   discarding signed-zero or NaN-payload distinctions required by exact mode.
+  Online checks apply tolerance only to finite values, so infinities require an
+  exact same-sign match.
 - Tensor probes publish eager and captured slots transactionally, preserve
   invocation order after rejected calls, reclaim retired staging safely, remove
   registered gradient hooks on close, and reject close or query operations that
-  could invalidate an active capture or in-flight copy.
+  could invalidate an active capture or in-flight copy. Capture-only probes use
+  their configured device's capture state before validating inputs, so CPU and
+  cross-device tensors cannot be silently ignored during active capture.
 - Persisted tensor summaries use numerically stable variance, and TensorBoard
   export preserves float64 scalar precision, supports summary-only observations,
   and isolates cached tensors from writer-side mutation.
+- Memory lifetime replay distinguishes provisional event-born allocations from
+  snapshot-confirmed generations and rejects unwitnessed identity drift,
+  duplicate active addresses, and duplicate free requests. Device comparisons
+  also treat one-sided CUDA sample availability as a change without fabricating
+  a delta.
 
 ### Added
 

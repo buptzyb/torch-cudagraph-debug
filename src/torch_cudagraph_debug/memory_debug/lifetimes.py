@@ -358,6 +358,7 @@ class _AllocationInstance:
     size_bytes: int
     requested_bytes: int
     stack_frames: tuple[Mapping[str, Any], ...]
+    snapshot_confirmed: bool
     observations: dict[int, _BlockObservation] = field(default_factory=dict)
     birth: CohortBirth | None = None
     free_request: CohortFreeRequest | None = None
@@ -745,6 +746,7 @@ def _track_instances(
             size_bytes=block.size_bytes,
             requested_bytes=block.requested_bytes,
             stack_frames=block.stack_frames,
+            snapshot_confirmed=True,
             observations={block.point_index: block},
             birth=birth,
             birth_order=birth_order,
@@ -764,18 +766,35 @@ def _track_instances(
         )
         instance.free_request_order = event_order
 
+    for point_blocks in observations.values():
+        seen: set[tuple[int | None, int]] = set()
+        for block in point_blocks:
+            if block.address is None:
+                record_contradiction(
+                    "block_without_address", device=block.device, address=0
+                )
+                continue
+            key = (block.device, block.address)
+            if key in seen:
+                record_contradiction(
+                    "duplicate_active_address",
+                    device=block.device,
+                    address=block.address,
+                )
+            seen.add(key)
+
     for block in observations.get(_state_index(points[0]), ()):
+        if block.address is None:
+            continue
+        key = (block.device, block.address)
+        if key in current:
+            continue
         item = create_from_block(block)
         if block.state in AWAITING_FREE_STATES:
             # The free request predates the analysis range; record it as a
             # range-boundary fact instead of guessing its interval.
             boundary_free_request(points[0], points[0], item)
-        if block.address is None:
-            record_contradiction(
-                "block_without_address", device=block.device, address=0
-            )
-        else:
-            current[(block.device, block.address)] = item
+        current[key] = item
 
     for history in histories:
         for entry in history.entries:
@@ -807,6 +826,12 @@ def _track_instances(
                         CohortFreeRequest, history, instance, entry
                     )
                     instance.free_request_order = event_order
+                else:
+                    record_contradiction(
+                        "duplicate_free_requested",
+                        device=entry.device_index,
+                        address=entry.addr,
+                    )
                 continue
             if entry.action == "free_completed":
                 if instance is None:
@@ -871,6 +896,7 @@ def _track_instances(
                 size_bytes=size,
                 requested_bytes=size,
                 stack_frames=frames,
+                snapshot_confirmed=False,
                 birth=birth,
                 birth_order=event_order,
             )
@@ -882,22 +908,20 @@ def _track_instances(
         consumed_after: set[int] = set()
         next_current: dict[tuple[int | None, int], _AllocationInstance] = {}
         for _key, instance in current.items():
-            block_index, size_contradiction = _matching_block_index(
+            block_index = _matching_block_index(
                 blocks_by_address,
-                end_blocks,
                 instance,
                 consumed_after,
             )
             if block_index is None:
                 record_contradiction(
-                    "block_size_contradiction"
-                    if size_contradiction
-                    else "unexplained_disappearance",
+                    "unexplained_disappearance",
                     device=instance.device,
                     address=instance.address or 0,
                 )
                 continue
             block = end_blocks[block_index]
+            consumed_after.add(block_index)
             previous = _latest_observation(instance)
             generation_reused = (
                 previous is not None
@@ -915,7 +939,15 @@ def _track_instances(
                     address=instance.address or 0,
                 )
                 continue
-            consumed_after.add(block_index)
+            identity_contradictions = _instance_block_contradictions(instance, block)
+            if identity_contradictions:
+                for kind in identity_contradictions:
+                    record_contradiction(
+                        kind,
+                        device=instance.device,
+                        address=instance.address or 0,
+                    )
+                continue
             if block.state in AWAITING_FREE_STATES and instance.free_request is None:
                 record_contradiction(
                     "free_request_event_missing",
@@ -980,8 +1012,7 @@ _CONTRADICTION_TEMPLATES = {
         "previous allocation has no free_completed event"
     ),
     "block_size_contradiction": (
-        "{count} tracked allocation(s) on {device} found only "
-        "size-incompatible blocks at their address"
+        "{count} tracked allocation(s) on {device} changed allocator-rounded size"
     ),
     "unexplained_disappearance": (
         "{count} tracked allocation(s) on {device} disappeared from the "
@@ -993,6 +1024,26 @@ _CONTRADICTION_TEMPLATES = {
     "free_request_event_missing": (
         "{count} block(s) on {device} entered an awaiting-free state without "
         "a free_requested event"
+    ),
+    "duplicate_free_requested": (
+        "{count} duplicate free_requested {label} referenced an allocation "
+        "that was already awaiting free on {device}"
+    ),
+    "duplicate_active_address": (
+        "{count} duplicate active block address(es) appeared within one "
+        "snapshot on {device}"
+    ),
+    "requested_size_contradiction": (
+        "{count} tracked allocation(s) on {device} changed requested size"
+    ),
+    "pool_contradiction": (
+        "{count} tracked allocation(s) on {device} changed allocator pool"
+    ),
+    "stream_contradiction": (
+        "{count} tracked allocation(s) on {device} changed allocation stream"
+    ),
+    "allocation_stack_contradiction": (
+        "{count} tracked allocation(s) on {device} changed allocation stack"
     ),
     "block_without_address": ("{count} active block(s) on {device} carried no address"),
 }
@@ -1089,43 +1140,51 @@ def _block_indexes(
     return {key: tuple(indices) for key, indices in by_address.items()}
 
 
-def _block_sizes_compatible(
-    instance: _AllocationInstance, block: _BlockObservation
-) -> bool:
-    # Trace events carry the unrounded request while snapshot blocks carry the
-    # allocator-rounded size; either identity is valid evidence for one block.
-    block_sizes = {block.size_bytes, block.requested_bytes}
-    return instance.size_bytes in block_sizes or instance.requested_bytes in block_sizes
-
-
 def _matching_block_index(
     blocks_by_address: Mapping[tuple[int | None, int], Sequence[int]],
-    end_blocks: Sequence[_BlockObservation],
     instance: _AllocationInstance,
     consumed: set[int],
-) -> tuple[int | None, bool]:
-    """Return (matched block index, size-contradiction-at-address flag)."""
+) -> int | None:
+    """Return the unconsumed endpoint block at an instance's exact address."""
 
     if instance.address is None:
-        return None, False
+        return None
     candidates = [
         index
         for index in blocks_by_address.get((instance.device, instance.address), ())
         if index not in consumed
     ]
-    if not candidates:
-        return None, False
-    compatible = [
-        index
-        for index in candidates
-        if _block_sizes_compatible(instance, end_blocks[index])
-    ]
-    if not compatible:
-        return None, True
-    for index in compatible:
-        if end_blocks[index].size_bytes == instance.size_bytes:
-            return index, False
-    return compatible[0], False
+    return candidates[0] if candidates else None
+
+
+def _instance_block_contradictions(
+    instance: _AllocationInstance,
+    block: _BlockObservation,
+) -> tuple[str, ...]:
+    """Return immutable-identity conflicts for one exact-address match.
+
+    An allocator event knows the requested size but not necessarily the
+    allocator-rounded block size or pool. Its first snapshot match confirms
+    those fields. Snapshot-confirmed values must not drift without a witnessed
+    free-complete/alloc generation change.
+    """
+
+    contradictions: list[str] = []
+    if instance.requested_bytes != block.requested_bytes:
+        contradictions.append("requested_size_contradiction")
+    if instance.snapshot_confirmed and instance.size_bytes != block.size_bytes:
+        contradictions.append("block_size_contradiction")
+    if instance.pool_id != ("unknown",) and instance.pool_id != block.pool_id:
+        contradictions.append("pool_contradiction")
+    if instance.stream is not None and instance.stream != block.stream:
+        contradictions.append("stream_contradiction")
+    if (
+        instance.snapshot_confirmed
+        and instance.stack_frames
+        and instance.stack_frames != block.stack_frames
+    ):
+        contradictions.append("allocation_stack_contradiction")
+    return tuple(contradictions)
 
 
 def _event_size_matches(
@@ -1151,13 +1210,15 @@ def _refine_instance_from_block(
 ) -> None:
     if instance.pool_id == ("unknown",):
         instance.pool_id = block.pool_id
-    if not instance.stack_frames and block.stack_frames:
+    if instance.stream is None:
+        instance.stream = block.stream
+    if not instance.snapshot_confirmed:
+        if block.stack_frames:
+            instance.stack_frames = block.stack_frames
+        instance.size_bytes = block.size_bytes
+        instance.snapshot_confirmed = True
+    elif not instance.stack_frames and block.stack_frames:
         instance.stack_frames = block.stack_frames
-    instance.device = block.device
-    instance.stream = block.stream
-    instance.address = block.address
-    instance.size_bytes = block.size_bytes
-    instance.requested_bytes = block.requested_bytes
     # Transition rows recorded before refinement carry the event-requested
     # size; re-stamp them so every row of an observed instance reports the
     # same allocator-rounded basis as the cohort byte totals. Transient

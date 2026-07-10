@@ -1134,6 +1134,189 @@ def test_lifetimes_reconcile_event_births_with_rounded_blocks() -> None:
     assert cohort.owner_active_at_end_bytes == 512
 
 
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"active": 1024}, "changed allocator-rounded size"),
+        ({"requested": 300}, "changed requested size"),
+        ({"pool": (2, 2)}, "changed allocator pool"),
+        ({"stream": 8}, "changed allocation stream"),
+        ({"frame": "other.py"}, "changed allocation stack"),
+    ],
+)
+def test_snapshot_confirmed_instance_rejects_identity_drift(
+    change: dict[str, object], message: str
+) -> None:
+    start_args: dict[str, object] = {
+        "active": 512,
+        "requested": 400,
+        "pool": (1, 1),
+        "stream": 7,
+        "frame": "first.py",
+    }
+    end_args = {**start_args, **change}
+    run = make_history_run(
+        [
+            ([segment(**start_args)], []),
+            ([segment(**end_args)], []),
+        ],
+        labels=("start", "end"),
+    )
+
+    with pytest.raises(MemoryReconciliationError, match=message):
+        run.lifetimes()
+
+
+def test_event_born_instance_confirms_snapshot_identity_once() -> None:
+    run = make_history_run(
+        [
+            ([], []),
+            (
+                [
+                    segment(
+                        active=512,
+                        requested=400,
+                        pool=(1, 1),
+                        stream=7,
+                        frame="block.py",
+                    )
+                ],
+                [
+                    event(
+                        "alloc",
+                        size=400,
+                        pool=(1, 1),
+                        stream=7,
+                        frame="event.py",
+                    )
+                ],
+            ),
+            (
+                [
+                    segment(
+                        active=512,
+                        requested=400,
+                        pool=(1, 1),
+                        stream=7,
+                        frame="block.py",
+                    )
+                ],
+                [],
+            ),
+        ],
+        labels=("start", "confirmed", "end"),
+    )
+
+    report = run.lifetimes()
+
+    assert len(report.cohorts) == 1
+    cohort = report.cohorts[0]
+    assert cohort.pool_id == (1, 1)
+    assert cohort.streams == (7,)
+    assert "block.py" in cohort.stack_key
+    assert "event.py" in cohort.births[0].stack_key
+    assert cohort.born_bytes == 512
+    assert cohort.size_histogram[0].size_bytes == 512
+    assert cohort.size_histogram[0].requested_bytes == 400
+
+
+@pytest.mark.parametrize(
+    ("event_change", "block_change", "message"),
+    [
+        ({}, {"requested": 300}, "changed requested size"),
+        ({"pool": (1, 1)}, {"pool": (2, 2)}, "changed allocator pool"),
+        ({"stream": 7}, {"stream": 8}, "changed allocation stream"),
+    ],
+)
+def test_event_born_instance_rejects_first_snapshot_conflict(
+    event_change: dict[str, object],
+    block_change: dict[str, object],
+    message: str,
+) -> None:
+    event_args: dict[str, object] = {
+        "size": 400,
+        "pool": (1, 1),
+        "stream": 7,
+        "frame": "alloc.py",
+    }
+    block_args: dict[str, object] = {
+        "active": 512,
+        "requested": 400,
+        "pool": (1, 1),
+        "stream": 7,
+        "frame": "alloc.py",
+    }
+    run = make_history_run(
+        [
+            ([], []),
+            (
+                [segment(**{**block_args, **block_change})],
+                [event("alloc", **{**event_args, **event_change})],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+
+    with pytest.raises(MemoryReconciliationError, match=message):
+        run.lifetimes()
+
+
+def test_missing_allocation_stack_can_be_enriched_by_later_snapshot() -> None:
+    run = make_history_run(
+        [
+            ([segment(active=512, requested=400, frame=None)], []),
+            ([segment(active=512, requested=400, frame="alloc.py")], []),
+        ],
+        labels=("start", "end"),
+    )
+
+    report = run.lifetimes()
+
+    assert len(report.cohorts) == 1
+    assert "alloc.py" in report.cohorts[0].stack_key
+
+
+def test_duplicate_free_requested_is_a_reconciliation_error() -> None:
+    start = segment(active=512, requested=400, stream=7)
+    end = segment(active=512, requested=400, stream=7)
+    end["blocks"][0]["state"] = "active_awaiting_free"
+    run = make_history_run(
+        [
+            ([start], []),
+            (
+                [end],
+                [
+                    event("free_requested", size=400, stream=7),
+                    event("free_requested", size=400, stream=7),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+
+    with pytest.raises(MemoryReconciliationError, match="duplicate free_requested"):
+        run.lifetimes()
+
+
+def test_duplicate_active_address_in_snapshot_is_a_reconciliation_error() -> None:
+    run = make_history_run(
+        [
+            (
+                [
+                    segment(active=512, address=1000),
+                    segment(active=512, address=1000),
+                ],
+                [],
+            ),
+            ([segment(active=512, address=1000)], []),
+        ],
+        labels=("start", "end"),
+    )
+
+    with pytest.raises(MemoryReconciliationError, match="duplicate active block"):
+        run.lifetimes()
+
+
 def test_transient_in_cross_era_address_range_reports_unknown_pool() -> None:
     """A transient in a range that changed pools must not inherit either pool."""
 

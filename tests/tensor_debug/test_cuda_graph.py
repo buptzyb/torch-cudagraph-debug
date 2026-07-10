@@ -225,6 +225,47 @@ def test_check_mismatch_is_sticky() -> None:
     probe.close()
 
 
+@pytest.mark.parametrize(
+    ("actual_value", "expected_value", "matches"),
+    [
+        (float("inf"), float("inf"), True),
+        (float("-inf"), float("-inf"), True),
+        (1.0, float("inf"), False),
+        (float("-inf"), float("inf"), False),
+        (float("inf"), float("-inf"), False),
+    ],
+)
+def test_check_non_finite_values_require_exact_infinity_match(
+    actual_value: float,
+    expected_value: float,
+    matches: bool,
+) -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    actual = torch.tensor([actual_value], device="cuda")
+    expected = torch.tensor([expected_value], device="cpu")
+    probe = TensorProbe(
+        "non-finite",
+        actions=[CheckAction(expected, rtol=1e-5, atol=1e-8)],
+    )
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        probe(actual)
+
+    graph.replay()
+    torch.cuda.synchronize()
+
+    status = probe.check_status()
+    assert status.ok is matches
+    if not matches:
+        assert "mismatch" in status.message
+
+    del graph
+    probe.close()
+
+
 def test_check_int64_mismatch_message_preserves_full_range() -> None:
     if not torch.cuda.is_available() or not _native.extension_available():
         pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
@@ -1004,6 +1045,53 @@ def test_probe_device_must_match_active_tensor_device() -> None:
     with pytest.raises(RuntimeError, match="created on cuda:0.*cuda:1"):
         probe(x)
     probe.close()
+
+
+@pytest.mark.filterwarnings("ignore:The CUDA Graph is empty")
+def test_capture_mode_validates_cpu_tensor_while_probe_device_is_capturing() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+
+    probe = TensorProbe(
+        "capture-cpu-mismatch",
+        actions=[RecordAction()],
+        device="cuda:0",
+    )
+    value = torch.ones(1, device="cpu")
+    assert probe(value) is value
+
+    graph = torch.cuda.CUDAGraph()
+    with pytest.raises(RuntimeError, match="input must be a CUDA tensor"):
+        with torch.cuda.graph(graph):
+            probe(value)
+
+    torch.cuda.synchronize()
+    del graph
+    probe.close()
+
+
+@pytest.mark.filterwarnings("ignore:The CUDA Graph is empty")
+def test_capture_mode_validates_tensor_against_capturing_probe_device() -> None:
+    if not torch.cuda.is_available() or not _native.extension_available():
+        pytest.skip("requires CUDA and built torch-cudagraph-debug native extension")
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires at least two CUDA devices")
+
+    with torch.cuda.device(0):
+        probe = TensorProbe(
+            "capture-device-mismatch",
+            actions=[RecordAction()],
+            device="cuda:0",
+        )
+        value = torch.ones(1, device="cuda:1")
+        graph = torch.cuda.CUDAGraph()
+        with pytest.raises(RuntimeError, match="created on cuda:0.*cuda:1"):
+            with torch.cuda.graph(graph):
+                probe(value)
+
+        torch.cuda.synchronize()
+        del graph
+        probe.close()
 
 
 def test_eager_callback_payloads_do_not_accumulate() -> None:
