@@ -189,6 +189,78 @@ def test_group_accepts_incomplete_prefix_rank_as_crashed() -> None:
         MemoryRunGroup.from_runs((rank0, replace(crashed, complete=True)))
 
 
+def test_group_phase_comparison_skips_rank_missing_an_incomplete_tail() -> None:
+    baseline = MemoryRunGroup.from_runs(
+        (
+            _distributed_run((10, 20), name="baseline", rank=0, group_id="base"),
+            _distributed_run((11, 21), name="baseline", rank=1, group_id="base"),
+        )
+    )
+    candidate_rank0 = _distributed_run(
+        (12, 22), name="candidate", rank=0, group_id="candidate"
+    )
+    candidate_rank1 = replace(
+        make_run(
+            [snapshot(segment(active=13, device=1))],
+            name="candidate",
+            rank=1,
+            group_id="candidate",
+            world_size=2,
+            run_metadata={"source_revision": "abc123"},
+            labels=("start",),
+        ),
+        complete=False,
+    )
+    candidate = MemoryRunGroup.from_runs((candidate_rank0, candidate_rank1))
+
+    report = compare_run_group_phases(
+        baseline,
+        candidate,
+        baseline_start="start",
+        baseline_end="end",
+        candidate_start="start",
+        candidate_end="end",
+    )
+
+    assert tuple(report.rank_comparisons) == (0,)
+    assert any(
+        "rank 1 skipped" in item
+        and "candidate incomplete run is missing point 'end'" in item
+        for item in report.warnings
+    )
+    assert report.phase_aggregates
+    assert all(item.rank_count == 1 for item in report.phase_aggregates)
+
+
+def test_group_phase_comparison_rejects_when_no_rank_has_the_phase() -> None:
+    baseline = MemoryRunGroup.from_runs(
+        (_distributed_run((10, 20), name="baseline", rank=0, group_id="base"),)
+    )
+    candidate_run = replace(
+        make_run(
+            [snapshot(segment(active=12))],
+            name="candidate",
+            rank=0,
+            group_id="candidate",
+            world_size=1,
+            run_metadata={"source_revision": "abc123"},
+            labels=("start",),
+        ),
+        complete=False,
+    )
+    candidate = MemoryRunGroup.from_runs((candidate_run,))
+
+    with pytest.raises(MemoryBundleError, match="no common rank contains"):
+        compare_run_group_phases(
+            baseline,
+            candidate,
+            baseline_start="start",
+            baseline_end="end",
+            candidate_start="start",
+            candidate_end="end",
+        )
+
+
 def test_group_warns_for_missing_rank_and_metadata_mismatch() -> None:
     rank0 = _distributed_run((10, 20), name="run", rank=0, group_id="job", world_size=3)
     rank2 = _distributed_run((10, 20), name="run", rank=2, group_id="job", world_size=3)

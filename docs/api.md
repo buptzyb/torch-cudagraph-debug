@@ -578,10 +578,12 @@ semantically equivalent point labels differ; explicit entries take precedence
 and unmapped labels still align by identical label. A candidate label may be
 claimed only once across the merged mapping, and only labels covered by
 neither the mapping nor auto-alignment are reported as one-sided points.
-One-sided points are a mismatch, except when the other run is incomplete and
-they are exactly its crash tail (the longer run's trailing points): missing
-evidence makes the run comparison `inconclusive` with a warning, while a
-genuine difference on any shared point still reports `mismatch`.
+One-sided points are a mismatch, except when the incomplete run's aligned
+point sequence is exactly an ordered prefix of the longer run after applying
+`point_mapping`, and the unmatched points are its crash tail. That missing
+evidence makes the run comparison `inconclusive` with a warning; reordered
+points, divergent tails, or a difference on any shared point report
+`mismatch`.
 
 Allclose uses the reference tensor in
 `atol + rtol * abs(reference)`. Integer and bool values compare exactly.
@@ -1126,6 +1128,8 @@ uniquely through endpoint segment ranges, `ambiguous` for conflicting endpoint
 ranges, `unknown` when no address or matching range is available, and
 `not_applicable` for `oom` events, whose payload is the device's free-byte
 count (`AllocatorTraceEntry.device_free_bytes`) rather than an address.
+Rendered event rows use `pool[n/a]` for `not_applicable`; `pool[unknown]`
+remains reserved for events whose pool could apply but could not be determined.
 
 ### Allocation Cohort Lifetimes
 
@@ -1353,7 +1357,10 @@ payloads.
 metric's minimum, maximum, owning ranks, and spread. Its text and HTML focus on
 allocated, reserved, active, and requested; JSON and CSV retain every metric.
 `MemoryRunGroupPhaseComparison` pairs common ranks and aggregates every phase
-metric in the per-rank four-point equations. Text reports the minimum, maximum,
+metric in the per-rank four-point equations. A common rank is skipped with a
+warning when an incomplete run lacks a requested phase endpoint. A missing
+endpoint in a complete run is an error, as is a comparison with no rank that
+contains the full phase. Text reports the minimum, maximum,
 owning ranks, and spread for `end_gap` and
 `change_gap = candidate_change - baseline_change`; JSON and CSV retain extrema
 for every equation component. Neither API sums GPU memory across ranks.

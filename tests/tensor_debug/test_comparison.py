@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -390,6 +391,93 @@ def test_point_mapping_rejects_candidate_label_claimed_twice() -> None:
 
     with pytest.raises(ValueError, match="one-to-one"):
         compare_runs(reference, candidate, point_mapping={"a": "b"})
+
+
+def test_incomplete_reordered_run_is_not_treated_as_a_crash_tail() -> None:
+    reference = make_tensor_run(
+        [
+            ("a", [("x", torch.tensor([1.0]), "full")]),
+            ("b", [("x", torch.tensor([2.0]), "full")]),
+            ("c", [("x", torch.tensor([3.0]), "full")]),
+        ],
+        name="reference",
+    )
+    candidate = replace(
+        make_tensor_run(
+            [
+                ("b", [("x", torch.tensor([2.0]), "full")]),
+                ("a", [("x", torch.tensor([1.0]), "full")]),
+            ],
+            name="candidate",
+        ),
+        complete=False,
+    )
+
+    report = compare_runs(reference, candidate)
+
+    assert report.status == "mismatch"
+    assert report.reference_only_points == ("c",)
+    assert not any("candidate run is incomplete" in item for item in report.warnings)
+
+
+def test_divergent_incomplete_run_tails_are_a_mismatch() -> None:
+    reference = replace(
+        make_tensor_run(
+            [
+                ("a", [("x", torch.tensor([1.0]), "full")]),
+                ("b", [("x", torch.tensor([2.0]), "full")]),
+            ],
+            name="reference",
+        ),
+        complete=False,
+    )
+    candidate = replace(
+        make_tensor_run(
+            [
+                ("a", [("x", torch.tensor([1.0]), "full")]),
+                ("c", [("x", torch.tensor([3.0]), "full")]),
+            ],
+            name="candidate",
+        ),
+        complete=False,
+    )
+
+    report = compare_runs(reference, candidate)
+
+    assert report.status == "mismatch"
+    assert report.reference_only_points == ("b",)
+    assert report.candidate_only_points == ("c",)
+
+
+def test_mapped_incomplete_ordered_prefix_is_inconclusive() -> None:
+    reference = make_tensor_run(
+        [
+            ("warmup", [("x", torch.tensor([1.0]), "full")]),
+            ("forward", [("x", torch.tensor([2.0]), "full")]),
+            ("backward", [("x", torch.tensor([3.0]), "full")]),
+        ],
+        name="reference",
+    )
+    candidate = replace(
+        make_tensor_run(
+            [
+                ("setup", [("x", torch.tensor([1.0]), "full")]),
+                ("replay", [("x", torch.tensor([2.0]), "full")]),
+            ],
+            name="candidate",
+        ),
+        complete=False,
+    )
+
+    report = compare_runs(
+        reference,
+        candidate,
+        point_mapping={"warmup": "setup", "forward": "replay"},
+    )
+
+    assert report.status == "inconclusive"
+    assert report.reference_only_points == ("backward",)
+    assert any("candidate run is incomplete" in item for item in report.warnings)
 
 
 def test_series_rejects_an_empty_candidate_run() -> None:

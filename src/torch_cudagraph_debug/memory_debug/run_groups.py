@@ -488,6 +488,26 @@ class MemoryRunGroup:
         )
 
 
+def _missing_phase_points(
+    run: MemoryRun,
+    start: str | int,
+    end: str | int,
+) -> tuple[str | int, ...]:
+    missing: list[str | int] = []
+    for ref in (start, end):
+        try:
+            run.point(ref)
+        except (IndexError, KeyError):
+            if ref not in missing:
+                missing.append(ref)
+    return tuple(missing)
+
+
+def _phase_points_text(refs: tuple[str | int, ...]) -> str:
+    noun = "point" if len(refs) == 1 else "points"
+    return f"{noun} {', '.join(repr(ref) for ref in refs)}"
+
+
 def compare_run_group_phases(
     baseline: MemoryRunGroup,
     candidate: MemoryRunGroup,
@@ -542,10 +562,34 @@ def compare_run_group_phases(
     rank_pool_decomposition: list[MemoryRankPoolPhaseDecomposition] = []
     rank_device_decomposition: list[MemoryRankDevicePhaseDecomposition] = []
     options = attribution or MemoryAttributionOptions()
+    skipped_ranks: list[str] = []
     for rank in common_ranks:
+        baseline_run = baseline[rank]
+        candidate_run = candidate[rank]
+        skip_reasons = []
+        for role, run, start, end in (
+            ("baseline", baseline_run, baseline_start, baseline_end),
+            ("candidate", candidate_run, candidate_start, candidate_end),
+        ):
+            missing = _missing_phase_points(run, start, end)
+            if not missing:
+                continue
+            detail = f"{role} run is missing {_phase_points_text(missing)}"
+            if run.complete:
+                raise MemoryBundleError(f"rank {rank} {detail}")
+            skip_reasons.append(
+                f"{role} incomplete run is missing {_phase_points_text(missing)}"
+            )
+
+        if skip_reasons:
+            warning = f"rank {rank} skipped: {'; '.join(skip_reasons)}"
+            warnings.append(warning)
+            skipped_ranks.append(warning)
+            continue
+
         phase = compare_phases(
-            baseline[rank].between(baseline_start, baseline_end),
-            candidate[rank].between(candidate_start, candidate_end),
+            baseline_run.between(baseline_start, baseline_end),
+            candidate_run.between(candidate_start, candidate_end),
             pool_mapping=(pool_mappings or {}).get(rank),
             device_mapping=(device_mappings or {}).get(rank),
             attribution=options,
@@ -564,6 +608,12 @@ def compare_run_group_phases(
             for item in phase.device_decomposition
         )
         warnings.extend(f"rank {rank}: {warning}" for warning in phase.warnings)
+
+    if not rank_comparisons:
+        raise MemoryBundleError(
+            "no common rank contains all requested phase points: "
+            + "; ".join(skipped_ranks)
+        )
 
     frozen_rank_decomposition = tuple(rank_decomposition)
     return MemoryRunGroupPhaseComparison(

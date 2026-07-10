@@ -388,12 +388,26 @@ class TensorRunComparison:
     def status(self) -> ComparisonStatus:
         """One-sided points are a mismatch unless they are the crash tail of
         an incomplete run, which is missing evidence, not divergence."""
+        candidate_to_reference = tuple(
+            (item.candidate.label, item.reference.label)
+            for item in self.point_comparisons
+        )
         if self.reference_only_points and not _incomplete_prefix_tail(
-            self.reference_only_points, self.reference, self.candidate
+            self.reference_only_points,
+            self.reference,
+            self.candidate,
+            candidate_to_reference,
         ):
             return "mismatch"
+        reference_to_candidate = tuple(
+            (item.reference.label, item.candidate.label)
+            for item in self.point_comparisons
+        )
         if self.candidate_only_points and not _incomplete_prefix_tail(
-            self.candidate_only_points, self.candidate, self.reference
+            self.candidate_only_points,
+            self.candidate,
+            self.reference,
+            reference_to_candidate,
         ):
             return "mismatch"
         if any(item.status == "mismatch" for item in self.point_comparisons):
@@ -773,16 +787,27 @@ def _incomplete_prefix_tail(
     one_sided_labels: tuple[str, ...],
     longer: "TensorRun",
     shorter: "TensorRun",
+    shorter_to_longer: Sequence[tuple[str, str]],
 ) -> bool:
     """True when the longer run's unmatched points are explained by the
     shorter run being an incomplete (crashed) recording: the shorter run
-    never finished and the unmatched labels are exactly the longer run's
-    trailing points."""
+    never finished, every recorded point aligns with the longer run's ordered
+    prefix, and the unmatched labels are exactly its trailing points."""
 
     if shorter.complete or not one_sided_labels:
         return False
     longer_labels = tuple(point.label for point in longer.points)
-    return one_sided_labels == longer_labels[-len(one_sided_labels) :]
+    shorter_labels = tuple(point.label for point in shorter.points)
+    alignment = dict(shorter_to_longer)
+    if len(alignment) != len(shorter_to_longer):
+        return False
+    if set(alignment) != set(shorter_labels):
+        return False
+    aligned_shorter_labels = tuple(alignment[label] for label in shorter_labels)
+    return (
+        aligned_shorter_labels == longer_labels[: len(shorter_labels)]
+        and one_sided_labels == longer_labels[len(shorter_labels) :]
+    )
 
 
 def compare_runs(
@@ -857,12 +882,28 @@ def compare_runs(
         if point.label not in matched_candidate
     )
     warnings = []
-    if _incomplete_prefix_tail(reference_only, reference, candidate):
+    candidate_to_reference = tuple(
+        (item.candidate.label, item.reference.label) for item in point_comparisons
+    )
+    if _incomplete_prefix_tail(
+        reference_only,
+        reference,
+        candidate,
+        candidate_to_reference,
+    ):
         warnings.append(
             "candidate run is incomplete; reference points recorded after it "
             f"stopped were not compared: {', '.join(reference_only)}"
         )
-    if _incomplete_prefix_tail(candidate_only, candidate, reference):
+    reference_to_candidate = tuple(
+        (item.reference.label, item.candidate.label) for item in point_comparisons
+    )
+    if _incomplete_prefix_tail(
+        candidate_only,
+        candidate,
+        reference,
+        reference_to_candidate,
+    ):
         warnings.append(
             "reference run is incomplete; candidate points recorded after it "
             f"stopped were not compared: {', '.join(candidate_only)}"

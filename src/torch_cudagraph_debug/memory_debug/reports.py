@@ -643,7 +643,7 @@ class _MemoryStateComparison:
             )
             lines.extend(
                 f"{indent}  device[{item.device_index}] "
-                f"{pool_id_label(item.pool_id) if item.pool_id is not None else 'pool[unknown]'} "
+                f"{item.pool_label} "
                 f"{stream_label(item.stream)} {item.action}: "
                 f"{format_bytes(item.size_bytes)} in {item.count} events "
                 f"[{item.attribution_confidence}] at "

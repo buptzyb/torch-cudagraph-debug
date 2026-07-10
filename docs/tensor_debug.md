@@ -248,9 +248,11 @@ Source stride is part of tensor metadata. The default
 `compare_runs(reference, candidate)` aligns points by label and reports missing
 points. Pass `point_mapping` when semantically equivalent point labels differ;
 unmapped labels align by identical label, and only labels covered by neither
-the mapping nor auto-alignment are reported as one-sided. One-sided points
-from an incomplete run's crash tail make the comparison `inconclusive` with a
-warning instead of `mismatch`; differences on shared points still win as
+the mapping nor auto-alignment are reported as one-sided. One-sided points make
+the comparison `inconclusive` only when the incomplete run's aligned points
+are exactly an ordered prefix of the longer run
+(after applying `point_mapping`) and the unmatched points are its crash tail.
+Reordered points, divergent tails, and differences on shared points are
 `mismatch`.
 `compare_point_series(reference_point, candidate_run)` compares one reference
 against every candidate point in order and is intended for replay drift, stale

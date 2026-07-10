@@ -352,6 +352,9 @@ Each allocator-event row reports pool-attribution confidence:
   block (`oom`, whose payload is the device's free-byte count, not an
   address), so pool attribution is never attempted.
 
+Rendered rows use `pool[n/a]` for `not_applicable`; `pool[unknown]` means
+the pool could apply but available evidence could not determine it.
+
 Confidence describes pool attribution, not event-history completeness; the
 comparison's `attribution_status.events` carries the latter.
 
@@ -618,7 +621,12 @@ run with fewer points or a non-prefix sequence,
 and conflicting non-null group IDs or world sizes are errors; missing
 group IDs or world sizes, declared-but-missing ranks,
 incomplete bundles, provenance differences, and metadata differences are
-warnings. `rank` and `world_size` default from the `RANK`/`WORLD_SIZE`
+warnings. `compare_run_group_phases()` skips a common rank, with a warning,
+when an incomplete run stopped before a requested phase endpoint. A missing
+endpoint in a complete run is an error, and the comparison fails when no common
+rank contains the full phase.
+
+`rank` and `world_size` default from the `RANK`/`WORLD_SIZE`
 environment variables or initialized `torch.distributed`, so torchrun processes
 usually need no explicit identity arguments. `group.missing_ranks` and
 `group.complete` expose rank coverage programmatically. GPU memory is never

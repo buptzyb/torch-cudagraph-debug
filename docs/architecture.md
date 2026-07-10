@@ -139,6 +139,12 @@ Terminal Runs require `finished_at`; timestamps cannot precede creation, follow
 completion, or move backward across Points. Public constructors enforce the same
 identity and time contract as bundle loaders.
 
+Cross-run analysis preserves that distinction. Tensor run comparison treats a
+missing tail as inconclusive only when the incomplete run is an aligned ordered
+prefix of the longer run. Memory group phase comparison excludes an incomplete
+rank that lacks a requested endpoint, reports that exclusion, and fails if no
+common rank contains the complete phase.
+
 Tensor collectors own CUDA-visible storage. `snapshot()`, status queries, and
 `close()` accept the same bool/stream/device synchronization contract.
 Capture-only collection determines capture state on the collector's configured

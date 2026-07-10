@@ -327,6 +327,11 @@ def test_oom_device_free_is_not_an_address_and_never_pool_attributes() -> None:
     assert row.action == "oom"
     assert row.pool_id is None
     assert row.attribution_confidence == "not_applicable"
+    assert row.pool_label == "pool[n/a]"
+    assert (
+        row.to_row(reference_label="before", candidate_label="after")["pool_id"]
+        == "pool[n/a]"
+    )
 
 
 def test_full_stack_identity_includes_fx_frame_metadata() -> None:

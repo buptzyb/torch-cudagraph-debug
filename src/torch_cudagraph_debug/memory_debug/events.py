@@ -245,6 +245,14 @@ class AllocatorEventSummary:
     attribution_confidence: str
 
     @property
+    def pool_label(self) -> str:
+        if self.pool_id is not None:
+            return pool_id_label(self.pool_id)
+        if self.attribution_confidence == "not_applicable":
+            return "pool[n/a]"
+        return "pool[unknown]"
+
+    @property
     def stack_key(self) -> str:
         return stack_key(self.stack_frames)
 
@@ -269,11 +277,7 @@ class AllocatorEventSummary:
             "reference_label": reference_label,
             "candidate_label": candidate_label,
             "device_index": self.device_index,
-            "pool_id": (
-                pool_id_label(self.pool_id)
-                if self.pool_id is not None
-                else "pool[unknown]"
-            ),
+            "pool_id": self.pool_label,
             "stream_id": stream_label(self.stream),
             "action": self.action,
             "stack_key": self.stack_key,
