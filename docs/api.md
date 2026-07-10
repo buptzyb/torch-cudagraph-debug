@@ -51,28 +51,29 @@ Memory facade:
   `MemoryRecorder`, `MemoryRun`, `MemoryPoint`, `MemoryRange`,
   `MemoryObservation`, `MemoryObservationKey`, `MemoryPoolKey`,
   `MemoryLifetimeSelection`, `PoolId`, and `StreamId`.
-- State and policies: `AllocatorScope`, `MemoryStats`,
-  `MemoryStatsDelta`, `MemoryStatMetric`, `MemoryDisplayOptions`,
-  `MemoryAttributionOptions`, `MemoryLifetimeOptions`,
-  `MemoryEvidenceStatus`, `MemoryAttributionStatus`,
-  `MatchKind`, and `PhaseMetric`.
+- State and policies: `AllocatorScope`, `MemoryStats`, `MemoryStatsDelta`,
+  `MemoryStatMetric`, `DeviceMemoryMetric`, `DeviceMemorySample`,
+  `MemoryDisplayOptions`, `MemoryAttributionOptions`, `MemoryLifetimeOptions`,
+  `MemoryEvidenceStatus`, `MemoryAttributionStatus`, `MatchKind`, and
+  `PhaseMetric`.
 - Comparison and timeline leaves: `MemoryLifecycleDelta`,
   `MemoryAllocatorScopeComparison`, `MemoryPoolComparison`,
-  `MemoryObservationComparison`, `MemoryAllocatorScopeTimelineEntry`,
-  `MemoryPoolTimelineEntry`, `MemoryObservationTimelineEntry`,
-  `MemoryPhaseComponents`, `MemoryAllocatorScopePhaseDecomposition`, and
-  `MemoryPoolPhaseDecomposition`.
+  `MemoryObservationComparison`, `MemoryDeviceComparison`,
+  `MemoryAllocatorScopeTimelineEntry`, `MemoryPoolTimelineEntry`,
+  `MemoryObservationTimelineEntry`, `MemoryDeviceTimelineEntry`,
+  `MemoryPhaseComponents`, `MemoryAllocatorScopePhaseDecomposition`,
+  `MemoryPoolPhaseDecomposition`, and `MemoryDevicePhaseDecomposition`.
 - Attribution leaves: `AllocationStackCoverage`,
   `AllocationStackSummary`, `AllocationStackDelta`,
   `AllocatorEventSummary`, `AllocationCohort`, `CohortBirth`,
   `CohortFreeRequest`, `CohortFreeCompletion`, `CohortPointState`,
   `CohortSizeBucket`, and `CohortSizeOutcome`.
 - Results and groups: `MemorySnapshotComparison`, `MemoryPointComparison`,
-  `MemoryTimeline`, `MemoryPhaseComparison`,
-  `MemoryAllocationLifetimeAnalysis`, `MemoryRunGroup`,
-  `MemoryRunGroupSummary`, `MemoryRunGroupPhaseComparison`,
-  `MemoryRankPointState`, `MemoryRankPointAggregate`,
-  `MemoryRankPhaseDecomposition`, `MemoryRankPoolPhaseDecomposition`,
+  `MemoryTimeline`, `MemoryPhaseComparison`, `MemoryAllocationLifetimeAnalysis`,
+  `MemoryRunGroup`, `MemoryRunGroupSummary`, `MemoryRunGroupPhaseComparison`,
+  `MemoryRankPointState`, `MemoryRankDevicePointState`,
+  `MemoryRankPointAggregate`, `MemoryRankPhaseDecomposition`,
+  `MemoryRankPoolPhaseDecomposition`, `MemoryRankDevicePhaseDecomposition`,
   `MemoryMetricExtrema`, and `MemoryRunGroupPhaseAggregate`.
 - Functions: `compare_snapshots`, `compare_points`, `compare_phases`, and
   `compare_run_group_phases`.
@@ -792,6 +793,7 @@ class MemoryProbeSnapshot:
     boundary_marker: str
     observations: tuple[MemoryObservation, ...]
     warnings: tuple[str, ...]
+    device_memory: Mapping[int, DeviceMemorySample]
 
 snapshot.by_key -> Mapping[MemoryObservationKey, MemoryObservation]
 snapshot.observation_stats -> Mapping[MemoryObservationKey, MemoryStats]
@@ -806,7 +808,19 @@ snapshot.descriptor() -> dict
 
 `snapshot_index` is Probe-local query order. Device index is part of every
 pool and observation key, so identical pool IDs on different devices remain
-separate. `probe.compare()` accepts only snapshots this probe produced;
+separate.
+
+`device_memory` holds each successful `DeviceMemorySample`, collected with
+`torch.cuda.mem_get_info` immediately after the allocator snapshot. Each sample
+stores `free_bytes` and `total_bytes` and derives
+`used_bytes = total_bytes - free_bytes`. These are CUDA Runtime, device-wide
+values: they include context and external allocations from the recording
+process plus other processes on a shared GPU. Sampling is attempted during CUDA
+Graph capture without synchronization. A query failure drops only that device
+and records a warning; allocator state remains available. The two calls are
+consecutive but not atomic, so concurrent allocation can introduce skew.
+
+`probe.compare()` accepts only snapshots this probe produced;
 independent probes are compared with the module-level function:
 
 ```python
@@ -946,8 +960,13 @@ point.pool_stats -> Mapping[MemoryPoolKey, MemoryStats]
 point.allocator_scope_stats -> Mapping[AllocatorScope, MemoryStats]
 point.allocator_settings -> Mapping[str, FrozenJSONValue]
 point.allocator_state() -> Mapping[str, FrozenJSONValue]
+point.device_memory -> Mapping[int, DeviceMemorySample]
 point.descriptor() -> dict
 ```
+
+`point.device_memory` follows `MemoryProbeSnapshot`: it contains each
+successful per-device CUDA Runtime sample and may be partially or wholly empty
+when a device query is unavailable.
 
 `MemoryStats` stores reserved, allocated, active, requested, segment count,
 block count, inactive block count, largest inactive block, expandable segment
@@ -1312,21 +1331,18 @@ for every equation component. Neither API sums GPU memory across ranks.
 and serialization. Their main programmatic fields are:
 
 - `MemorySnapshotComparison` and `MemoryPointComparison`: sibling result types
-  with `reference`, `candidate`, `allocator_scope_comparisons`,
-  `pool_comparisons`, `observation_comparisons`, `lifecycle_available`,
-  `lifecycle_confidence`, optional attribution fields, and `warnings`.
-- `MemoryTimeline`: `run`, `allocator_scope_entries`, `pool_entries`,
-  `observation_entries`, optional `point_comparisons` and allocation lifetimes,
-  and derived `warnings`.
-- `MemoryPhaseComparison`: `baseline_change`, `candidate_change`, `start_gap`,
-  `end_gap`, `allocator_scope_decomposition`, `pool_decomposition`, and `warnings`.
-- `MemoryAllocationLifetimeAnalysis`: `source_kind`, `source_id`, `source_name`,
-  selection states, `cohorts`, history coverage, attributed bytes, and `warnings`.
-- `MemoryRunGroupSummary`: `run_group`, per-rank `rank_points`,
-  cross-rank `point_aggregates`, and `warnings`.
-- `MemoryRunGroupPhaseComparison`: `baseline_group`, `candidate_group`,
-  `rank_comparisons`, `rank_decomposition`, `rank_pool_decomposition`,
-  `phase_aggregates`, and `warnings`.
+  with reference/candidate allocator rows, `device_comparisons`, lifecycle,
+  optional attribution fields, and warnings.
+- `MemoryTimeline`: run-owned allocator entries, `device_entries`, optional
+  attributed point comparisons and allocation lifetimes, and derived warnings.
+- `MemoryPhaseComparison`: four ordinary comparison legs plus allocator-scope,
+  pool, and `device_decomposition` four-point equations.
+- `MemoryAllocationLifetimeAnalysis`: source identity, selection states, cohorts,
+  history coverage, attributed bytes, and warnings.
+- `MemoryRunGroupSummary`: per-rank allocator `rank_points`, per-rank/device
+  `rank_devices`, cross-rank allocator `point_aggregates`, and warnings.
+- `MemoryRunGroupPhaseComparison`: rank comparisons, allocator/pool/device rank
+  decompositions, allocator-scope phase aggregates, and warnings.
 
 Supporting public row models preserve the structured evidence behind those
 reports:
@@ -1335,12 +1351,24 @@ reports:
   `MemoryObservationComparison` carry reference, candidate, and delta
   `MemoryStats`; pool and observation rows also carry `MatchKind` and optional
   `MemoryLifecycleDelta`.
+- `MemoryDeviceComparison` carries one device reference/candidate
+  `DeviceMemorySample` pair, either of which may be unavailable. It reports
+  used, free, total, allocator reserved for the recording process, and
+  `unattributed_device_bytes = used_bytes - allocator_reserved_bytes`, with
+  deltas including `delta_total_bytes`. The unattributed value is device-global
+  evidence not explained by the allocator of the source process; it is not
+  process attribution.
 - `MemoryAllocatorScopeTimelineEntry`, `MemoryPoolTimelineEntry`, and
   `MemoryObservationTimelineEntry` carry point identity, row identity, absolute
   stats, and the optional previous-point delta.
+- `MemoryDeviceTimelineEntry` carries the same device metrics and leaves every
+  delta `None` when the immediately preceding point lacks that sample.
 - `MemoryPhaseComponents` carries the five terms of one phase equation.
-  `MemoryAllocatorScopePhaseDecomposition` and `MemoryPoolPhaseDecomposition`
-  add allocator-scope or mapped-pool identity.
+  `MemoryAllocatorScopePhaseDecomposition`, `MemoryPoolPhaseDecomposition`, and
+  `MemoryDevicePhaseDecomposition` add allocator-scope, mapped-pool, or device
+  identity. `MemoryRankDevicePointState` and
+  `MemoryRankDevicePhaseDecomposition` retain those values per rank without
+  summing or aggregating device-global memory across ranks.
 - `AllocationStackCoverage`, `AllocationStackSummary`, and
   `AllocationStackDelta` retain coverage totals or stack-keyed active size,
   requested size, count, pool, and optional stream evidence.
@@ -1415,13 +1443,12 @@ CSV flattens these as `reference_allocated_bytes`,
 `candidate_allocated_bytes`, and `delta_allocated_bytes`.
 
 Every `write()` creates `report.txt`, `report.json`, and `report.html`.
-Pool-oriented results — state comparisons, timelines, and phase
-comparisons — also create `allocator_scopes.csv`, `pools.csv`, and
-`observations.csv`, with optional `allocation_stack_comparisons.csv`,
-`events.csv`, `pool_decomposition.csv`, and
-`allocator_scope_decomposition.csv`. Group summaries, group-phase
-comparisons, and standalone lifetime analyses create only `report.*` plus
-their own CSV sets.
+Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
+`observations.csv`. State comparisons, timelines, and phase comparisons with
+CUDA Runtime samples add `devices.csv`; phase reports additionally add
+`device_decomposition.csv`. Optional attribution and lifetime CSVs remain
+unchanged. Group summaries, group-phase comparisons, and standalone lifetime
+analyses create `report.*` plus their domain-specific CSV sets.
 
 `MemoryAllocationLifetimeAnalysis` and pool-oriented results that embed one
 create `cohorts.csv`, `cohort_points.csv`, `size_histograms.csv`, and
@@ -1430,9 +1457,10 @@ create `cohorts.csv`, `cohort_points.csv`, `size_histograms.csv`, and
 full stack identity, split point states, size outcomes, transition origins,
 and point/event peaks nested under each cohort.
 
-Group summaries create `rank_points.csv` and `point_aggregates.csv`.
-Group phase reports create `rank_decomposition.csv`,
-`rank_pool_decomposition.csv`, and `phase_aggregates.csv`.
+Group summaries create `rank_points.csv`, optional `rank_devices.csv`, and
+`point_aggregates.csv`. Group phase reports create `rank_decomposition.csv`,
+`rank_pool_decomposition.csv`, optional `rank_device_decomposition.csv`, and
+`phase_aggregates.csv`.
 
 ### Bundle Format
 
@@ -1457,7 +1485,10 @@ bundle.
 Manifest, point, and observation objects have canonical required fields.
 Observation rows persist the ten base `MemoryStats` fields. `awaiting_free_bytes`,
 `inactive_bytes`, and `internal_fragmentation_bytes` are derived after loading.
-Missing or unknown fields are rejected.
+Each point also persists `device_memory` as an object keyed by decimal device
+index whose entries store exactly `free_bytes` and `total_bytes`; `used_bytes`
+is derived after loading. The object is empty when sampling is unavailable for
+that point. Missing or unknown fields are rejected.
 
 Loading reads only manifest summaries and never executes pickle. On first raw
 payload access, the loader verifies its SHA-256; state access also recomputes the

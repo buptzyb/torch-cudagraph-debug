@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
+from types import MappingProxyType
 from typing import Any, Literal
 
 AllocatorScope = Literal["all", "default", "private"]
@@ -178,6 +179,65 @@ class MemoryStats:
             "expandable_inactive_bytes": self.expandable_inactive_bytes,
             "internal_fragmentation_bytes": self.internal_fragmentation_bytes,
         }
+
+
+@dataclass(frozen=True)
+class DeviceMemorySample:
+    """CUDA Runtime free and total memory for one device.
+
+    Values come from ``torch.cuda.mem_get_info`` and cover the whole device:
+    the CUDA context, allocations made outside the caching allocator, and
+    every other process sharing the GPU. They are not scoped to this process.
+    """
+
+    free_bytes: int
+    total_bytes: int
+
+    def __post_init__(self) -> None:
+        for name in ("free_bytes", "total_bytes"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.free_bytes > self.total_bytes:
+            raise ValueError("free_bytes must not exceed total_bytes")
+
+    @property
+    def used_bytes(self) -> int:
+        return self.total_bytes - self.free_bytes
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "DeviceMemorySample":
+        values = {}
+        for name in ("free_bytes", "total_bytes"):
+            raw = value[name]
+            if type(raw) is not int or raw < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+            values[name] = raw
+        return cls(**values)
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "free_bytes": self.free_bytes,
+            "total_bytes": self.total_bytes,
+            "used_bytes": self.used_bytes,
+        }
+
+
+def validate_device_memory(
+    device_memory: Mapping[int, DeviceMemorySample],
+) -> Mapping[int, DeviceMemorySample]:
+    """Return an immutable, device-ordered view of CUDA Runtime memory samples."""
+
+    if not isinstance(device_memory, Mapping):
+        raise TypeError("device_memory must be a mapping of device index to sample")
+    for device, sample in device_memory.items():
+        if type(device) is not int or device < 0:
+            raise ValueError("device_memory keys must be non-negative integers")
+        if not isinstance(sample, DeviceMemorySample):
+            raise TypeError("device_memory values must be DeviceMemorySample")
+    return MappingProxyType(
+        {device: device_memory[device] for device in sorted(device_memory)}
+    )
 
 
 @dataclass(frozen=True)

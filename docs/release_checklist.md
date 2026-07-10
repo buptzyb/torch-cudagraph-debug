@@ -172,6 +172,7 @@ bash "${TCGD_REPO_ROOT}/examples/tensor_debug/cli/workflows.sh" \
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/quickstart.py"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/private_pool_inactive.py"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/snapshot_comparison.py"
+python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/device_memory.py"
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/expandable_segments.py"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/recorder/timeline_and_reports.py" \

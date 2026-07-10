@@ -110,10 +110,28 @@ def make_run(
     group_id: str | None = None,
     world_size: int | None = None,
     run_metadata: dict[str, Any] | None = None,
+    device_memory: list[dict[int, tuple[int, int]]] | None = None,
 ) -> MemoryRun:
+    """Build a run from canned snapshots; ``device_memory`` optionally
+    supplies one ``{device: (free, total)}`` mapping per point."""
+
     pending = list(snapshots)
+    pending_device_memory = None if device_memory is None else list(device_memory)
+    current_device_memory: dict[int, tuple[int, int]] = {}
+
+    def snapshot_provider(marker: str) -> dict[str, Any]:
+        if pending_device_memory is not None:
+            current_device_memory.clear()
+            current_device_memory.update(pending_device_memory.pop(0))
+        return pending.pop(0)
+
     recorder = MemoryRecorder._from_snapshot_provider(
-        lambda marker: pending.pop(0),
+        snapshot_provider,
+        device_memory_provider=(
+            None
+            if pending_device_memory is None
+            else lambda device: current_device_memory.get(device)
+        ),
         name=name,
         bundle_dir=bundle_dir,
         rank=rank,

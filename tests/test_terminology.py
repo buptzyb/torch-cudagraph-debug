@@ -135,12 +135,14 @@ def test_memory_result_fields_encode_their_semantics() -> None:
         "end_gap",
         "allocator_scope_decomposition",
         "pool_decomposition",
+        "device_decomposition",
         "display_stack_depth",
         "display_limit",
     )
     assert tuple(field.name for field in fields(MemoryRunGroupSummary)) == (
         "run_group",
         "rank_points",
+        "rank_devices",
         "point_aggregates",
         "warnings",
     )
@@ -150,6 +152,7 @@ def test_memory_result_fields_encode_their_semantics() -> None:
         "rank_comparisons",
         "rank_decomposition",
         "rank_pool_decomposition",
+        "rank_device_decomposition",
         "phase_aggregates",
         "warnings",
         "display_stack_depth",

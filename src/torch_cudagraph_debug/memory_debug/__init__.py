@@ -15,9 +15,12 @@ from .attribution import (
 )
 from .comparison import compare_phases, compare_points, compare_snapshots
 from .comparison_models import (
+    DeviceMemoryMetric,
     MatchKind,
     MemoryAllocatorScopeComparison,
     MemoryAllocatorScopePhaseDecomposition,
+    MemoryDeviceComparison,
+    MemoryDevicePhaseDecomposition,
     MemoryLifecycleDelta,
     MemoryObservationComparison,
     MemoryPhaseComponents,
@@ -65,6 +68,8 @@ from .reports import (
 )
 from .run_groups import (
     MemoryMetricExtrema,
+    MemoryRankDevicePhaseDecomposition,
+    MemoryRankDevicePointState,
     MemoryRankPhaseDecomposition,
     MemoryRankPointAggregate,
     MemoryRankPointState,
@@ -79,9 +84,16 @@ from .stacks import (
     AllocationStackDelta,
     AllocationStackSummary,
 )
-from .stats import AllocatorScope, MemoryStatMetric, MemoryStats, MemoryStatsDelta
+from .stats import (
+    AllocatorScope,
+    DeviceMemorySample,
+    MemoryStatMetric,
+    MemoryStats,
+    MemoryStatsDelta,
+)
 from .timeline import (
     MemoryAllocatorScopeTimelineEntry,
+    MemoryDeviceTimelineEntry,
     MemoryObservationTimelineEntry,
     MemoryPoolTimelineEntry,
 )
@@ -99,6 +111,8 @@ __all__ = [
     "CohortPointState",
     "CohortSizeBucket",
     "CohortSizeOutcome",
+    "DeviceMemoryMetric",
+    "DeviceMemorySample",
     "MatchKind",
     "MemoryAllocationLifetimeAnalysis",
     "MemoryAllocatorScopeComparison",
@@ -108,6 +122,9 @@ __all__ = [
     "MemoryAttributionStatus",
     "MemoryBundleError",
     "MemoryDebugError",
+    "MemoryDeviceComparison",
+    "MemoryDevicePhaseDecomposition",
+    "MemoryDeviceTimelineEntry",
     "MemoryDisplayOptions",
     "MemoryEvidenceStatus",
     "MemoryHistoryDisabledError",
@@ -135,6 +152,8 @@ __all__ = [
     "MemoryProbe",
     "MemoryProbeSnapshot",
     "MemoryRange",
+    "MemoryRankDevicePhaseDecomposition",
+    "MemoryRankDevicePointState",
     "MemoryRankPhaseDecomposition",
     "MemoryRankPointAggregate",
     "MemoryRankPointState",

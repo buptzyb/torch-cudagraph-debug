@@ -357,6 +357,30 @@ Every point and comparison also exposes allocator-wide `all`, `default`, and
 headline does not silently become a default-pool-only number. Pool and
 device/pool/stream rows remain available for detailed inspection.
 
+### Device-Wide CUDA Runtime Memory
+
+Allocator snapshots cover only the caching allocator of the recording process.
+Each snapshot and point also attempts `torch.cuda.mem_get_info` for every
+selected device and stores the result in `device_memory`. A sample records
+CUDA-visible `free_bytes` and `total_bytes`;
+`used_bytes = total_bytes - free_bytes`. Comparisons and timelines also derive
+
+```text
+unattributed_device_bytes = used_bytes - allocator_reserved_bytes
+```
+
+This device-global value is not explained by the allocator snapshot of the
+recording process. It can include that process CUDA context, NCCL buffers,
+library workspaces, and raw `cudaMalloc`, plus every other process on a shared
+GPU. It is evidence of an attribution gap, not proof that the recording process
+made an external allocation. `allocator_reserved_bytes` remains process-local;
+device used, free, total, and unattributed values carry cross-process noise.
+
+Reports expose `delta_total_bytes` as well as used and free deltas. When
+CUDA-visible total capacity changes, used growth is not allocation growth alone:
+`delta_used_bytes = delta_total_bytes - delta_free_bytes`. A missing endpoint
+sample is reported as unavailable and produces no fabricated delta.
+
 Allocation cohort lifetimes are an optional focused same-run analysis, not a
 replacement for those modes. To answer "what was live here, and when did it
 go away?", anchor the analysis at the point of interest:
@@ -591,14 +615,16 @@ Overwrite removes known tcgd report artifacts from the prior report while
 preserving unrelated files in the directory.
 
 Pool-oriented results also create `allocator_scopes.csv`, `pools.csv`, and
-`observations.csv`. Attribution can add `allocation_stack_comparisons.csv` or
-`events.csv`; phase reports add `pool_decomposition.csv` and
-`allocator_scope_decomposition.csv`. Lifetime reports add `cohorts.csv`,
-`cohort_points.csv`, `size_histograms.csv`, `size_outcomes.csv`, and, when
-present, `birth_stacks.csv`, `free_request_stacks.csv`, and
-`free_completion_stacks.csv`. Group reports add either `rank_points.csv`
-and `point_aggregates.csv`, or `rank_decomposition.csv`,
-`rank_pool_decomposition.csv`, and `phase_aggregates.csv`. Attributed
+`observations.csv`. State comparisons, timelines, and phase comparisons with
+device-wide CUDA Runtime samples add `devices.csv`; phase reports additionally
+add `device_decomposition.csv`. Attribution can add
+`allocation_stack_comparisons.csv` or `events.csv`; phase reports also add
+`pool_decomposition.csv` and `allocator_scope_decomposition.csv`. Lifetime
+reports add `cohorts.csv`, `cohort_points.csv`, `size_histograms.csv`,
+`size_outcomes.csv`, and optional transition-stack CSVs. Group summaries add
+`rank_points.csv`, `rank_devices.csv`, and `point_aggregates.csv`. Group phase
+reports add `rank_decomposition.csv`, `rank_pool_decomposition.csv`,
+`rank_device_decomposition.csv`, and `phase_aggregates.csv`. Attributed
 group-phase reports additionally export full rank/component
 `allocation_stack_comparisons.csv` and `events.csv`. Timeline HTML includes
 allocated, reserved, active, requested, and optional cohort charts.
@@ -611,7 +637,9 @@ Bundles use the `torch-cudagraph-debug/memory-run` schema: `manifest.json`, one
 has no event file. State files omit cumulative `device_traces`; event files keep
 the raw mappings for only their interval. Manifest, point, and observation fields
 are canonical; derived awaiting-free, inactive, and fragmentation values are not
-stored. Each point manifest authenticates its state and event gzip payload with
+stored. Each point manifest also stores its `device_memory` samples as
+`free_bytes`/`total_bytes` per decimal device index, empty when sampling was
+skipped. Each point manifest authenticates its state and event gzip payload with
 SHA-256. Loading a run still reads only the manifest and compact summaries.
 `point.allocator_state()` loads the immutable state lazily, verifies its digest,
 and rejects disagreement between recomputed state summaries and the manifest.
@@ -711,6 +739,13 @@ change in a minor release. Their snapshot summaries (`summarize_snapshot`,
   then surface as `MemoryReconciliationError`, and balanced transient churn
   from that instant is not attributable. Quiesce concurrent allocation around
   `record_point` when event or lifetime analysis matters.
+- Device-wide CUDA Runtime sampling (`torch.cuda.mem_get_info`) is attempted
+  during CUDA Graph capture as well as normal execution. Collection does not
+  synchronize inside capture. A query failure omits only that device and adds a
+  warning; allocator state from the same point remains usable.
+- The allocator snapshot and CUDA Runtime reading are consecutive but not
+  atomic. Concurrent allocations from this or another process can move the
+  device-wide values between the two calls.
 
 ## Further Reading
 

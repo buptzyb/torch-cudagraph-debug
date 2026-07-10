@@ -18,7 +18,12 @@ from torch_cudagraph_debug.types import (
 from ._pool_identity import MemoryObservationKey, MemoryPoolKey
 from .aggregation import summarize_allocator_scopes, summarize_pools
 from .recording import MemoryObservation
-from .stats import AllocatorScope, MemoryStats
+from .stats import (
+    AllocatorScope,
+    DeviceMemorySample,
+    MemoryStats,
+    validate_device_memory,
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,7 @@ class MemoryProbeSnapshot:
     boundary_marker: str
     observations: tuple[MemoryObservation, ...]
     warnings: tuple[str, ...] = ()
+    device_memory: Mapping[int, DeviceMemorySample] = field(default_factory=dict)
     _boundary_recorded: bool = field(default=True, repr=False, compare=False)
     _raw_snapshot: JSONValue | FrozenJSONValue = field(
         default_factory=dict,
@@ -65,6 +71,9 @@ class MemoryProbeSnapshot:
         keys = [item.key for item in self.observations]
         if len(set(keys)) != len(keys):
             raise ValueError("memory snapshot observation keys must be unique")
+        object.__setattr__(
+            self, "device_memory", validate_device_memory(self.device_memory)
+        )
         object.__setattr__(
             self,
             "_raw_snapshot",
@@ -140,5 +149,9 @@ class MemoryProbeSnapshot:
             "timestamp": self.timestamp,
             "boundary_marker": self.boundary_marker,
             "observation_count": len(self.observations),
+            "device_memory": {
+                str(device): sample.to_dict()
+                for device, sample in self.device_memory.items()
+            },
             "warnings": list(self.warnings),
         }

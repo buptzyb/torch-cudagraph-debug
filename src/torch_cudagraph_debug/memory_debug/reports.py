@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from .._reporting import (
     atomic_write_csv,
@@ -26,6 +26,8 @@ from .comparison_models import (
     PHASE_METRICS,
     MemoryAllocatorScopeComparison,
     MemoryAllocatorScopePhaseDecomposition,
+    MemoryDeviceComparison,
+    MemoryDevicePhaseDecomposition,
     MemoryObservationComparison,
     MemoryPoolComparison,
     MemoryPoolPhaseDecomposition,
@@ -37,6 +39,8 @@ from .stats import MemoryStats, MemoryStatsDelta
 
 if TYPE_CHECKING:
     from .run_groups import (
+        MemoryRankDevicePhaseDecomposition,
+        MemoryRankDevicePointState,
         MemoryRankPhaseDecomposition,
         MemoryRankPointAggregate,
         MemoryRankPointState,
@@ -46,6 +50,7 @@ if TYPE_CHECKING:
     )
     from .timeline import (
         MemoryAllocatorScopeTimelineEntry,
+        MemoryDeviceTimelineEntry,
         MemoryObservationTimelineEntry,
         MemoryPoolTimelineEntry,
     )
@@ -456,6 +461,7 @@ class _MemoryStateComparison:
     allocator_scope_comparisons: tuple[MemoryAllocatorScopeComparison, ...]
     pool_comparisons: tuple[MemoryPoolComparison, ...]
     observation_comparisons: tuple[MemoryObservationComparison, ...]
+    device_comparisons: tuple[MemoryDeviceComparison, ...] = ()
     allocation_stack_comparisons: tuple[AllocationStackDelta, ...] = ()
     allocation_stack_observation_comparisons: tuple[AllocationStackDelta, ...] = ()
     reference_stack_coverage: AllocationStackCoverage | None = None
@@ -495,6 +501,15 @@ class _MemoryStateComparison:
         return [
             item.to_row()
             for item in self.observation_comparisons
+            if include_unchanged or item.changed
+        ]
+
+    def device_comparison_rows(
+        self, *, include_unchanged: bool = True
+    ) -> list[dict[str, object]]:
+        return [
+            item.to_row()
+            for item in self.device_comparisons
             if include_unchanged or item.changed
         ]
 
@@ -669,6 +684,17 @@ class _MemoryStateComparison:
             lines.append("    no changed device/pool/stream observations")
         for item in selected_observation_comparisons:
             lines.extend(_observation_text(item))
+        if self.device_comparisons:
+            lines.append("  devices (device-wide, includes other processes):")
+            selected_device_comparisons = [
+                item
+                for item in self.device_comparisons
+                if include_unchanged or item.changed
+            ]
+            if not selected_device_comparisons:
+                lines.append("    no changed devices")
+            for item in selected_device_comparisons:
+                lines.extend(_device_text(item))
 
         if (
             self.reference_stack_coverage is not None
@@ -727,6 +753,7 @@ class _MemoryStateComparison:
             "observation_comparisons": [
                 item.to_dict() for item in self.observation_comparisons
             ],
+            "device_comparisons": [item.to_dict() for item in self.device_comparisons],
             "allocation_stack_comparisons": [
                 item.to_dict() for item in self.allocation_stack_comparisons
             ],
@@ -792,6 +819,18 @@ class _MemoryStateComparison:
                 "No changed device/pool/stream observations",
             ),
         ]
+        if self.device_comparisons:
+            sections.extend(
+                [
+                    "<h2>Devices (device-wide, includes other processes)</h2>",
+                    _render_table(
+                        self.device_comparison_rows(
+                            include_unchanged=include_unchanged
+                        ),
+                        "No changed devices",
+                    ),
+                ]
+            )
         if stack_rows:
             sections.extend(
                 [
@@ -876,6 +915,11 @@ class _MemoryStateComparison:
                 include_unchanged=include_unchanged
             ),
         )
+        if self.device_comparisons:
+            paths["devices"] = _write_csv(
+                root / "devices.csv",
+                self.device_comparison_rows(include_unchanged=include_unchanged),
+            )
         if (
             self.allocation_stack_comparisons
             or self.allocation_stack_observation_comparisons
@@ -929,6 +973,7 @@ class MemoryTimeline:
     pool_entries: tuple[MemoryPoolTimelineEntry, ...]
     observation_entries: tuple[MemoryObservationTimelineEntry, ...]
     point_comparisons: tuple[MemoryPointComparison, ...]
+    device_entries: tuple[MemoryDeviceTimelineEntry, ...] = ()
     allocation_lifetimes: MemoryAllocationLifetimeAnalysis | None = None
     display_stack_depth: int = 2
     display_limit: int = 20
@@ -969,6 +1014,13 @@ class MemoryTimeline:
             if include_unchanged or (item.delta is not None and item.delta.changed)
         ]
 
+    def device_rows(self, *, include_unchanged: bool = True) -> list[dict[str, object]]:
+        return [
+            item.to_row()
+            for item in self.device_entries
+            if include_unchanged or _device_entry_changed(item)
+        ]
+
     def to_text(
         self,
         *,
@@ -989,12 +1041,15 @@ class MemoryTimeline:
         ] = {}
         pools_by_point: dict[int, list[MemoryPoolTimelineEntry]] = {}
         observations_by_point: dict[int, list[MemoryObservationTimelineEntry]] = {}
+        devices_by_point: dict[int, list[MemoryDeviceTimelineEntry]] = {}
         for item in self.allocator_scope_entries:
             allocator_scopes_by_point.setdefault(item.point_index, []).append(item)
         for item in self.pool_entries:
             pools_by_point.setdefault(item.point_index, []).append(item)
         for item in self.observation_entries:
             observations_by_point.setdefault(item.point_index, []).append(item)
+        for item in self.device_entries:
+            devices_by_point.setdefault(item.point_index, []).append(item)
         for point in self.run.points:
             point_lines = []
             for item in allocator_scopes_by_point.get(point.index, []):
@@ -1036,6 +1091,10 @@ class MemoryTimeline:
                         indent="      ",
                     )
                 )
+            for item in devices_by_point.get(point.index, []):
+                if not include_unchanged and not _device_entry_changed(item):
+                    continue
+                point_lines.append(_timeline_device_text(item, indent="    "))
             if point_lines:
                 lines.append(f"  [{point.index}] {point.label}")
                 lines.extend(point_lines)
@@ -1083,6 +1142,7 @@ class MemoryTimeline:
             "observation_entries": [
                 item.to_dict() for item in self.observation_entries
             ],
+            "device_entries": [item.to_dict() for item in self.device_entries],
             "point_comparisons": [item.to_dict() for item in self.point_comparisons],
             "allocation_lifetimes": (
                 self.allocation_lifetimes.to_dict()
@@ -1169,6 +1229,16 @@ class MemoryTimeline:
                 "No memory points",
             ),
         ]
+        if self.device_entries:
+            sections.extend(
+                [
+                    "<h2>Device Timeline (device-wide, includes other processes)</h2>",
+                    _render_table(
+                        self.device_rows(include_unchanged=include_unchanged),
+                        "No device memory samples",
+                    ),
+                ]
+            )
         if allocation_stack_rows:
             sections.extend(
                 [
@@ -1248,6 +1318,11 @@ class MemoryTimeline:
             pools=self.pool_rows(include_unchanged=include_unchanged),
             observations=self.observation_rows(include_unchanged=include_unchanged),
         )
+        if self.device_entries:
+            paths["devices"] = _write_csv(
+                root / "devices.csv",
+                self.device_rows(include_unchanged=include_unchanged),
+            )
         allocation_stack_comparison_rows = [
             {
                 "reference": item.reference.label,
@@ -1284,6 +1359,7 @@ class MemoryPhaseComparison:
     end_gap: MemoryPointComparison
     allocator_scope_decomposition: tuple[MemoryAllocatorScopePhaseDecomposition, ...]
     pool_decomposition: tuple[MemoryPoolPhaseDecomposition, ...]
+    device_decomposition: tuple[MemoryDevicePhaseDecomposition, ...]
     display_stack_depth: int = 2
     display_limit: int = 20
 
@@ -1318,6 +1394,15 @@ class MemoryPhaseComparison:
             if include_unchanged or item.changed
         ]
 
+    def device_decomposition_rows(
+        self, *, include_unchanged: bool = True
+    ) -> list[dict[str, object]]:
+        return [
+            item.to_row()
+            for item in self.device_decomposition
+            if include_unchanged or item.changed
+        ]
+
     def to_text(
         self,
         *,
@@ -1346,6 +1431,21 @@ class MemoryPhaseComparison:
             lines.append(
                 "    "
                 f"total[{row['scope']}] {row['metric']}: "
+                f"end_gap {format_delta_bytes(int(row['end_gap_bytes']))} = "
+                f"start_gap {format_delta_bytes(int(row['start_gap_bytes']))} + "
+                f"candidate_change {format_delta_bytes(int(row['candidate_change_bytes']))} - "
+                f"baseline_change {format_delta_bytes(int(row['baseline_change_bytes']))}"
+            )
+        lines.append("  device-wide CUDA Runtime totals:")
+        device_rows = self.device_decomposition_rows(
+            include_unchanged=include_unchanged
+        )
+        if not device_rows:
+            lines.append("    no complete changed device equations")
+        for row in device_rows:
+            lines.append(
+                "    "
+                f"device[{row['device_index']}] {row['metric']}: "
                 f"end_gap {format_delta_bytes(int(row['end_gap_bytes']))} = "
                 f"start_gap {format_delta_bytes(int(row['start_gap_bytes']))} + "
                 f"candidate_change {format_delta_bytes(int(row['candidate_change_bytes']))} - "
@@ -1402,6 +1502,9 @@ class MemoryPhaseComparison:
                 item.to_dict() for item in self.allocator_scope_decomposition
             ],
             "pool_decomposition": [item.to_dict() for item in self.pool_decomposition],
+            "device_decomposition": [
+                item.to_dict() for item in self.device_decomposition
+            ],
             "baseline_change": self.baseline_change.to_dict(),
             "candidate_change": self.candidate_change.to_dict(),
             "start_gap": self.start_gap.to_dict(),
@@ -1433,6 +1536,11 @@ class MemoryPhaseComparison:
             _render_table(
                 self.pool_decomposition_rows(include_unchanged=include_unchanged),
                 "No pool decomposition rows",
+            ),
+            "<h2>Device Decomposition</h2>",
+            _render_table(
+                self.device_decomposition_rows(include_unchanged=include_unchanged),
+                "No complete device decomposition rows",
             ),
         ]
         for comparison_name, comparison in (
@@ -1579,6 +1687,13 @@ class MemoryPhaseComparison:
                 include_unchanged=include_unchanged
             )
         ]
+        device_comparison_rows = [
+            {"comparison": name, **row}
+            for name, comparison in phase_comparisons
+            for row in comparison.device_comparison_rows(
+                include_unchanged=include_unchanged
+            )
+        ]
         paths = _write_common(
             root,
             text=self.to_text(
@@ -1596,6 +1711,16 @@ class MemoryPhaseComparison:
             pools=pool_comparison_rows,
             observations=observation_comparison_rows,
         )
+        if device_comparison_rows:
+            paths["devices"] = _write_csv(
+                root / "devices.csv",
+                device_comparison_rows,
+            )
+        if self.device_decomposition:
+            paths["device_decomposition"] = _write_csv(
+                root / "device_decomposition.csv",
+                self.device_decomposition_rows(include_unchanged=include_unchanged),
+            )
         paths["pool_decomposition"] = _write_csv(
             root / "pool_decomposition.csv",
             self.pool_decomposition_rows(include_unchanged=include_unchanged),
@@ -1693,6 +1818,7 @@ class MemoryRunGroupSummary:
 
     run_group: MemoryRunGroup
     rank_points: tuple[MemoryRankPointState, ...]
+    rank_devices: tuple[MemoryRankDevicePointState, ...]
     point_aggregates: tuple[MemoryRankPointAggregate, ...]
     warnings: tuple[str, ...] = ()
 
@@ -1718,6 +1844,21 @@ class MemoryRunGroupSummary:
                 f"max {format_bytes(item.max_value)} on rank {item.max_rank}, "
                 f"spread {format_bytes(item.spread_value)}"
             )
+        if self.rank_devices:
+            lines.append(
+                "  device-wide CUDA Runtime states are per rank/device and "
+                "are not aggregated across ranks"
+            )
+            for item in self.rank_devices:
+                lines.append(
+                    f"    rank {item.rank} [{item.point_index}] {item.point_label} "
+                    f"device[{item.device_index}]: CUDA used "
+                    f"{format_bytes(item.sample.used_bytes)} of "
+                    f"{format_bytes(item.sample.total_bytes)}, allocator reserved "
+                    f"{format_bytes(item.allocator_reserved_bytes)}, "
+                    f"unattributed device "
+                    f"{format_bytes(item.unattributed_device_bytes)}"
+                )
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -1728,6 +1869,7 @@ class MemoryRunGroupSummary:
             "run_group": self.run_group.descriptor(),
             "warnings": list(self.warnings),
             "rank_points": [item.to_dict() for item in self.rank_points],
+            "rank_devices": [item.to_dict() for item in self.rank_devices],
             "point_aggregates": [item.to_dict() for item in self.point_aggregates],
         }
 
@@ -1763,6 +1905,11 @@ class MemoryRunGroupSummary:
                 _render_table(aggregate_rows, "No point summaries"),
                 "<h2>Per-Rank Point States</h2>",
                 _render_table(rank_rows, "No rank point states"),
+                "<h2>Per-Rank Device States</h2>",
+                _render_table(
+                    [item.to_dict() for item in self.rank_devices],
+                    "No device memory samples",
+                ),
             ),
             self.warnings,
         )
@@ -1784,6 +1931,11 @@ class MemoryRunGroupSummary:
             root / "rank_points.csv",
             [item.to_dict() for item in self.rank_points],
         )
+        if self.rank_devices:
+            paths["rank_devices"] = _write_csv(
+                root / "rank_devices.csv",
+                [item.to_dict() for item in self.rank_devices],
+            )
         paths["point_aggregates"] = _write_csv(
             root / "point_aggregates.csv",
             [item.to_dict() for item in self.point_aggregates],
@@ -1800,6 +1952,7 @@ class MemoryRunGroupPhaseComparison:
     rank_comparisons: Mapping[int, MemoryPhaseComparison]
     rank_decomposition: tuple[MemoryRankPhaseDecomposition, ...]
     rank_pool_decomposition: tuple[MemoryRankPoolPhaseDecomposition, ...]
+    rank_device_decomposition: tuple[MemoryRankDevicePhaseDecomposition, ...]
     phase_aggregates: tuple[MemoryRunGroupPhaseAggregate, ...]
     warnings: tuple[str, ...] = ()
     display_stack_depth: int = 2
@@ -1820,6 +1973,15 @@ class MemoryRunGroupPhaseComparison:
         return [
             item.to_dict()
             for item in self.rank_pool_decomposition
+            if include_unchanged or item.changed
+        ]
+
+    def rank_device_decomposition_rows(
+        self, *, include_unchanged: bool = True
+    ) -> list[dict[str, object]]:
+        return [
+            item.to_dict()
+            for item in self.rank_device_decomposition
             if include_unchanged or item.changed
         ]
 
@@ -1875,6 +2037,23 @@ class MemoryRunGroupPhaseComparison:
                 f"on rank {row['change_gap_max_rank']} "
                 f"(spread {format_bytes(int(row['change_gap_spread_bytes']))})"
             )
+        device_rows = self.rank_device_decomposition_rows(
+            include_unchanged=include_unchanged
+        )
+        if device_rows:
+            lines.append(
+                "  device-wide CUDA Runtime equations are per rank/device "
+                "and are not aggregated across ranks"
+            )
+            for row in device_rows:
+                lines.append(
+                    "  "
+                    f"rank {row['rank']} device[{row['device_index']}] "
+                    f"{row['metric']}: end gap "
+                    f"{format_delta_bytes(int(row['end_gap_bytes']))}; "
+                    f"change gap "
+                    f"{format_delta_bytes(int(row['change_gap_bytes']))}"
+                )
         for rank, phase in self.rank_comparisons.items():
             for name, comparison in _phase_components(phase):
                 attribution_lines = comparison._attribution_text_lines(
@@ -1901,6 +2080,9 @@ class MemoryRunGroupPhaseComparison:
             "rank_decomposition": [item.to_dict() for item in self.rank_decomposition],
             "rank_pool_decomposition": [
                 item.to_dict() for item in self.rank_pool_decomposition
+            ],
+            "rank_device_decomposition": [
+                item.to_dict() for item in self.rank_device_decomposition
             ],
             "phase_aggregates": [item.to_dict() for item in self.phase_aggregates],
             "rank_comparisons": {
@@ -1970,6 +2152,13 @@ class MemoryRunGroupPhaseComparison:
                 self.rank_pool_decomposition_rows(include_unchanged=include_unchanged),
                 "No rank pool phase rows",
             ),
+            "<h2>Per-Rank Device Phase Equations</h2>",
+            _render_table(
+                self.rank_device_decomposition_rows(
+                    include_unchanged=include_unchanged
+                ),
+                "No complete rank device phase rows",
+            ),
         ]
         if stack_rows:
             sections.extend(
@@ -2038,6 +2227,13 @@ class MemoryRunGroupPhaseComparison:
             root / "rank_pool_decomposition.csv",
             self.rank_pool_decomposition_rows(include_unchanged=include_unchanged),
         )
+        if self.rank_device_decomposition:
+            paths["rank_device_decomposition"] = _write_csv(
+                root / "rank_device_decomposition.csv",
+                self.rank_device_decomposition_rows(
+                    include_unchanged=include_unchanged
+                ),
+            )
         paths["phase_aggregates"] = _write_csv(
             root / "phase_aggregates.csv",
             self.phase_aggregate_rows(include_unchanged=include_unchanged),
@@ -2149,6 +2345,66 @@ def _observation_text(item: MemoryObservationComparison) -> list[str]:
     ]
 
 
+def _device_text(item: MemoryDeviceComparison) -> list[str]:
+    lines = [f"    device[{item.device_index}]"]
+    if item.reference is not None and item.candidate is not None:
+        lines.extend(
+            (
+                "      CUDA used: "
+                + format_comparison(
+                    item.reference.used_bytes,
+                    item.candidate.used_bytes,
+                    cast(int, item.delta_used_bytes),
+                ),
+                "      CUDA free: "
+                + format_comparison(
+                    item.reference.free_bytes,
+                    item.candidate.free_bytes,
+                    cast(int, item.delta_free_bytes),
+                ),
+                "      CUDA-visible total: "
+                + format_comparison(
+                    item.reference.total_bytes,
+                    item.candidate.total_bytes,
+                    cast(int, item.delta_total_bytes),
+                ),
+                "      allocator reserved: "
+                + format_comparison(
+                    item.reference_allocator_reserved_bytes,
+                    item.candidate_allocator_reserved_bytes,
+                    item.delta_allocator_reserved_bytes,
+                ),
+                "      unattributed device: "
+                + format_comparison(
+                    cast(int, item.reference_unattributed_device_bytes),
+                    cast(int, item.candidate_unattributed_device_bytes),
+                    cast(int, item.delta_unattributed_device_bytes),
+                ),
+            )
+        )
+        if item.delta_total_bytes:
+            lines.append(
+                "      note: CUDA-visible capacity changed; CUDA used growth "
+                "is not allocation growth alone"
+            )
+        return lines
+    for side, sample, reserved in (
+        ("reference", item.reference, item.reference_allocator_reserved_bytes),
+        ("candidate", item.candidate, item.candidate_allocator_reserved_bytes),
+    ):
+        if sample is None:
+            lines.append(f"      {side} sample unavailable")
+        else:
+            lines.append(
+                f"      {side}: CUDA used {format_bytes(sample.used_bytes)}, "
+                f"free {format_bytes(sample.free_bytes)}, total "
+                f"{format_bytes(sample.total_bytes)}, allocator reserved "
+                f"{format_bytes(reserved)}, unattributed device "
+                f"{format_bytes(sample.used_bytes - reserved)}"
+            )
+    return lines
+
+
 def _scope_text(item: MemoryAllocatorScopeComparison) -> list[str]:
     return [
         f"    total[{item.scope}]",
@@ -2230,6 +2486,34 @@ def _stack_delta_text(
         f"count={item.reference_count} -> {item.candidate_count} "
         f"(delta {item.delta_count:+d}) at "
         f"{item.display_stack(stack_depth)}"
+    )
+
+
+def _device_entry_changed(item: MemoryDeviceTimelineEntry) -> bool:
+    return item.delta_used_bytes is not None and bool(
+        item.delta_used_bytes
+        or item.delta_free_bytes
+        or item.delta_total_bytes
+        or item.delta_allocator_reserved_bytes
+        or item.delta_unattributed_device_bytes
+    )
+
+
+def _timeline_device_text(item: MemoryDeviceTimelineEntry, *, indent: str) -> str:
+    def render(current: int, delta: int | None) -> str:
+        if delta is None:
+            return format_bytes(current)
+        return f"{format_bytes(current)} (delta {format_delta_bytes(delta)})"
+
+    return (
+        f"{indent}device[{item.device_index}] (device-wide) "
+        f"CUDA used={render(item.sample.used_bytes, item.delta_used_bytes)}, "
+        f"free={render(item.sample.free_bytes, item.delta_free_bytes)}, "
+        f"total={render(item.sample.total_bytes, item.delta_total_bytes)}, "
+        "allocator reserved="
+        f"{render(item.allocator_reserved_bytes, item.delta_allocator_reserved_bytes)}, "
+        "unattributed device="
+        f"{render(item.unattributed_device_bytes, item.delta_unattributed_device_bytes)}"
     )
 
 

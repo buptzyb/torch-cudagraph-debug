@@ -202,16 +202,23 @@ Memory comparison 'graph-capture@snapshot-0' -> 'graph-capture@snapshot-1' (same
       diagnostics: segments=0 -> 1 (delta +1), blocks=0 -> 1 (delta +1)
       lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
   device/pool/stream observations:
-    device[0]/pool[0,0]/stream[152349184] -> device[0]/pool[0,0]/stream[152349184] [same_probe]
+    device[0]/pool[0,0]/stream[336943840] -> device[0]/pool[0,0]/stream[336943840] [same_probe]
       allocated: 0 B -> 1.00 KiB (delta +1.00 KiB), reserved: 0 B -> 2.00 MiB (delta +2.00 MiB)
       active: 0 B -> 1.00 KiB (delta +1.00 KiB), requested: 0 B -> 16 B (delta +16 B)
       diagnostics: inactive=0 B -> 2.00 MiB (delta +2.00 MiB), fragmentation=0 B -> 1008 B (delta +1008 B), segments=0 -> 1 (delta +1), blocks=0 -> 3 (delta +3), inactive blocks=0 -> 1 (delta +1), largest inactive block=0 B -> 2.00 MiB (delta +2.00 MiB)
       lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
-    device[0]/pool[1,0]/stream[152349184] -> device[0]/pool[1,0]/stream[152349184] [same_probe]
+    device[0]/pool[1,0]/stream[336943840] -> device[0]/pool[1,0]/stream[336943840] [same_probe]
       allocated: 0 B -> 16.00 MiB (delta +16.00 MiB), reserved: 0 B -> 16.00 MiB (delta +16.00 MiB)
       active: 0 B -> 16.00 MiB (delta +16.00 MiB), requested: 0 B -> 16.00 MiB (delta +16.00 MiB)
       diagnostics: segments=0 -> 1 (delta +1), blocks=0 -> 1 (delta +1)
       lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
+  devices (device-wide, includes other processes):
+    device[0]
+      CUDA used: 434.19 MiB -> 540.19 MiB (delta +106.00 MiB)
+      CUDA free: 43.97 GiB -> 43.87 GiB (delta -106.00 MiB)
+      CUDA-visible total: 44.39 GiB -> 44.39 GiB (delta 0 B)
+      allocator reserved: 0 B -> 18.00 MiB (delta +18.00 MiB)
+      unattributed device: 434.19 MiB -> 522.19 MiB (delta +88.00 MiB)
 ```
 
 Read the report top-down:
@@ -239,8 +246,17 @@ Read the report top-down:
    candidate endpoint; `removed segment` and `became inactive` appear when
    reference segment or active-block identities are absent from the candidate
    endpoint. The top-level `address lifecycle` value states whether address
-   matching is `exact` or `approximate`. This snapshot-derived comparison does not require
-   allocator event history and is distinct from the event-backed `lifetimes()` analysis.
+   matching is `exact` or `approximate`. This snapshot-derived comparison does
+   not require allocator event history and is distinct from event-backed
+   `lifetimes()` analysis.
+7. `devices` pairs CUDA Runtime device-wide usage with allocator `reserved`
+   from the recording process. `unattributed device` is `CUDA used - allocator
+   reserved`; it can include external CUDA allocations and context state from
+   that process as well as allocations from other processes. Here 88 MiB of the
+   device-wide increase is not explained by the allocator snapshot, but this
+   state-only report does not identify its owner. A nonzero CUDA-visible total
+   delta is reported separately because used growth is then not allocation
+   growth alone.
 
 The main signal here is `total[private]`: graph capture added a 16 MiB active
 allocation in a private pool. The small default-pool change is separate

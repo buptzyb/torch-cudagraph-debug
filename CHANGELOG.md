@@ -63,6 +63,13 @@ memory-debug domain.
   fragmentation, segment, block, and expandable-segment metrics, including
   `expandable_inactive_bytes` to distinguish inactive capacity in expandable
   segments from inactive capacity in native segments.
+- Device-wide CUDA Runtime memory sampling: snapshots and points attempt one
+  `torch.cuda.mem_get_info` reading per selected device, including points inside
+  CUDA Graph capture. Comparisons, timelines, phases, and run groups report
+  CUDA used/free/total, current-process allocator reserved, and device-global
+  `unattributed_device_bytes`; nonzero total-capacity deltas remain explicit.
+  Per-device query failures preserve allocator state and add a warning. Reports
+  add device sections and device-specific CSV artifacts.
 - Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
   summary and rank-paired phase analysis without summing memory across GPUs.
 - Canonical gzip JSON run bundles with atomic writes, exact manifest fields,

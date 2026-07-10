@@ -26,9 +26,10 @@ def _distributed_run(
     group_id: str,
     world_size: int = 2,
     bundle_dir: Path | None = None,
+    device_memory: tuple[tuple[int, int], ...] | None = None,
 ):
     return make_run(
-        [snapshot(segment(active=value)) for value in values],
+        [snapshot(segment(active=value, device=rank)) for value in values],
         name=name,
         rank=rank,
         group_id=group_id,
@@ -36,6 +37,11 @@ def _distributed_run(
         run_metadata={"source_revision": "abc123"},
         bundle_dir=bundle_dir,
         labels=("start", "end"),
+        device_memory=(
+            None
+            if device_memory is None
+            else [{rank: sample} for sample in device_memory]
+        ),
     )
 
 
@@ -47,6 +53,7 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
         rank=0,
         group_id="baseline-job",
         bundle_dir=root / "rank-00000.tcgd-memory",
+        device_memory=((990, 1000), (950, 1000)),
     )
     _distributed_run(
         (12, 35),
@@ -54,6 +61,7 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
         rank=1,
         group_id="baseline-job",
         bundle_dir=root / "rank-00001.tcgd-memory",
+        device_memory=((980, 1000), (940, 1000)),
     )
 
     group = MemoryRunGroup.load(root)
@@ -68,6 +76,9 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
     assert not group.warnings
     assert group[0]["end"]._state_cache == {}
     assert len(report.rank_points) == 12
+    assert len(report.rank_devices) == 4
+    assert report.rank_devices[-1].device_index == 1
+    assert report.rank_devices[-1].unattributed_device_bytes == 25
     text = report.to_text()
     assert "not summed across ranks" in text
     assert group[0]["end"].allocator_state()["segments"]
@@ -90,6 +101,7 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
     assert "requested_bytes" in text
     assert "inactive_bytes" not in text
     assert "internal_fragmentation_bytes" not in text
+    assert "device-wide CUDA Runtime states are per rank/device" in text
 
     paths = report.write(tmp_path / "summary")
     assert set(paths) == {
@@ -97,11 +109,13 @@ def test_group_load_reports_per_rank_extrema_without_sum(tmp_path: Path) -> None
         "json",
         "html",
         "rank_points",
+        "rank_devices",
         "point_aggregates",
     }
     payload = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert payload["aggregation"] == "per_rank_extrema_no_sum"
     assert payload["kind"] == "run-group-summary"
+    assert len(payload["rank_devices"]) == 4
     assert any(
         row["metric"] == "internal_fragmentation_bytes"
         for row in payload["point_aggregates"]
@@ -160,10 +174,18 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
     baseline = MemoryRunGroup.from_runs(
         (
             _distributed_run(
-                (10, 30), name="baseline", rank=0, group_id="baseline-job"
+                (10, 30),
+                name="baseline",
+                rank=0,
+                group_id="baseline-job",
+                device_memory=((900, 1000), (880, 1000)),
             ),
             _distributed_run(
-                (12, 32), name="baseline", rank=1, group_id="baseline-job"
+                (12, 32),
+                name="baseline",
+                rank=1,
+                group_id="baseline-job",
+                device_memory=((890, 1000), (870, 1000)),
             ),
         )
     )
@@ -177,8 +199,8 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
             make_run(
                 [
                     snapshot(
-                        segment(active=default),
-                        segment(active=private, pool=(0, 7), address=2000),
+                        segment(active=default, device=rank),
+                        segment(active=private, pool=(0, 7), address=2000, device=rank),
                     )
                     for default, private in states
                 ],
@@ -188,6 +210,16 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
                 world_size=2,
                 run_metadata={"source_revision": "abc123"},
                 labels=("start", "end"),
+                device_memory=(
+                    [
+                        {rank: sample}
+                        for sample in (
+                            ((850, 1000), (800, 1000))
+                            if rank == 0
+                            else ((840, 1000), (780, 1000))
+                        )
+                    ]
+                ),
             )
         )
     candidate = MemoryRunGroup.from_runs(candidate_runs)
@@ -203,6 +235,7 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
 
     assert tuple(report.rank_comparisons) == (0, 1)
     assert len(report.rank_decomposition) == 54
+    assert len(report.rank_device_decomposition) == 10
     active = next(
         item
         for item in report.phase_aggregates
@@ -219,6 +252,10 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
     assert "change gap min" in text
     assert "awaiting_free_bytes" in text
     assert "expandable_reserved_bytes" in text
+    assert "device-wide CUDA Runtime equations are per rank/device" in text
+    changed_device_rows = report.rank_device_decomposition_rows(include_unchanged=False)
+    assert changed_device_rows
+    assert all(row["metric"] != "total_bytes" for row in changed_device_rows)
 
     paths = report.write(tmp_path / "phase")
     assert set(paths) == {
@@ -227,6 +264,7 @@ def test_group_phase_comparison_reports_worst_rank_and_spread(tmp_path: Path) ->
         "html",
         "rank_decomposition",
         "rank_pool_decomposition",
+        "rank_device_decomposition",
         "phase_aggregates",
     }
     assert paths["rank_decomposition"].is_file()

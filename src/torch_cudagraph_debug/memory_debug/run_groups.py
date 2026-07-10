@@ -10,11 +10,12 @@ from types import MappingProxyType
 
 from .._validation import comparable_provenance, json_signature
 from ._pool_identity import MemoryPoolKey
-from .aggregation import ALLOCATOR_SCOPES
+from .aggregation import ALLOCATOR_SCOPES, summarize_devices
 from .attribution import MemoryAttributionOptions
 from .comparison import compare_phases
 from .comparison_models import (
     MemoryAllocatorScopePhaseDecomposition,
+    MemoryDevicePhaseDecomposition,
     MemoryPoolPhaseDecomposition,
     PhaseMetric,
 )
@@ -24,6 +25,7 @@ from .reports import MemoryRunGroupPhaseComparison, MemoryRunGroupSummary
 from .stats import (
     MEMORY_STAT_METRICS,
     AllocatorScope,
+    DeviceMemorySample,
     MemoryStatMetric,
     MemoryStats,
 )
@@ -57,6 +59,35 @@ class MemoryRankPointState:
             "point_label": self.point_label,
             "scope": self.scope,
             **self.stats.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class MemoryRankDevicePointState:
+    """Device-wide CUDA Runtime state for one rank and point."""
+
+    rank: int
+    run_id: str
+    point_index: int
+    point_label: str
+    device_index: int
+    sample: DeviceMemorySample
+    allocator_reserved_bytes: int
+
+    @property
+    def unattributed_device_bytes(self) -> int:
+        return self.sample.used_bytes - self.allocator_reserved_bytes
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "rank": self.rank,
+            "run_id": self.run_id,
+            "point_index": self.point_index,
+            "point_label": self.point_label,
+            "device_index": self.device_index,
+            **self.sample.to_dict(),
+            "allocator_reserved_bytes": self.allocator_reserved_bytes,
+            "unattributed_device_bytes": self.unattributed_device_bytes,
         }
 
 
@@ -119,6 +150,21 @@ class MemoryRankPoolPhaseDecomposition:
 
     rank: int
     decomposition: MemoryPoolPhaseDecomposition
+
+    @property
+    def changed(self) -> bool:
+        return self.decomposition.changed
+
+    def to_dict(self) -> dict[str, object]:
+        return {"rank": self.rank, **self.decomposition.to_dict()}
+
+
+@dataclass(frozen=True)
+class MemoryRankDevicePhaseDecomposition:
+    """Device-wide phase equation for one rank."""
+
+    rank: int
+    decomposition: MemoryDevicePhaseDecomposition
 
     @property
     def changed(self) -> bool:
@@ -255,6 +301,7 @@ class MemoryRunGroup:
         return MemoryRunGroupSummary(
             run_group=self,
             rank_points=rank_rows,
+            rank_devices=_rank_device_point_rows(self),
             point_aggregates=_aggregate_point_rows(rank_rows),
             warnings=self.warnings,
         )
@@ -471,6 +518,7 @@ def compare_run_group_phases(
     rank_comparisons = {}
     rank_decomposition: list[MemoryRankPhaseDecomposition] = []
     rank_pool_decomposition: list[MemoryRankPoolPhaseDecomposition] = []
+    rank_device_decomposition: list[MemoryRankDevicePhaseDecomposition] = []
     options = attribution or MemoryAttributionOptions()
     for rank in common_ranks:
         phase = compare_phases(
@@ -488,6 +536,10 @@ def compare_run_group_phases(
             MemoryRankPoolPhaseDecomposition(rank, item)
             for item in phase.pool_decomposition
         )
+        rank_device_decomposition.extend(
+            MemoryRankDevicePhaseDecomposition(rank, item)
+            for item in phase.device_decomposition
+        )
         warnings.extend(f"rank {rank}: {warning}" for warning in phase.warnings)
 
     frozen_rank_decomposition = tuple(rank_decomposition)
@@ -497,6 +549,7 @@ def compare_run_group_phases(
         rank_comparisons=MappingProxyType(rank_comparisons),
         rank_decomposition=frozen_rank_decomposition,
         rank_pool_decomposition=tuple(rank_pool_decomposition),
+        rank_device_decomposition=tuple(rank_device_decomposition),
         phase_aggregates=_aggregate_phase_rows(frozen_rank_decomposition),
         warnings=tuple(dict.fromkeys(warnings)),
         display_stack_depth=options.display.stack_depth,
@@ -517,6 +570,31 @@ def _rank_point_rows(group: MemoryRunGroup) -> tuple[MemoryRankPointState, ...]:
                         point_label=point.label,
                         scope=scope,
                         stats=point.allocator_scope_stats[scope],
+                    )
+                )
+    return tuple(rows)
+
+
+def _rank_device_point_rows(
+    group: MemoryRunGroup,
+) -> tuple[MemoryRankDevicePointState, ...]:
+    rows = []
+    empty = MemoryStats()
+    for rank, run in group.runs.items():
+        for point in run.points:
+            allocator_by_device = summarize_devices(point.pool_stats)
+            for device, sample in point.device_memory.items():
+                rows.append(
+                    MemoryRankDevicePointState(
+                        rank=rank,
+                        run_id=run.run_id,
+                        point_index=point.index,
+                        point_label=point.label,
+                        device_index=device,
+                        sample=sample,
+                        allocator_reserved_bytes=allocator_by_device.get(
+                            device, empty
+                        ).reserved_bytes,
                     )
                 )
     return tuple(rows)

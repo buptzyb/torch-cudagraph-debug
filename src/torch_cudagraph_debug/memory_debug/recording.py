@@ -43,6 +43,7 @@ from torch_cudagraph_debug.types import (
 )
 
 from ._collector import (
+    DeviceMemoryProvider,
     DeviceSelector,
     SnapshotProvider,
     SynchronizeTarget,
@@ -71,7 +72,12 @@ from .events import (
     _extract_point_event_evidence,
     _PointEventEvidence,
 )
-from .stats import AllocatorScope, MemoryStats
+from .stats import (
+    AllocatorScope,
+    DeviceMemorySample,
+    MemoryStats,
+    validate_device_memory,
+)
 
 if TYPE_CHECKING:
     from .attribution import MemoryAttributionOptions, MemoryLifetimeOptions
@@ -126,11 +132,13 @@ _POINT_FIELDS = frozenset(
         "history",
         "warnings",
         "observations",
+        "device_memory",
     }
 )
 _OBSERVATION_FIELDS = frozenset(
     {"order", "device_index", "pool_id", "stream", *_MEMORY_STATS_FIELDS}
 )
+_DEVICE_MEMORY_ENTRY_FIELDS = frozenset({"free_bytes", "total_bytes"})
 _HISTORY_FIELDS = frozenset(
     {"device_index", "status", "warnings", "event_count", "trace_index_offset"}
 )
@@ -194,6 +202,7 @@ class MemoryPoint:
     boundary_marker: str
     observations: tuple[MemoryObservation, ...]
     warnings: tuple[str, ...] = ()
+    device_memory: Mapping[int, DeviceMemorySample] = field(default_factory=dict)
     _boundary_recorded: bool = field(default=True, repr=False, compare=False)
     _history_statuses: tuple[_DeviceHistoryStatus, ...] = field(
         default=(), repr=False, compare=False
@@ -273,6 +282,9 @@ class MemoryPoint:
             raise ValueError(
                 "every memory point after the first must own event evidence"
             )
+        object.__setattr__(
+            self, "device_memory", validate_device_memory(self.device_memory)
+        )
         object.__setattr__(
             self,
             "metadata",
@@ -410,6 +422,10 @@ class MemoryPoint:
             "metadata": _thaw_json(cast(FrozenJSONValue, self.metadata)),
             "boundary_marker": self.boundary_marker,
             "observation_count": len(self.observations),
+            "device_memory": {
+                str(device): sample.to_dict()
+                for device, sample in self.device_memory.items()
+            },
             "warnings": list(self.warnings),
         }
 
@@ -831,6 +847,9 @@ class MemoryRun:
                     boundary_marker=boundary_marker,
                     observations=tuple(observations),
                     warnings=tuple(warnings),
+                    device_memory=_device_memory_from_manifest(
+                        raw["device_memory"], point_label=label
+                    ),
                     _boundary_recorded=require_bool(
                         raw["boundary_recorded"],
                         f"boundary_recorded for point {label!r}",
@@ -981,6 +1000,8 @@ class MemoryRecorder:
     def _from_snapshot_provider(
         cls,
         provider: SnapshotProvider,
+        *,
+        device_memory_provider: DeviceMemoryProvider | None = None,
         **kwargs: Any,
     ) -> "MemoryRecorder":
         recorder = cls(**kwargs)
@@ -988,6 +1009,7 @@ class MemoryRecorder:
             devices=recorder._device_selector,
             synchronize=recorder.synchronize,
             snapshot_provider=provider,
+            device_memory_provider=device_memory_provider,
         )
         return recorder
 
@@ -1100,6 +1122,7 @@ class MemoryRecorder:
             boundary_marker=capture.boundary_marker,
             observations=observations,
             warnings=capture.warnings,
+            device_memory=dict(capture.device_memory),
             _boundary_recorded=capture.boundary_recorded,
             _history_statuses=history_statuses,
             _state_path=state_path,
@@ -1350,6 +1373,13 @@ def _point_manifest(point: MemoryPoint, root: Path) -> dict[str, object]:
         "observations": [
             _observation_manifest(observation) for observation in point.observations
         ],
+        "device_memory": {
+            str(device): {
+                "free_bytes": sample.free_bytes,
+                "total_bytes": sample.total_bytes,
+            }
+            for device, sample in point.device_memory.items()
+        },
     }
 
 
@@ -1402,6 +1432,40 @@ def _observation_from_manifest(
         raise MemoryBundleError(
             f"invalid memory observation {expected_order}: {exc}"
         ) from exc
+
+
+def _device_memory_from_manifest(
+    raw_device_memory: Any, *, point_label: str
+) -> dict[int, DeviceMemorySample]:
+    if not isinstance(raw_device_memory, Mapping):
+        raise MemoryBundleError(
+            f"device_memory for point {point_label!r} must be a JSON object"
+        )
+    samples: dict[int, DeviceMemorySample] = {}
+    for key, row in raw_device_memory.items():
+        if not isinstance(key, str) or not key.isdigit() or str(int(key)) != key:
+            raise MemoryBundleError(
+                f"device_memory keys for point {point_label!r} must be "
+                "non-negative integer strings"
+            )
+        if not isinstance(row, Mapping):
+            raise MemoryBundleError(
+                f"device_memory entry {key!r} for point {point_label!r} "
+                "must be a JSON object"
+            )
+        require_exact_fields(
+            row,
+            _DEVICE_MEMORY_ENTRY_FIELDS,
+            f"device_memory entry {key!r} for point {point_label!r}",
+            error_type=MemoryBundleError,
+        )
+        try:
+            samples[int(key)] = DeviceMemorySample.from_dict(row)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MemoryBundleError(
+                f"invalid device_memory entry {key!r} for point {point_label!r}: {exc}"
+            ) from exc
+    return {device: samples[device] for device in sorted(samples)}
 
 
 def _history_statuses_from_manifest(

@@ -20,6 +20,13 @@ middle allocation. It separates inactive expandable capacity retained in the
 cache from the mapped bytes that `empty_cache()` later unmaps. Run it in a new
 process with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
 
+`probe/device_memory.py` contrasts a tensor allocation with a raw
+`probe/device_memory.py` contrasts a tensor allocation with a raw
+``cudaMalloc``. The first grows this process allocator reserved bytes; the
+second leaves allocator reserved unchanged and appears in device-global usage
+not attributed to that allocator. CUDA Runtime readings include other processes
+on a shared GPU.
+
 `probe/snapshot_comparison.py` compares endpoints from independent probes. Use
 this pattern when the two snapshots do not share one Probe lifecycle.
 

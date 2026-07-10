@@ -10,6 +10,7 @@ from ._pool_identity import DEFAULT_POOL_ID, MemoryPoolKey
 from .aggregation import (
     ALLOCATOR_SCOPES,
     compare_allocator_scopes,
+    compare_device_memory,
     summarize_allocator_scopes,
 )
 from .allocator_snapshot import (
@@ -24,8 +25,10 @@ from .attribution import (
     MemoryEvidenceStatus,
 )
 from .comparison_models import (
+    DEVICE_MEMORY_METRICS,
     PHASE_METRICS,
     MemoryAllocatorScopePhaseDecomposition,
+    MemoryDevicePhaseDecomposition,
     MemoryLifecycleDelta,
     MemoryObservationComparison,
     MemoryPhaseComponents,
@@ -299,6 +302,12 @@ def _compare_independent_states(
         ),
         pool_comparisons=tuple(sorted(pool_comparisons, key=_pool_comparison_sort_key)),
         observation_comparisons=observation_comparisons,
+        device_comparisons=compare_device_memory(
+            reference.device_memory,
+            candidate.device_memory,
+            reference_pool_stats,
+            candidate_pool_stats,
+        ),
         allocation_stack_comparisons=stack_deltas,
         reference_stack_coverage=reference_coverage,
         candidate_stack_coverage=candidate_coverage,
@@ -416,6 +425,12 @@ def compare_phases(
         start_gap,
         end_gap,
     )
+    device_decomposition = _device_phase_decomposition(
+        baseline_change,
+        candidate_change,
+        start_gap,
+        end_gap,
+    )
     return MemoryPhaseComparison(
         baseline_name=baseline.run.name,
         candidate_name=candidate.run.name,
@@ -425,6 +440,7 @@ def compare_phases(
         end_gap=end_gap,
         allocator_scope_decomposition=allocator_scope_decomposition,
         pool_decomposition=pool_decomposition,
+        device_decomposition=device_decomposition,
         display_stack_depth=options.display.stack_depth,
         display_limit=options.display.limit,
     )
@@ -712,6 +728,12 @@ def _compare_same_identity_views(
         ),
         pool_comparisons=pool_comparisons,
         observation_comparisons=observation_comparisons,
+        device_comparisons=compare_device_memory(
+            reference.device_memory,
+            candidate.device_memory,
+            reference.pool_stats,
+            candidate.pool_stats,
+        ),
         allocation_stack_comparisons=stack_deltas,
         allocation_stack_observation_comparisons=stack_detail_deltas,
         reference_stack_coverage=reference_coverage,
@@ -946,6 +968,51 @@ def _check_stack_coverage(
             "attributed rows remain exact and unframed active bytes are grouped "
             "under <unattributed>"
         )
+
+
+def _device_phase_decomposition(
+    baseline_change: MemoryPointComparison,
+    candidate_change: MemoryPointComparison,
+    start_gap: MemoryPointComparison,
+    end_gap: MemoryPointComparison,
+) -> tuple[MemoryDevicePhaseDecomposition, ...]:
+    by_leg = tuple(
+        {item.device_index: item for item in comparison.device_comparisons}
+        for comparison in (
+            baseline_change,
+            candidate_change,
+            start_gap,
+            end_gap,
+        )
+    )
+    complete_devices = sorted(set.intersection(*(set(items) for items in by_leg)))
+    rows: list[MemoryDevicePhaseDecomposition] = []
+    for device in complete_devices:
+        comparisons = tuple(items[device] for items in by_leg)
+        if any(
+            item.reference is None or item.candidate is None for item in comparisons
+        ):
+            continue
+        for metric in DEVICE_MEMORY_METRICS:
+            deltas = tuple(getattr(item, f"delta_{metric}") for item in comparisons)
+            if any(value is None for value in deltas):
+                continue
+            baseline_delta, candidate_delta, start_delta, end_delta = (
+                int(value) for value in deltas
+            )
+            rows.append(
+                MemoryDevicePhaseDecomposition(
+                    device_index=device,
+                    components=MemoryPhaseComponents(
+                        metric=metric,
+                        start_gap_bytes=start_delta,
+                        baseline_change_bytes=baseline_delta,
+                        candidate_change_bytes=candidate_delta,
+                        end_gap_bytes=end_delta,
+                    ),
+                )
+            )
+    return tuple(rows)
 
 
 def _phase_decomposition(

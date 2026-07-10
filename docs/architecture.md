@@ -164,6 +164,14 @@ instead. Memory collection is device-aware: device index is part of pool and
 observation identity, and one Probe or Recorder may select one device, a device
 sequence, or all visible devices.
 
+Each memory capture also attempts one `torch.cuda.mem_get_info` sample per
+selected device immediately after `_snapshot()` and before CPU normalization.
+The calls are consecutive but not atomic. Sampling is attempted during CUDA
+Graph capture without synchronization; a per-device failure becomes a warning.
+Device samples live directly on `MemoryProbeSnapshot` and `MemoryPoint`, not in
+`MemoryObservation`, because they describe device-global CUDA Runtime capacity
+rather than one allocator pool/stream leaf.
+
 ## Memory State And Event Evidence
 
 A memory collection starts from one private PyTorch `_snapshot()` call, but the
@@ -173,6 +181,8 @@ Recorder does not retain that cumulative payload as a Point:
 flowchart LR
     C["_MemoryCollector capture"] -->|split state| S["Allocator state<br/>without device_traces"]
     C -->|slice interval| E["Raw event evidence<br/>previous Point to current Point"]
+    C -->|sample device| D["CUDA Runtime device state"]
+    D -->|owned by| P
     S -->|owned by| P["MemoryPoint"]
     E -->|owned by ending point| P
     P -->|supports| SA["State comparison and stacks"]

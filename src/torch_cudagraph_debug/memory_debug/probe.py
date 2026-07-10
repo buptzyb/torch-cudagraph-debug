@@ -6,6 +6,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from ._collector import (
+    DeviceMemoryProvider,
     DeviceSelector,
     SnapshotProvider,
     SynchronizeTarget,
@@ -55,12 +56,14 @@ class MemoryProbe:
         name: str = "memory",
         devices: DeviceSelector = None,
         synchronize: SynchronizeTarget = True,
+        device_memory_provider: DeviceMemoryProvider | None = None,
     ) -> "MemoryProbe":
         probe = cls(name=name, devices=devices, synchronize=synchronize)
         probe._collector = _MemoryCollector(
             devices=devices,
             synchronize=synchronize,
             snapshot_provider=provider,
+            device_memory_provider=device_memory_provider,
         )
         return probe
 
@@ -101,6 +104,7 @@ class MemoryProbe:
             boundary_marker=capture.boundary_marker,
             observations=observations,
             warnings=capture.warnings,
+            device_memory=dict(capture.device_memory),
             _boundary_recorded=capture.boundary_recorded,
             _raw_snapshot=capture.raw_snapshot,
         )

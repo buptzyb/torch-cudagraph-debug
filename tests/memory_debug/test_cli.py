@@ -325,6 +325,42 @@ def test_cli_group_summary_and_phase_comparison(tmp_path: Path) -> None:
     assert (phase_output / "phase_aggregates.csv").exists()
 
 
+def test_cli_reports_include_device_memory_sections(tmp_path: Path) -> None:
+    bundle = tmp_path / "sampled.tcgd-memory"
+    make_run(
+        [snapshot(segment(active=10)), snapshot(segment(active=30))],
+        name="sampled",
+        bundle_dir=bundle,
+        labels=("start", "end"),
+        device_memory=[{0: (90, 100)}, {0: (60, 100)}],
+    )
+    timeline_output = tmp_path / "timeline"
+    assert main(["timeline", str(bundle), "--output", str(timeline_output)]) == 0
+    assert (timeline_output / "devices.csv").exists()
+    timeline_text = (timeline_output / "report.txt").read_text(encoding="utf-8")
+    assert "device[0] (device-wide) CUDA used=" in timeline_text
+
+    comparison_output = tmp_path / "comparison"
+    assert (
+        main(
+            [
+                "compare-points",
+                str(bundle),
+                "--reference-point",
+                "start",
+                "--candidate-point",
+                "end",
+                "--output",
+                str(comparison_output),
+            ]
+        )
+        == 0
+    )
+    comparison_text = (comparison_output / "report.txt").read_text(encoding="utf-8")
+    assert "devices (device-wide, includes other processes):" in comparison_text
+    assert (comparison_output / "devices.csv").exists()
+
+
 def test_lifetime_cli_does_not_expose_irrelevant_common_flags() -> None:
     parser = build_parser()
     for flag in ("--only-changed", "--stacks", "--lifetimes", "--events"):

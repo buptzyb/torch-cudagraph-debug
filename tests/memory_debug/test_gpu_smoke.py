@@ -14,7 +14,9 @@ from torch_cudagraph_debug.memory_debug import (
     MemoryLifetimeSelection,
     MemoryRecorder,
     MemoryRun,
+    MemoryStats,
 )
+from torch_cudagraph_debug.memory_debug.aggregation import summarize_devices
 
 pytestmark = [
     pytest.mark.gpu,
@@ -335,6 +337,17 @@ def test_graph_pool_capture_and_json_bundle_round_trip(
             for warning in point.warnings
         )
 
+        # CUDA Runtime sampling accompanies allocator snapshots, including
+        # the point taken while current-stream capture is active.
+        device = torch.cuda.current_device()
+        for point in run.points:
+            sample = point.device_memory[device]
+            assert sample.total_bytes > 0
+            assert sample.free_bytes + sample.used_bytes == sample.total_bytes
+        assert not any(
+            "could not sample device memory" in warning for warning in during.warnings
+        )
+
         capture_comparison = run.compare(
             "before_capture",
             "after_capture",
@@ -370,7 +383,44 @@ def test_graph_pool_capture_and_json_bundle_round_trip(
             loaded_comparison.pool_comparison_rows()
             == capture_comparison.pool_comparison_rows()
         )
+        assert [dict(point.device_memory) for point in loaded.points] == [
+            dict(point.device_memory) for point in run.points
+        ]
         assert graph_buffers
         assert after_replay.allocator_state()["segments"]
     finally:
         _disable_history()
+
+
+def test_real_device_memory_sampling_tracks_allocator_state() -> None:
+    _disable_history()
+    torch.cuda.empty_cache()
+    recorder = MemoryRecorder(name="device-memory")
+    recorder.record_point("baseline")
+    payload = torch.empty(64 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+    recorder.record_point("grown")
+    run = recorder.finish()
+
+    device = torch.cuda.current_device()
+    for point in run.points:
+        sample = point.device_memory[device]
+        assert sample.free_bytes + sample.used_bytes == sample.total_bytes
+        reserved = (
+            summarize_devices(point.pool_stats)
+            .get(device, MemoryStats())
+            .reserved_bytes
+        )
+        # Device-wide usage includes this process's reserved segments, the
+        # CUDA context, and any other process on a shared GPU.
+        assert sample.used_bytes >= reserved
+
+    comparison = run.compare("baseline", "grown")
+    (row,) = [
+        item for item in comparison.device_comparisons if item.device_index == device
+    ]
+    assert row.delta_used_bytes is not None
+    assert row.delta_total_bytes is not None
+    # Our own allocator growth is deterministic even on a shared GPU; the
+    # device-wide used delta is not, so only the reserved delta is asserted.
+    assert row.delta_allocator_reserved_bytes >= payload.numel()
+    assert "devices (device-wide, includes other processes):" in comparison.to_text()

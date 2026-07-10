@@ -15,12 +15,13 @@ from .allocator_snapshot import (
     normalize_snapshot,
     summarize_segments,
 )
-from .stats import MemoryStats
+from .stats import DeviceMemorySample, MemoryStats
 
 SynchronizeTarget = bool | torch.cuda.Stream | torch.device
 DeviceLike: TypeAlias = int | str | torch.device
 DeviceSelector: TypeAlias = DeviceLike | Sequence[DeviceLike] | Literal["all"] | None
 SnapshotProvider = Callable[[str], AllocatorSnapshotData]
+DeviceMemoryProvider = Callable[[int], "tuple[int, int] | None"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class _CollectedMemorySnapshot:
     devices: tuple[int, ...]
     raw_snapshot: AllocatorSnapshotData
     summaries: tuple[tuple[MemoryObservationKey, MemoryStats], ...]
+    device_memory: tuple[tuple[int, DeviceMemorySample], ...]
     warnings: tuple[str, ...]
 
 
@@ -54,6 +56,7 @@ class _MemoryCollector:
         devices: DeviceSelector = None,
         synchronize: SynchronizeTarget = True,
         snapshot_provider: SnapshotProvider | None = None,
+        device_memory_provider: DeviceMemoryProvider | None = None,
     ) -> None:
         validate_synchronize_target(synchronize)
         self.synchronize = synchronize
@@ -61,6 +64,7 @@ class _MemoryCollector:
         self._requested_devices = _normalize_device_selector(devices)
         self._resolved_devices: tuple[int, ...] | None = None
         self._snapshot_provider = snapshot_provider
+        self._device_memory_provider = device_memory_provider
 
     @property
     def uses_snapshot_provider(self) -> bool:
@@ -96,6 +100,10 @@ class _MemoryCollector:
             envelope = _snapshot_envelope(raw)
 
         snapshot = _filter_snapshot_devices(envelope, devices, warnings)
+        # Keep the CUDA Runtime reading next to the allocator snapshot. The two
+        # calls are not atomic, but CPU-side normalization can be comparatively
+        # expensive for a large snapshot and must not widen that interval.
+        device_memory = self._sample_device_memory(devices, warnings)
         segments = normalize_snapshot(snapshot, warnings=warnings)
         return _CollectedMemorySnapshot(
             timestamp=time.time(),
@@ -104,6 +112,7 @@ class _MemoryCollector:
             devices=devices,
             raw_snapshot=snapshot,
             summaries=tuple(summarize_segments(segments).items()),
+            device_memory=device_memory,
             warnings=tuple(warnings),
         )
 
@@ -200,6 +209,52 @@ class _MemoryCollector:
             return
         for device_index in devices:
             torch.cuda.synchronize(device_index)
+
+    def _sample_device_memory(
+        self,
+        devices: tuple[int, ...],
+        warnings: list[str],
+    ) -> tuple[tuple[int, DeviceMemorySample], ...]:
+        """Sample device-wide free/total memory for every selected device.
+
+        CUDA Runtime readings cover the whole device, not just this process. The
+        provider seam mirrors ``snapshot_provider``: without an injected
+        device-memory provider, provider-backed collection reports nothing.
+        """
+
+        if not devices:
+            return ()
+        if self._snapshot_provider is not None:
+            if self._device_memory_provider is None:
+                return ()
+            samples = []
+            for device in devices:
+                try:
+                    reading = self._device_memory_provider(device)
+                    if reading is None:
+                        continue
+                    samples.append((device, DeviceMemorySample(*reading)))
+                except Exception as exc:
+                    warnings.append(
+                        f"could not sample device memory for device {device}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            return tuple(samples)
+        if not torch.cuda.is_available():
+            return ()
+        samples: list[tuple[int, DeviceMemorySample]] = []
+        for device in devices:
+            try:
+                free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+                samples.append(
+                    (device, DeviceMemorySample(int(free_bytes), int(total_bytes)))
+                )
+            except Exception as exc:
+                warnings.append(
+                    f"could not sample device memory for device {device}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        return tuple(samples)
 
     @staticmethod
     def _capture_torch_snapshot(

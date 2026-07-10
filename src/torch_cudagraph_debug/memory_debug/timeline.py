@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from ._pool_identity import MemoryObservationKey, MemoryPoolKey
-from .aggregation import ALLOCATOR_SCOPES
+from .aggregation import ALLOCATOR_SCOPES, summarize_devices
 from .attribution import MemoryAttributionOptions
 from .comparison import (
     _compare_same_run_views,
@@ -17,7 +17,12 @@ from .events import EventWindow
 from .lifetimes import analyze_allocation_lifetimes
 from .recording import MemoryRun
 from .reports import MemoryPointComparison, MemoryTimeline
-from .stats import AllocatorScope, MemoryStats, MemoryStatsDelta
+from .stats import (
+    AllocatorScope,
+    DeviceMemorySample,
+    MemoryStats,
+    MemoryStatsDelta,
+)
 
 
 @dataclass(frozen=True)
@@ -138,15 +143,86 @@ class MemoryObservationTimelineEntry:
         return row
 
 
+@dataclass(frozen=True)
+class MemoryDeviceTimelineEntry:
+    """One device-wide CUDA Runtime memory state in a timeline.
+
+    The sample comes from ``torch.cuda.mem_get_info`` and covers the whole
+    device, including the CUDA context and every other process on the GPU.
+    Deltas compare against the previous point and are ``None`` together when
+    that point did not sample this device: a missing sample means unknown,
+    never zero.
+    """
+
+    point_index: int
+    point_label: str
+    device_index: int
+    sample: DeviceMemorySample
+    allocator_reserved_bytes: int
+    delta_used_bytes: int | None
+    delta_free_bytes: int | None
+    delta_total_bytes: int | None
+    delta_allocator_reserved_bytes: int | None
+    delta_unattributed_device_bytes: int | None
+
+    @property
+    def unattributed_device_bytes(self) -> int:
+        return self.sample.used_bytes - self.allocator_reserved_bytes
+
+    def to_dict(self) -> dict[str, object]:
+        deltas = (
+            None
+            if self.delta_used_bytes is None
+            else {
+                "used_bytes": self.delta_used_bytes,
+                "free_bytes": self.delta_free_bytes,
+                "total_bytes": self.delta_total_bytes,
+                "allocator_reserved_bytes": self.delta_allocator_reserved_bytes,
+                "unattributed_device_bytes": self.delta_unattributed_device_bytes,
+            }
+        )
+        return {
+            "point_index": self.point_index,
+            "point_label": self.point_label,
+            "device_index": self.device_index,
+            "state": {
+                **self.sample.to_dict(),
+                "allocator_reserved_bytes": self.allocator_reserved_bytes,
+                "unattributed_device_bytes": self.unattributed_device_bytes,
+            },
+            "delta": deltas,
+        }
+
+    def to_row(self) -> dict[str, object]:
+        return {
+            "point_index": self.point_index,
+            "point_label": self.point_label,
+            "device_index": self.device_index,
+            "state_free_bytes": self.sample.free_bytes,
+            "state_total_bytes": self.sample.total_bytes,
+            "state_used_bytes": self.sample.used_bytes,
+            "state_allocator_reserved_bytes": self.allocator_reserved_bytes,
+            "state_unattributed_device_bytes": self.unattributed_device_bytes,
+            "delta_used_bytes": self.delta_used_bytes,
+            "delta_free_bytes": self.delta_free_bytes,
+            "delta_total_bytes": self.delta_total_bytes,
+            "delta_allocator_reserved_bytes": self.delta_allocator_reserved_bytes,
+            "delta_unattributed_device_bytes": self.delta_unattributed_device_bytes,
+        }
+
+
 def _build_timeline(
     run: MemoryRun, options: MemoryAttributionOptions
 ) -> MemoryTimeline:
     allocator_scope_entries: list[MemoryAllocatorScopeTimelineEntry] = []
     pool_entries: list[MemoryPoolTimelineEntry] = []
     observation_entries: list[MemoryObservationTimelineEntry] = []
+    device_entries: list[MemoryDeviceTimelineEntry] = []
     previous_pool_stats: Mapping[MemoryPoolKey, MemoryStats] | None = None
     previous_allocator_scope_stats: Mapping[AllocatorScope, MemoryStats] | None = None
     previous_observations: Mapping[MemoryObservationKey, MemoryStats] | None = None
+    previous_device_memory: Mapping[int, DeviceMemorySample] | None = None
+    previous_device_reserved: dict[int, MemoryStats] = {}
     for point in run.points:
         current_pool_stats = point.pool_stats
         current_allocator_scope_stats = point.allocator_scope_stats
@@ -207,9 +283,48 @@ def _build_timeline(
                     ),
                 )
             )
+        current_device_reserved = summarize_devices(current_pool_stats)
+        empty = MemoryStats()
+        for device, sample in point.device_memory.items():
+            reserved = current_device_reserved.get(device, empty).reserved_bytes
+            previous_sample = (
+                None
+                if previous_device_memory is None
+                else previous_device_memory.get(device)
+            )
+            if previous_sample is None:
+                delta_used = delta_free = delta_total = delta_reserved = None
+                delta_unattributed_device_bytes = None
+            else:
+                earlier_reserved = previous_device_reserved.get(
+                    device, empty
+                ).reserved_bytes
+                delta_used = sample.used_bytes - previous_sample.used_bytes
+                delta_free = sample.free_bytes - previous_sample.free_bytes
+                delta_total = sample.total_bytes - previous_sample.total_bytes
+                delta_reserved = reserved - earlier_reserved
+                delta_unattributed_device_bytes = (sample.used_bytes - reserved) - (
+                    previous_sample.used_bytes - earlier_reserved
+                )
+            device_entries.append(
+                MemoryDeviceTimelineEntry(
+                    point_index=point.index,
+                    point_label=point.label,
+                    device_index=device,
+                    sample=sample,
+                    allocator_reserved_bytes=reserved,
+                    delta_used_bytes=delta_used,
+                    delta_free_bytes=delta_free,
+                    delta_total_bytes=delta_total,
+                    delta_allocator_reserved_bytes=delta_reserved,
+                    delta_unattributed_device_bytes=delta_unattributed_device_bytes,
+                )
+            )
         previous_pool_stats = current_pool_stats
         previous_allocator_scope_stats = current_allocator_scope_stats
         previous_observations = point.observation_stats
+        previous_device_memory = point.device_memory
+        previous_device_reserved = current_device_reserved
 
     allocation_lifetimes = None
     comparison_options = replace(options, lifetimes=False)
@@ -247,6 +362,7 @@ def _build_timeline(
         allocator_scope_entries=tuple(allocator_scope_entries),
         pool_entries=tuple(pool_entries),
         observation_entries=tuple(observation_entries),
+        device_entries=tuple(device_entries),
         point_comparisons=point_comparisons,
         allocation_lifetimes=allocation_lifetimes,
         display_stack_depth=options.display.stack_depth,

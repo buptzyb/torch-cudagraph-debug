@@ -99,6 +99,13 @@ MAJOR_WORKFLOW_COVERAGE = {
         "removed_segment_bytes",
         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
     ),
+    "memory_debug/probe/device_memory.py": (
+        "device_memory",
+        "delta_unattributed_device_bytes",
+        "delta_total_bytes",
+        "delta_allocator_reserved_bytes",
+        "cudaMalloc(",
+    ),
     "memory_debug/probe/snapshot_comparison.py": ("compare_snapshots(",),
     "memory_debug/recorder/timeline_and_reports.py": (
         'record_point("during_capture")',
