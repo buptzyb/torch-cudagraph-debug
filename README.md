@@ -210,17 +210,13 @@ active allocation to a graph-private pool. Read the full report top-down:
   `reserved` decomposes by pool and then stream.
 - `residual` is device-wide evidence minus process-local allocator state: CUDA
   context and module overhead, external CUDA allocations such as NCCL buffers,
-  and other processes all land there. Device-wide CUDA samples and allocator
-  snapshots are consecutive rather than atomic, so `residual` carries sampling
-  noise and can be negative.
+  and other processes all land there.
 - `allocated`, `active`, and `requested` describe different allocator
-  quantities; `lifecycle` is endpoint address evidence, not event-backed
-  ownership or leak proof.
+  quantities; `lifecycle` is snapshot-based comparison, not event-backed. For
+  accurate event-backed tracking, use `lifetimes()`.
 
-Private-pool capacity can remain reserved after its blocks become inactive.
 The [Memory Debug guide](docs/memory_debug.md) defines every metric and report
-level; the [focused example](examples/memory_debug/probe/private_pool_inactive.py)
-explains retained private-pool capacity.
+level.
 
 Beyond two-point comparison, Memory Debug can:
 
