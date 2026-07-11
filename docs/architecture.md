@@ -237,6 +237,21 @@ addresses and duplicate `free_requested` transitions are contradictions too.
 This distinction preserves legitimate event-to-block rounding without treating
 an unwitnessed generation change as the same allocation.
 
+Transients — generations never observed by any snapshot — use a pool ID
+reported by their allocation event when present. Otherwise they anchor their
+pool temporally: an endpoint snapshot testifies about the birth address only
+when no covering segment churn separates them, and expandable coverage also
+tracks the mapped footprint of every range with the same (device, stream,
+pool, segment type) key. This same-key witness follows the native allocator's
+normal one-reservation-per-key behavior, but it is a heuristic rather than an
+identity guarantee: extreme fragmentation can create multiple reservations
+with the same key, and allocator snapshots expose no reservation ID. In that
+rare case the witness can conflate reservations. Subject to that limitation,
+a surviving witness supports the endpoint pool and an emptied witness marks
+an era end. A transient whose unreported-pool era touches neither endpoint
+reports the unknown-pool sentinel; disagreeing quiet endpoints and
+unexplained mapping gaps are reconciliation contradictions.
+
 ## Architectural Boundaries
 
 1. Probe and Recorder are sibling public entry points over a private,

@@ -1196,7 +1196,19 @@ unrelated unattributed sizes are not merged. Each cohort retains:
 - owner-active and awaiting-free terminal totals.
 
 A transient generation born and freed between points contributes to the event
-peaks even when both snapshot fields are zero.
+peaks even when both snapshot fields are zero. A trace entry that carries its
+own pool ID (PyTorch 2.12+, pytorch/pytorch#177717) uses that reported value
+directly. Otherwise the pool is anchored temporally: an endpoint snapshot
+testifies about the birth address only when no covering segment churn
+separates them. Expandable anchoring treats every mapped range with the same
+(device, stream, pool, segment type) key as one reservation-liveness witness,
+matching the allocator's normal behavior. This is a heuristic: under extreme
+fragmentation multiple reservations may share the key, and snapshots expose
+no reservation ID with which to separate them. A transient whose
+unreported-pool era touches neither endpoint reports `("unknown",)`
+(`pool[unknown]`); endpoints that disagree without covering churn, or a
+birth address invisible at an endpoint without a covering segment event, are
+evidence contradictions raised as `MemoryReconciliationError`.
 
 Complete allocator event history must be enabled before the allocations of
 interest.

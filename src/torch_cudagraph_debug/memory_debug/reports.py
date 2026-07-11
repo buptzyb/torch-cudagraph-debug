@@ -152,7 +152,7 @@ class MemoryAllocationLifetimeAnalysis:
             device = "unknown" if item.device is None else str(item.device)
             lines.append(
                 f"{indent}  #{item.display_rank} {item.cohort_id} device[{device}] "
-                f"{pool_id_label(item.pool_id)} "
+                f"{item.pool_label} "
                 f"snapshot_peak={format_bytes(item.peak_active_bytes)} "
                 f"owner_event_peak={format_bytes(item.event_owner_peak_bytes)} "
                 f"unreusable_event_peak={format_bytes(item.event_unreusable_peak_bytes)} "

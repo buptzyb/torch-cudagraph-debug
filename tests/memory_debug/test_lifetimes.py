@@ -17,6 +17,7 @@ from torch_cudagraph_debug.memory_debug import (
     MemoryPoint,
     MemoryReconciliationError,
     MemoryRecorder,
+    MemoryRun,
     compare_points,
 )
 from torch_cudagraph_debug.memory_debug.advanced import (
@@ -924,10 +925,12 @@ def test_allocator_action_taxonomy_is_complete_and_unknown_actions_warn() -> Non
             (
                 [],
                 [
+                    event("segment_alloc", address=1000, size=64),
                     event("alloc", address=1000, size=64, frame="born.py"),
                     event("future_action", address=1000, size=64),
                     event("free_requested", address=1000, size=64),
                     event("free_completed", address=1000, size=64),
+                    event("segment_free", address=1000, size=64),
                 ],
             ),
         ],
@@ -1317,77 +1320,589 @@ def test_duplicate_active_address_in_snapshot_is_a_reconciliation_error() -> Non
         run.lifetimes()
 
 
-def test_transient_in_cross_era_address_range_reports_unknown_pool() -> None:
-    """A transient in a range that changed pools must not inherit either pool."""
+def test_transient_in_cross_era_range_anchors_to_its_birth_era() -> None:
+    """A transient born after a witnessed era change takes the new era's pool."""
 
-    markers: list[str] = []
-
-    def provider(marker: str):
-        markers.append(marker)
-        if len(markers) == 1:
-            return snapshot(
-                segment(active=100, address=1000, pool=(0, 2), frame="old.py"),
-                traces=[[event("snapshot", marker=marker)]],
-            )
-        return snapshot(
-            segment(active=100, address=1000, frame="new.py"),
-            traces=[
+    run = make_history_run(
+        [
+            ([segment(active=100, address=1000, pool=(0, 2), frame="old.py")], []),
+            (
+                [segment(active=100, address=1000, frame="new.py")],
                 [
-                    event("snapshot", marker=markers[0]),
+                    event("free_requested", address=1000, size=100, frame="old.py"),
+                    event("free_completed", address=1000, size=100, frame="old.py"),
+                    event("segment_free", address=1000, size=100),
+                    event("segment_alloc", address=1000, size=100),
+                    event("alloc", address=1000, size=50, frame="transient.py"),
                     event(
-                        "free_requested",
-                        address=1000,
-                        size=100,
-                        frame="old.py",
-                        time_us=2,
+                        "free_requested", address=1000, size=50, frame="transient.py"
                     ),
                     event(
-                        "free_completed",
-                        address=1000,
-                        size=100,
-                        frame="old.py",
-                        time_us=3,
+                        "free_completed", address=1000, size=50, frame="transient.py"
                     ),
-                    event(
-                        "alloc",
-                        address=1000,
-                        size=50,
-                        frame="transient.py",
-                        time_us=4,
-                    ),
-                    event(
-                        "free_requested",
-                        address=1000,
-                        size=50,
-                        frame="transient.py",
-                        time_us=5,
-                    ),
-                    event(
-                        "free_completed",
-                        address=1000,
-                        size=50,
-                        frame="transient.py",
-                        time_us=6,
-                    ),
-                    event("alloc", address=1000, size=100, frame="new.py", time_us=7),
-                    event("snapshot", marker=marker),
-                ]
-            ],
-        )
+                    event("alloc", address=1000, size=100, frame="new.py"),
+                ],
+            ),
+        ],
+        labels=("before", "after"),
+    )
+    report = run.lifetimes()
 
-    recorder = MemoryRecorder._from_snapshot_provider(provider)
-    recorder.record_point("before")
-    recorder.record_point("after")
-    report = recorder.finish().lifetimes()
+    # The old era ended before the transient's birth (covering segment churn),
+    # so only the end snapshot can testify: the transient anchors to the new
+    # era's pool instead of degrading to unknown.
+    transient = next(
+        cohort for cohort in report.cohorts if "transient.py" in cohort.stack_key
+    )
+    assert transient.pool_id == (0, 0)
+    survivor = next(cohort for cohort in report.cohorts if "new.py" in cohort.stack_key)
+    assert survivor.pool_id == (0, 0)
+
+
+def test_transient_in_middle_era_reports_unknown_pool() -> None:
+    """A transient whose era touches neither endpoint must not inherit a pool."""
+
+    run = make_history_run(
+        [
+            ([segment(active=100, address=1000, pool=(0, 2), frame="old.py")], []),
+            (
+                [segment(active=100, address=1000, frame="new.py")],
+                [
+                    event("free_requested", address=1000, size=100, frame="old.py"),
+                    event("free_completed", address=1000, size=100, frame="old.py"),
+                    event("segment_free", address=1000, size=100),
+                    event("segment_alloc", address=1000, size=100),
+                    event("alloc", address=1000, size=50, frame="transient.py"),
+                    event(
+                        "free_requested", address=1000, size=50, frame="transient.py"
+                    ),
+                    event(
+                        "free_completed", address=1000, size=50, frame="transient.py"
+                    ),
+                    event("segment_free", address=1000, size=100),
+                    event("segment_alloc", address=1000, size=100),
+                    event("alloc", address=1000, size=100, frame="new.py"),
+                ],
+            ),
+        ],
+        labels=("before", "after"),
+    )
+    report = run.lifetimes()
 
     transient = next(
         cohort for cohort in report.cohorts if "transient.py" in cohort.stack_key
     )
     assert transient.pool_id == ("unknown",)
-    # The surviving instance is refined from its snapshot block, which is
-    # ground truth for the new era.
-    survivor = next(cohort for cohort in report.cohorts if "new.py" in cohort.stack_key)
-    assert survivor.pool_id == (0, 0)
+
+
+def test_recycled_range_with_agreeing_endpoints_reports_unknown_pool() -> None:
+    """Pool A -> pool B -> pool A recycling must not silently attribute A."""
+
+    run = make_history_run(
+        [
+            ([segment(active=100, address=1000, frame="era_a.py")], []),
+            (
+                [segment(active=100, address=1000, frame="era_a2.py")],
+                [
+                    event("free_requested", address=1000, size=100, frame="era_a.py"),
+                    event("free_completed", address=1000, size=100, frame="era_a.py"),
+                    event("segment_free", address=1000, size=100),
+                    event("segment_alloc", address=1000, size=100),
+                    event("alloc", address=1040, size=16, frame="transient_b.py"),
+                    event(
+                        "free_requested", address=1040, size=16, frame="transient_b.py"
+                    ),
+                    event(
+                        "free_completed", address=1040, size=16, frame="transient_b.py"
+                    ),
+                    event("segment_free", address=1000, size=100),
+                    event("segment_alloc", address=1000, size=100),
+                    event("alloc", address=1000, size=100, frame="era_a2.py"),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+    report = run.lifetimes()
+
+    transient = next(
+        cohort for cohort in report.cohorts if "transient_b.py" in cohort.stack_key
+    )
+    assert transient.pool_id == ("unknown",)
+
+
+def test_pool_stamped_traces_bypass_anchoring_entirely(tmp_path: Path) -> None:
+    """PyTorch 2.12+ stamps every trace entry with its pool (pytorch#177717).
+
+    With reported pools, even the recycled A -> B -> A shape that anchoring
+    must degrade to unknown attributes exactly, and the verdict survives a
+    bundle round-trip.
+    """
+
+    bundle = tmp_path / "stamped.tcgd-memory"
+    run = make_history_run(
+        [
+            ([segment(active=100, address=1000, frame="era_a.py")], []),
+            (
+                [segment(active=100, address=1000, frame="era_a2.py")],
+                [
+                    event(
+                        "free_requested",
+                        address=1000,
+                        size=100,
+                        pool=(0, 0),
+                        frame="era_a.py",
+                    ),
+                    event(
+                        "free_completed",
+                        address=1000,
+                        size=100,
+                        pool=(0, 0),
+                        frame="era_a.py",
+                    ),
+                    event("segment_free", address=1000, size=100, pool=(0, 0)),
+                    event("segment_alloc", address=1000, size=100, pool=(0, 9)),
+                    event(
+                        "alloc",
+                        address=1040,
+                        size=16,
+                        pool=(0, 9),
+                        frame="transient_b.py",
+                    ),
+                    event(
+                        "free_requested",
+                        address=1040,
+                        size=16,
+                        pool=(0, 9),
+                        frame="transient_b.py",
+                    ),
+                    event(
+                        "free_completed",
+                        address=1040,
+                        size=16,
+                        pool=(0, 9),
+                        frame="transient_b.py",
+                    ),
+                    event("segment_free", address=1000, size=100, pool=(0, 9)),
+                    event("segment_alloc", address=1000, size=100, pool=(0, 0)),
+                    event(
+                        "alloc",
+                        address=1000,
+                        size=100,
+                        pool=(0, 0),
+                        frame="era_a2.py",
+                    ),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+        bundle_dir=bundle,
+    )
+
+    for report in (run.lifetimes(), MemoryRun.load(bundle).lifetimes()):
+        transient = next(
+            cohort for cohort in report.cohorts if "transient_b.py" in cohort.stack_key
+        )
+        assert transient.pool_id == (0, 9)
+
+
+def test_transient_with_quiet_agreeing_endpoints_takes_their_pool() -> None:
+    """No covering segment churn: both endpoints testify the same pool."""
+
+    run = make_history_run(
+        [
+            ([segment(active=50, total=100, address=1000, pool=(0, 5))], []),
+            (
+                [segment(active=50, total=100, address=1000, pool=(0, 5))],
+                [
+                    event("alloc", address=1060, size=16, frame="transient.py"),
+                    event(
+                        "free_requested", address=1060, size=16, frame="transient.py"
+                    ),
+                    event(
+                        "free_completed", address=1060, size=16, frame="transient.py"
+                    ),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+    report = run.lifetimes()
+
+    transient = next(
+        cohort for cohort in report.cohorts if "transient.py" in cohort.stack_key
+    )
+    assert transient.pool_id == (0, 5)
+
+
+def test_transient_pool_index_ignores_unrelated_segment_churn() -> None:
+    target = segment(
+        active=0,
+        total=100,
+        address=1000,
+        pool=(0, 5),
+        frame=None,
+    )
+    unrelated = segment(
+        active=0,
+        total=100,
+        address=5000,
+        pool=(0, 7),
+        frame=None,
+    )
+    run = make_history_run(
+        [
+            ([unrelated, target], []),
+            (
+                [unrelated, target],
+                [
+                    event("segment_free", address=5000, size=100),
+                    event("segment_alloc", address=5000, size=100),
+                    event("alloc", address=1040, size=16, frame="transient.py"),
+                    event(
+                        "free_requested",
+                        address=1040,
+                        size=16,
+                        frame="transient.py",
+                    ),
+                    event(
+                        "free_completed",
+                        address=1040,
+                        size=16,
+                        frame="transient.py",
+                    ),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+
+    report = run.lifetimes()
+
+    transient = next(
+        cohort for cohort in report.cohorts if "transient.py" in cohort.stack_key
+    )
+    assert transient.pool_id == (0, 5)
+
+
+def test_quiet_endpoints_with_conflicting_pools_are_a_contradiction() -> None:
+    """Pool disagreement without covering churn is self-contradictory evidence."""
+
+    persistent = segment(active=50, total=100, address=1000)
+    coverage_start = segment(active=0, total=100, address=5000, pool=(0, 3), frame=None)
+    coverage_end = segment(active=0, total=100, address=5000, pool=(0, 7), frame=None)
+    run = make_history_run(
+        [
+            ([persistent, coverage_start], []),
+            (
+                [persistent, coverage_end],
+                [
+                    event("alloc", address=5040, size=16, frame="transient.py"),
+                    event(
+                        "free_requested", address=5040, size=16, frame="transient.py"
+                    ),
+                    event(
+                        "free_completed", address=5040, size=16, frame="transient.py"
+                    ),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+
+    with pytest.raises(MemoryReconciliationError, match="conflicting pools"):
+        run.lifetimes()
+
+
+def test_unmapped_transient_address_without_explanation_is_a_contradiction() -> None:
+    """A birth address invisible at both endpoints needs segment evidence."""
+
+    run = make_history_run(
+        [
+            ([segment(active=64, address=1000)], []),
+            (
+                [segment(active=64, address=1000)],
+                [
+                    event("alloc", address=999000, size=32),
+                    event("free_requested", address=999000, size=32),
+                    event("free_completed", address=999000, size=32),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+
+    with pytest.raises(MemoryReconciliationError, match="no covering segment"):
+        run.lifetimes()
+
+
+def test_expandable_growth_transient_anchors_to_end_pool() -> None:
+    """A page mapped in before birth anchors through the end snapshot."""
+
+    run = make_history_run(
+        [
+            (
+                [
+                    segment(
+                        active=0, total=100, address=1000, frame=None, expandable=True
+                    )
+                ],
+                [],
+            ),
+            (
+                [
+                    segment(
+                        active=0, total=100, address=1000, frame=None, expandable=True
+                    ),
+                    segment(
+                        active=0, total=100, address=5000, frame=None, expandable=True
+                    ),
+                ],
+                [
+                    event("segment_map", address=5000, size=100),
+                    event("alloc", address=5040, size=16, frame="transient.py"),
+                    event(
+                        "free_requested", address=5040, size=16, frame="transient.py"
+                    ),
+                    event(
+                        "free_completed", address=5040, size=16, frame="transient.py"
+                    ),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+    report = run.lifetimes()
+
+    transient = next(
+        cohort for cohort in report.cohorts if "transient.py" in cohort.stack_key
+    )
+    assert transient.pool_id == (0, 0)
+
+
+def test_expandable_partial_shrink_keeps_reservation_witness_alive() -> None:
+    """Unmap/remap crossings are same-owner noise while any witness byte lives."""
+
+    ranges = [
+        segment(active=0, total=100, address=1000, frame=None, expandable=True),
+        segment(active=0, total=100, address=5000, frame=None, expandable=True),
+    ]
+    run = make_history_run(
+        [
+            (list(ranges), []),
+            (
+                list(ranges),
+                [
+                    # The 5000 range shrinks away and regrows: the 1000 range
+                    # keeps the reservation provably alive throughout.
+                    event("segment_unmap", address=5000, size=100),
+                    event("segment_map", address=5000, size=100),
+                    event("alloc", address=5040, size=16, frame="transient.py"),
+                    event(
+                        "free_requested", address=5040, size=16, frame="transient.py"
+                    ),
+                    event(
+                        "free_completed", address=5040, size=16, frame="transient.py"
+                    ),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+    report = run.lifetimes()
+
+    transient = next(
+        cohort for cohort in report.cohorts if "transient.py" in cohort.stack_key
+    )
+    assert transient.pool_id == (0, 0)
+
+
+def test_expandable_full_clear_before_birth_anchors_to_end_pool() -> None:
+    """A reservation whose whole footprint cleared died; only the end testifies."""
+
+    run = make_history_run(
+        [
+            (
+                [
+                    segment(
+                        active=0, total=100, address=1000, frame=None, expandable=True
+                    )
+                ],
+                [],
+            ),
+            (
+                [
+                    segment(
+                        active=0,
+                        total=100,
+                        address=1000,
+                        pool=(0, 7),
+                        frame=None,
+                        expandable=True,
+                    )
+                ],
+                [
+                    event("segment_unmap", address=1000, size=100),
+                    event("segment_map", address=1000, size=100),
+                    event("alloc", address=1040, size=16, frame="transient.py"),
+                    event(
+                        "free_requested", address=1040, size=16, frame="transient.py"
+                    ),
+                    event(
+                        "free_completed", address=1040, size=16, frame="transient.py"
+                    ),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+    report = run.lifetimes()
+
+    transient = next(
+        cohort for cohort in report.cohorts if "transient.py" in cohort.stack_key
+    )
+    assert transient.pool_id == (0, 7)
+
+
+def test_reservation_death_only_invalidates_anchors_across_it() -> None:
+    """A death moment splits the interval: earlier births still anchor start."""
+
+    run = make_history_run(
+        [
+            (
+                [
+                    segment(
+                        active=0, total=100, address=1000, frame=None, expandable=True
+                    )
+                ],
+                [],
+            ),
+            (
+                [
+                    segment(
+                        active=0,
+                        total=100,
+                        address=1000,
+                        pool=(0, 7),
+                        frame=None,
+                        expandable=True,
+                    )
+                ],
+                [
+                    event("alloc", address=1040, size=16, frame="early.py"),
+                    event("free_requested", address=1040, size=16, frame="early.py"),
+                    event("free_completed", address=1040, size=16, frame="early.py"),
+                    event("segment_unmap", address=1000, size=100),
+                    event("segment_map", address=1000, size=100),
+                    event("alloc", address=1040, size=16, frame="late.py"),
+                    event("free_requested", address=1040, size=16, frame="late.py"),
+                    event("free_completed", address=1040, size=16, frame="late.py"),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+    report = run.lifetimes()
+
+    early = next(cohort for cohort in report.cohorts if "early.py" in cohort.stack_key)
+    late = next(cohort for cohort in report.cohorts if "late.py" in cohort.stack_key)
+    assert early.pool_id == (0, 0)
+    assert late.pool_id == (0, 7)
+
+
+def test_unknown_pool_cohort_renders_on_every_report_surface() -> None:
+    # A transient whose segment was itself created and freed within the
+    # interval has no pool coverage at either endpoint; the resulting
+    # ("unknown",) sentinel must render instead of crashing the reports.
+    run = make_history_run(
+        [
+            ([segment(active=64, address=1000)], []),
+            (
+                [segment(active=64, address=1000)],
+                [
+                    event("segment_alloc", address=998976, size=128),
+                    event("alloc", address=999000, size=32),
+                    event("free_requested", address=999000, size=32),
+                    event("free_completed", address=999000, size=32),
+                    event("segment_free", address=998976, size=128),
+                ],
+            ),
+        ],
+        labels=("start", "end"),
+    )
+
+    report = run.lifetimes()
+    transient = next(
+        cohort for cohort in report.cohorts if cohort.pool_id == ("unknown",)
+    )
+    assert transient.pool_label == "pool[unknown]"
+
+    text = report.to_text()
+    assert "pool[unknown]" in text
+    assert "pool[unknown]" in report.to_html()
+    assert any(row["pool_id"] == "pool[unknown]" for row in report.cohort_rows())
+    comparison_text = run.compare(
+        "start", "end", attribution=MemoryAttributionOptions(lifetimes=True)
+    ).to_text()
+    assert "pool[unknown]" in comparison_text
+
+
+def test_transient_pool_attribution_batches_interval_indexes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch_cudagraph_debug.memory_debug.lifetimes as lifetime_module
+
+    query_batches: list[int] = []
+    run_index_builds = 0
+    original_evidence = lifetime_module._segment_action_evidence
+    original_run_index = lifetime_module._build_run_range_index
+
+    def tracked_evidence(history, queries):
+        query_batches.append(len(queries))
+        return original_evidence(history, queries)
+
+    def tracked_run_index(segments):
+        nonlocal run_index_builds
+        run_index_builds += 1
+        return original_run_index(segments)
+
+    monkeypatch.setattr(lifetime_module, "_segment_action_evidence", tracked_evidence)
+    monkeypatch.setattr(lifetime_module, "_build_run_range_index", tracked_run_index)
+
+    transient_count = 128
+    events = []
+    for _ in range(transient_count):
+        events.extend(
+            [
+                event("alloc", address=1024, size=16, frame="transient.py"),
+                event(
+                    "free_requested",
+                    address=1024,
+                    size=16,
+                    frame="transient.py",
+                ),
+                event(
+                    "free_completed",
+                    address=1024,
+                    size=16,
+                    frame="transient.py",
+                ),
+            ]
+        )
+    coverage = segment(active=0, total=4096, address=1000, frame=None)
+    run = make_history_run(
+        [
+            ([coverage], []),
+            ([coverage], events),
+        ],
+        labels=("start", "end"),
+    )
+
+    report = run.lifetimes()
+
+    assert sum(cohort.born_count for cohort in report.cohorts) == transient_count
+    assert query_batches == [transient_count]
+    assert run_index_builds == 2
 
 
 def test_refined_instances_use_one_size_basis_across_all_rows() -> None:

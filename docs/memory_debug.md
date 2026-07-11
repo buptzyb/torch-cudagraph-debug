@@ -510,6 +510,19 @@ neither endpoint snapshot. It
 reports birth, free-request, and free-completion stacks, plus event-derived
 owner-active and allocator-unreusable peaks.
 
+When a transient allocation event carries its own pool ID (PyTorch 2.12+,
+pytorch/pytorch#177717), that reported value is used directly. Otherwise its
+pool is anchored temporally to the birth interval's endpoint snapshots: an
+endpoint testifies only when no covering segment churn separates it from the
+birth. Expandable anchoring treats all mapped ranges with the same (device,
+stream, pool, segment type) key as one reservation-liveness witness. This
+matches normal allocator behavior but is a heuristic: extreme fragmentation
+can create multiple reservations with the same key, and snapshots expose no
+reservation ID. A transient whose unreported-pool era touches neither
+endpoint reports `pool[unknown]`; endpoints that disagree without covering
+churn, or a birth address invisible at an endpoint without a covering segment
+event, raise `MemoryReconciliationError`.
+
 Set `lifetimes=True` in `MemoryAttributionOptions` to embed the same cohort
 summary in a same-run comparison, a timeline, or both same-run change legs of a
 four-point phase comparison. This consumes event history internally but does not

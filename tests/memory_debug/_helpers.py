@@ -16,6 +16,7 @@ def segment(
     frame: str | None = "model.py",
     requested: int | None = None,
     device: int = 0,
+    expandable: bool = False,
 ) -> dict[str, Any]:
     total = active if total is None else total
     requested = active if requested is None else requested
@@ -54,6 +55,7 @@ def segment(
         "allocated_size": active,
         "active_size": active,
         "requested_size": requested,
+        "is_expandable": expandable,
         "blocks": blocks,
     }
 

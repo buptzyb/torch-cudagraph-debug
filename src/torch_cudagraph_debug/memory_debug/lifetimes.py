@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
-from ._pool_ranges import PoolRangeIndex, build_pool_range_index
+from ._pool_identity import pool_id_label
 from ._stack_trace import (
     display_stack,
     normalize_stack_frames,
@@ -255,6 +256,19 @@ class AllocationCohort:
     awaiting_free_at_end_count: int
 
     @property
+    def pool_label(self) -> str:
+        """Human-readable pool label.
+
+        Transient cohorts whose pool cannot be attributed carry the
+        ``("unknown",)`` sentinel, which must render explicitly instead of
+        being coerced into a two-integer pool ID.
+        """
+
+        if self.pool_id == ("unknown",):
+            return "pool[unknown]"
+        return pool_id_label(self.pool_id)
+
+    @property
     def stack_key(self) -> str:
         return stack_key(self.stack_frames)
 
@@ -305,7 +319,7 @@ class AllocationCohort:
             "cohort_id": self.cohort_id,
             "display_rank": self.display_rank,
             "device": "unknown" if self.device is None else self.device,
-            "pool_id": "pool[" + ",".join(str(item) for item in self.pool_id) + "]",
+            "pool_id": self.pool_label,
             "streams": ";".join(f"stream[{item}]" for item in self.streams),
             "stack_key": self.stack_key,
             "stack_fingerprint": self.stack_fingerprint,
@@ -366,6 +380,8 @@ class _AllocationInstance:
     birth_order: int | None = None
     free_request_order: int | None = None
     free_completion_order: int | None = None
+    birth_history: "_IntervalHistory | None" = None
+    birth_entry_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -373,11 +389,12 @@ class _IntervalHistory:
     start: Any
     end: Any
     entries: tuple[AllocatorTraceEntry, ...]
-    pool_ranges: PoolRangeIndex | None
     available: bool
     complete: bool
     warnings: tuple[str, ...]
     causes: tuple[str, ...] = ()
+    start_segments: tuple[Mapping[str, Any], ...] = ()
+    end_segments: tuple[Mapping[str, Any], ...] = ()
 
 
 _REPLAY_WARNING_EXAMPLE_LIMIT = 3
@@ -636,7 +653,6 @@ def _scan_points(
                     )
                 )
             entries = tuple(entry for window in windows for entry in window.entries)
-            pool_ranges = build_pool_range_index(segments, previous_segments)
             available = bool(windows) and all(window.available for window in windows)
             complete = bool(windows) and all(window.complete for window in windows)
             warnings = tuple(
@@ -652,7 +668,6 @@ def _scan_points(
                 causes = ("disabled",)
         else:
             entries = ()
-            pool_ranges = None
             available = False
             complete = False
             warnings = ()
@@ -663,11 +678,12 @@ def _scan_points(
                 start=previous,
                 end=point,
                 entries=entries,
-                pool_ranges=pool_ranges,
                 available=available,
                 complete=complete,
                 warnings=warnings,
                 causes=causes,
+                start_segments=tuple(previous_segments),
+                end_segments=tuple(segments),
             )
         )
         previous = point
@@ -797,7 +813,7 @@ def _track_instances(
         current[key] = item
 
     for history in histories:
-        for entry in history.entries:
+        for entry_index, entry in enumerate(history.entries):
             event_order += 1
             if entry.addr is None or entry.action not in ALLOCATION_LIFETIME_ACTIONS:
                 continue
@@ -875,7 +891,7 @@ def _track_instances(
                 assert key is not None
                 current.pop(key, None)
             size = abs(entry.size_bytes)
-            pool_id = _event_pool_id(entry, history.pool_ranges)
+            pool_id = entry.pool_id if entry.pool_id is not None else ("unknown",)
             frames = normalize_stack_frames(entry.frames)
             birth = CohortBirth(
                 start_index=_state_index(history.start),
@@ -899,6 +915,8 @@ def _track_instances(
                 snapshot_confirmed=False,
                 birth=birth,
                 birth_order=event_order,
+                birth_history=history,
+                birth_entry_index=entry_index,
             )
             instances.append(item)
             current[(entry.device_index, entry.addr)] = item
@@ -987,6 +1005,56 @@ def _track_instances(
             if block.address is not None:
                 next_current[(block.device, block.address)] = item
         current = next_current
+
+    # Snapshot-observed instances take their pool from block ground truth;
+    # transients were never observed, so anchor their pool temporally to the
+    # endpoint snapshots of their birth interval.
+    pending_attribution: dict[
+        int, tuple[_IntervalHistory, list[_AllocationInstance]]
+    ] = {}
+    for instance in instances:
+        if instance.pool_id != ("unknown",) or instance.observations:
+            continue
+        if instance.birth_history is None or instance.birth_entry_index is None:
+            continue
+        history = instance.birth_history
+        pending_attribution.setdefault(id(history), (history, []))[1].append(instance)
+
+    for history, pending in pending_attribution.values():
+        run_indexes = (
+            _build_run_range_index(history.start_segments),
+            _build_run_range_index(history.end_segments),
+        )
+        action_evidence = _segment_action_evidence(
+            history,
+            tuple(
+                (
+                    instance.birth_entry_index,
+                    history.entries[instance.birth_entry_index],
+                )
+                for instance in pending
+                if instance.birth_entry_index is not None
+            ),
+        )
+        witness_cache: dict[tuple[str, tuple[Any, ...]], int | None] = {}
+        for instance in pending:
+            assert instance.birth_entry_index is not None
+            entry_index = instance.birth_entry_index
+            entry = history.entries[entry_index]
+            pool_id, pool_contradictions = _attribute_event_pool(
+                entry,
+                entry_index,
+                history,
+                witness_cache,
+                action_evidence[entry_index],
+                run_indexes,
+            )
+            for kind in pool_contradictions:
+                record_contradiction(
+                    kind, device=entry.device_index, address=entry.addr
+                )
+            instance.pool_id = pool_id
+
     return instances, _format_contradictions(contradiction_groups)
 
 
@@ -1044,6 +1112,16 @@ _CONTRADICTION_TEMPLATES = {
     ),
     "allocation_stack_contradiction": (
         "{count} tracked allocation(s) on {device} changed allocation stack"
+    ),
+    "pool_identity_contradiction": (
+        "{count} transient allocation(s) on {device} saw both interval "
+        "endpoints claim their address with conflicting pools despite no "
+        "covering segment churn"
+    ),
+    "unexplained_mapping_gap": (
+        "{count} transient allocation(s) on {device} were born at addresses "
+        "with no covering segment at an interval endpoint and no covering "
+        "segment event explaining the gap"
     ),
     "block_without_address": ("{count} active block(s) on {device} carried no address"),
 }
@@ -1234,15 +1312,338 @@ def _refine_instance_from_block(
         )
 
 
-def _event_pool_id(
+_SEGMENT_SCOPE_ACTIONS = frozenset(
+    {"segment_alloc", "segment_free", "segment_map", "segment_unmap"}
+)
+_HARD_CHURN_ACTIONS = frozenset({"segment_alloc", "segment_free"})
+_START_GAP_EXPLANATIONS = frozenset({"segment_map", "segment_alloc"})
+_END_GAP_EXPLANATIONS = frozenset({"segment_unmap", "segment_free"})
+
+
+@dataclass(frozen=True)
+class _RunRangeIndex:
+    starts_by_device: Mapping[int | None, tuple[int, ...]]
+    runs_by_device: Mapping[int | None, tuple[Mapping[str, Any], ...]]
+
+    def find(self, device: int | None, address: int) -> Mapping[str, Any] | None:
+        starts = self.starts_by_device.get(device)
+        runs = self.runs_by_device.get(device)
+        if not starts or not runs:
+            return None
+        index = bisect_right(starts, address) - 1
+        if index < 0:
+            return None
+        run = runs[index]
+        size = run.get("total_size")
+        if not isinstance(size, int) or address >= starts[index] + size:
+            return None
+        return run
+
+
+def _build_run_range_index(
+    segments: Sequence[Mapping[str, Any]],
+) -> _RunRangeIndex:
+    runs_by_device: defaultdict[
+        int | None, list[tuple[int, int, Mapping[str, Any]]]
+    ] = defaultdict(list)
+    for ordinal, run in enumerate(segments):
+        base = run.get("address")
+        size = run.get("total_size")
+        if not isinstance(base, int) or not isinstance(size, int) or size <= 0:
+            continue
+        runs_by_device[run.get("device")].append((base, ordinal, run))
+    ordered = {
+        device: tuple(item[2] for item in sorted(items))
+        for device, items in runs_by_device.items()
+    }
+    return _RunRangeIndex(
+        starts_by_device={
+            device: tuple(int(run["address"]) for run in runs)
+            for device, runs in ordered.items()
+        },
+        runs_by_device=ordered,
+    )
+
+
+def _segment_action_evidence(
+    history: _IntervalHistory,
+    queries: Sequence[tuple[int, AllocatorTraceEntry]],
+) -> dict[int, tuple[frozenset[str], frozenset[str]]]:
+    """Index segment actions covering each queried birth before and after it.
+
+    Queries are answered offline per device and action. A Fenwick difference
+    tree range-adds event coverage over the sorted birth addresses, avoiding a
+    complete trace scan for every transient allocation.
+    """
+
+    evidence: dict[int, tuple[set[str], set[str]]] = {
+        entry_index: (set(), set()) for entry_index, _entry in queries
+    }
+    queries_by_device: defaultdict[int, list[tuple[int, int]]] = defaultdict(list)
+    for entry_index, entry in queries:
+        assert entry.addr is not None
+        queries_by_device[entry.device_index].append((entry_index, entry.addr))
+
+    events_by_device_action: defaultdict[
+        tuple[int, str], list[tuple[int, AllocatorTraceEntry]]
+    ] = defaultdict(list)
+    for event_index, entry in enumerate(history.entries):
+        if entry.action in _SEGMENT_SCOPE_ACTIONS:
+            events_by_device_action[(entry.device_index, entry.action)].append(
+                (event_index, entry)
+            )
+
+    for device, device_queries in queries_by_device.items():
+        addresses = sorted({address for _index, address in device_queries})
+        address_index = {address: index for index, address in enumerate(addresses)}
+        ascending_queries = sorted(device_queries)
+        descending_queries = list(reversed(ascending_queries))
+
+        def add_event(bit: list[int], entry: AllocatorTraceEntry) -> None:
+            if entry.addr is None or entry.size_bytes <= 0:
+                low, high = 0, len(addresses)
+            else:
+                low = bisect_left(addresses, entry.addr)
+                high = bisect_left(addresses, entry.addr + entry.size_bytes)
+            if low >= high:
+                return
+            _fenwick_add(bit, low, 1)
+            _fenwick_add(bit, high, -1)
+
+        for action in _SEGMENT_SCOPE_ACTIONS:
+            events = events_by_device_action.get((device, action), ())
+            if not events:
+                continue
+
+            bit = [0] * (len(addresses) + 2)
+            event_cursor = 0
+            for entry_index, address in ascending_queries:
+                while (
+                    event_cursor < len(events) and events[event_cursor][0] < entry_index
+                ):
+                    add_event(bit, events[event_cursor][1])
+                    event_cursor += 1
+                if _fenwick_point(bit, address_index[address]) > 0:
+                    evidence[entry_index][0].add(action)
+
+            bit = [0] * (len(addresses) + 2)
+            event_cursor = len(events) - 1
+            for entry_index, address in descending_queries:
+                while event_cursor >= 0 and events[event_cursor][0] > entry_index:
+                    add_event(bit, events[event_cursor][1])
+                    event_cursor -= 1
+                if _fenwick_point(bit, address_index[address]) > 0:
+                    evidence[entry_index][1].add(action)
+
+    return {
+        entry_index: (frozenset(before), frozenset(after))
+        for entry_index, (before, after) in evidence.items()
+    }
+
+
+def _fenwick_add(bit: list[int], index: int, delta: int) -> None:
+    index += 1
+    while index < len(bit):
+        bit[index] += delta
+        index += index & -index
+
+
+def _fenwick_point(bit: Sequence[int], index: int) -> int:
+    total = 0
+    index += 1
+    while index:
+        total += bit[index]
+        index -= index & -index
+    return total
+
+
+def _run_witness_key(run: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        run.get("device"),
+        run.get("stream"),
+        normalize_pool_id(run.get("segment_pool_id")),
+        run.get("segment_type"),
+    )
+
+
+def _clip_to_universe(
+    universe: Sequence[tuple[int, int]], low: int, high: int
+) -> list[tuple[int, int]]:
+    clipped = []
+    for begin, end in universe:
+        lo = max(begin, low)
+        hi = min(end, high)
+        if lo < hi:
+            clipped.append((lo, hi))
+    return clipped
+
+
+def _subtract_interval(
+    mapped: list[tuple[int, int]], low: int, high: int
+) -> list[tuple[int, int]]:
+    result = []
+    for begin, end in mapped:
+        if high <= begin or end <= low:
+            result.append((begin, end))
+            continue
+        if begin < low:
+            result.append((begin, low))
+        if high < end:
+            result.append((high, end))
+    return result
+
+
+def _add_intervals(
+    mapped: list[tuple[int, int]], pieces: Sequence[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    merged = sorted([*mapped, *pieces])
+    result: list[tuple[int, int]] = []
+    for begin, end in merged:
+        if result and begin <= result[-1][1]:
+            result[-1] = (result[-1][0], max(result[-1][1], end))
+        else:
+            result.append((begin, end))
+    return result
+
+
+def _witness_death_index(
+    history: _IntervalHistory,
+    side: str,
+    key: tuple[Any, ...],
+) -> int | None:
+    """First event index at which the reservation's witnessed footprint is
+    empty, walking forward from the start snapshot or backward from the end.
+
+    The witness universe is every expandable mapped range sharing the anchor
+    run's (device, stream, pool, segment_type) key. The native allocator
+    normally grows one reservation per key, so a surviving same-key range is
+    useful liveness evidence. Under extreme fragmentation it may create more
+    than one reservation with the same key, while snapshots expose no
+    reservation ID; this witness can then conflate them. Bytes mapped outside
+    the universe cannot be credited, so an empty witness remains a
+    conservative death verdict.
+    """
+
+    device = key[0]
+    segments = history.start_segments if side == "start" else history.end_segments
+    universe = []
+    for run in segments:
+        if not run.get("is_expandable"):
+            continue
+        if _run_witness_key(run) != key:
+            continue
+        base = run.get("address")
+        size = run.get("total_size")
+        if isinstance(base, int) and isinstance(size, int) and size > 0:
+            universe.append((base, base + size))
+    if not universe:
+        return None
+    universe = _add_intervals([], universe)
+    mapped = list(universe)
+
+    indices: Sequence[int]
+    if side == "start":
+        indices = range(len(history.entries))
+    else:
+        indices = range(len(history.entries) - 1, -1, -1)
+    for index in indices:
+        entry = history.entries[index]
+        if entry.action not in ("segment_map", "segment_unmap"):
+            continue
+        if entry.device_index != device:
+            continue
+        if entry.addr is None or entry.size_bytes <= 0:
+            return index
+        low, high = entry.addr, entry.addr + entry.size_bytes
+        pieces = _clip_to_universe(universe, low, high)
+        if not pieces:
+            continue
+        # Walking backward, undoing a forward map removes the region and
+        # undoing a forward unmap restores it.
+        removes = entry.action == "segment_unmap"
+        if side == "end":
+            removes = not removes
+        if removes:
+            mapped = _subtract_interval(mapped, low, high)
+        else:
+            mapped = _add_intervals(mapped, pieces)
+        if not mapped:
+            return index
+    return None
+
+
+def _attribute_event_pool(
     entry: AllocatorTraceEntry,
-    pool_ranges: PoolRangeIndex | None,
-) -> tuple[Any, ...]:
+    entry_index: int,
+    history: _IntervalHistory,
+    witness_cache: dict[tuple[str, tuple[Any, ...]], int | None],
+    action_evidence: tuple[frozenset[str], frozenset[str]],
+    run_indexes: tuple[_RunRangeIndex, _RunRangeIndex],
+) -> tuple[tuple[Any, ...], tuple[str, ...]]:
+    """Attribute a pool to an event-born allocation by temporal anchoring.
+
+    An endpoint snapshot can testify about the allocation's birth mapping
+    only when no covering segment churn separates them; expandable coverage
+    additionally requires the reservation's witnessed footprint to stay
+    alive across the span. Trace entries that carry their own pool ID
+    short-circuit everything.
+    """
+
     if entry.pool_id is not None:
-        return entry.pool_id
-    if entry.addr is None or pool_ranges is None:
-        return ("unknown",)
-    return pool_ranges.find(entry.device_index, entry.addr) or ("unknown",)
+        return entry.pool_id, ()
+    if entry.addr is None:
+        return ("unknown",), ()
+    device = entry.device_index
+    address = entry.addr
+
+    def side_state(side: str) -> tuple[str, tuple[Any, ...] | None]:
+        covering_actions = action_evidence[0 if side == "start" else 1]
+        run = run_indexes[0 if side == "start" else 1].find(device, address)
+        if run is None:
+            explanations = (
+                _START_GAP_EXPLANATIONS if side == "start" else _END_GAP_EXPLANATIONS
+            )
+            if covering_actions & explanations:
+                return "abstain", None
+            return "contradiction", None
+        if covering_actions & _HARD_CHURN_ACTIONS:
+            return "invalid", None
+        pool = normalize_pool_id(run.get("segment_pool_id"))
+        if run.get("is_expandable"):
+            key = _run_witness_key(run)
+            cache_key = (side, key)
+            if cache_key not in witness_cache:
+                witness_cache[cache_key] = _witness_death_index(history, side, key)
+            death = witness_cache[cache_key]
+            if death is not None and (
+                death < entry_index if side == "start" else death > entry_index
+            ):
+                return "invalid", None
+            return "valid", pool
+        if covering_actions:
+            # map/unmap over a non-expandable run cannot occur in honest
+            # evidence; degrade conservatively instead of guessing.
+            return "invalid", None
+        return "valid", pool
+
+    start_state, start_pool = side_state("start")
+    end_state, end_pool = side_state("end")
+    contradictions = []
+    if "contradiction" in (start_state, end_state):
+        contradictions.append("unexplained_mapping_gap")
+    if start_state == "valid" and end_state == "valid":
+        if start_pool == end_pool:
+            assert start_pool is not None
+            return start_pool, tuple(contradictions)
+        contradictions.append("pool_identity_contradiction")
+        return ("unknown",), tuple(contradictions)
+    if start_state == "valid":
+        assert start_pool is not None
+        return start_pool, tuple(contradictions)
+    if end_state == "valid":
+        assert end_pool is not None
+        return end_pool, tuple(contradictions)
+    return ("unknown",), tuple(contradictions)
 
 
 def _transition_from_event(
