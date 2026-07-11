@@ -548,7 +548,9 @@ is required.
 ## Operational Constraints
 
 - Linux, CUDA, and the compiled native extension are required for enabled
-  tensor probes.
+  tensor probes. Installs made with `TCGD_NO_TENSOR_COLLECTION=1` omit the
+  extension: they cannot collect tensors from a live process, but they load
+  and compare tensor bundles offline exactly like a full install.
 - Every enabled probe adds one small device counter allocation and one
   single-thread increment kernel to its captured graph.
 - `PrintAction` and `CheckAction` host callbacks can create large GPU bubbles

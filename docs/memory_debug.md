@@ -12,6 +12,11 @@ multi-rank workflows. For exact signatures, see the
 [API reference](api.md#memory-debug); for runnable programs, follow the
 [Memory Debug examples](../examples/memory_debug/README.md).
 
+The whole memory domain is pure Python: it never uses the compiled native
+extension, so collection and analysis work identically on installs made with
+`TCGD_NO_TENSOR_COLLECTION=1`. Collection requires a CUDA-enabled PyTorch at
+runtime; every analysis below also runs on CPU-only machines.
+
 ## Choose An Analysis
 
 | Question | API | Allocator history for the base result |

@@ -53,6 +53,19 @@ python -m twine check dist/*
 git diff --check   # uncommitted whitespace/conflict markers only
 ```
 
+Verify the no-tensor-collection install from the fresh sdist in a clean
+virtual environment (CI runs the same gate on every pull request):
+
+```bash
+python -m venv /tmp/tcgd-ntc-venv && . /tmp/tcgd-ntc-venv/bin/activate
+python -m pip install --upgrade pip
+TCGD_NO_TENSOR_COLLECTION=1 python -m pip install dist/*.tar.gz
+python -c "from torch_cudagraph_debug import _native; assert not _native.extension_available()"
+python -m pip install -r requirements-dev.txt numpy
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 python -m pytest -q tests
+deactivate
+```
+
 Inspect the sdist and confirm it contains package sources, C++ and CUDA
 sources (including `replay_counter.cu`), tests, examples, and public docs, with
 no runtime output or cache directories.
@@ -223,6 +236,36 @@ python -m torch.distributed.run --standalone --nproc-per-node=2 \
 NPROC_PER_NODE=2 bash \
   "${TCGD_REPO_ROOT}/examples/memory_debug/cli/workflows.sh" \
   distributed "${EXAMPLE_ROOT}/cli-distributed"
+```
+
+Still on the GPU node, verify the no-tensor-collection install: memory
+collection must work end to end against real CUDA allocations, and enabled
+tensor collection must fail with the typed error. Use a separate virtual
+environment so the full install stays untouched:
+
+```bash
+python -m venv /tmp/tcgd-ntc-gpu-venv && . /tmp/tcgd-ntc-gpu-venv/bin/activate
+python -m pip install --upgrade pip "setuptools>=77.0.3" wheel
+python -m pip install numpy torch
+TCGD_NO_TENSOR_COLLECTION=1 python -m pip install \
+  --no-build-isolation "${TCGD_SDIST}"
+python -c "from torch_cudagraph_debug import _native; assert not _native.extension_available()"
+python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/quickstart.py"
+python - <<'EOF'
+import torch
+from torch_cudagraph_debug import NativeExtensionUnavailableError
+from torch_cudagraph_debug.tensor_debug import RecordAction, TensorProbe
+
+try:
+    probe = TensorProbe("hidden", [RecordAction()])
+    with torch.cuda.graph(torch.cuda.CUDAGraph()):
+        probe(torch.ones(4, device="cuda"), name="hidden")
+except NativeExtensionUnavailableError as exc:
+    assert "TCGD_NO_TENSOR_COLLECTION" in str(exc)
+else:
+    raise AssertionError("tensor collection unexpectedly succeeded")
+EOF
+deactivate
 ```
 
 ## PyTorch Compatibility Gate

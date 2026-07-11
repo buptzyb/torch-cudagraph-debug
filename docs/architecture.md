@@ -173,6 +173,13 @@ instead. Memory collection is device-aware: device index is part of pool and
 observation identity, and one Probe or Recorder may select one device, a device
 sequence, or all visible devices.
 
+The compiled `_C` extension backs tensor collection only; every other surface —
+memory collection and analysis, tensor bundle loading and comparison, and both
+CLIs — is pure Python. Setting `TCGD_NO_TENSOR_COLLECTION=1` at install time
+skips building the extension, producing an install where `_native`
+deliberately reports the extension as unavailable and enabled tensor
+collection raises `NativeExtensionUnavailableError`; nothing else changes.
+
 Each memory capture also attempts one `torch.cuda.mem_get_info` sample per
 selected device immediately after `_snapshot()` and before CPU normalization.
 The calls are consecutive but not atomic. Sampling is attempted during CUDA

@@ -92,3 +92,13 @@ jobs:
           tar -xzf dist/*.tar.gz -C /tmp/sdist-check
           cd /tmp/sdist-check/torch_cudagraph_debug-*
           python -m pytest -q tests
+
+      - name: Verify the no-tensor-collection install from the sdist
+        run: |
+          python -m venv /tmp/ntc-venv
+          . /tmp/ntc-venv/bin/activate
+          python -m pip install --upgrade pip
+          TCGD_NO_TENSOR_COLLECTION=1 python -m pip install dist/*.tar.gz
+          python -c "from torch_cudagraph_debug import _native; assert not _native.extension_available()"
+          python -m pip install -r requirements-dev.txt numpy
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 python -m pytest -q tests

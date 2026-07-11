@@ -66,6 +66,21 @@ python -m pip install --no-build-isolation \
 
 Tensor Debug uses the native extension built during source installation.
 
+On machines without a CUDA toolchain — a laptop used for offline bundle
+analysis, or a container that only needs memory diagnostics — skip the
+compiled extension entirely:
+
+```bash
+TCGD_NO_TENSOR_COLLECTION=1 python -m pip install --no-build-isolation .
+```
+
+Such an install needs no compiler and no CUDA-enabled PyTorch at build time.
+Memory collection and analysis stay fully available (collection still requires
+a CUDA-enabled PyTorch at runtime), and tensor bundles remain loadable and
+comparable offline; collecting tensors from a live process (`TensorProbe` and
+`TensorRecorder` capture) is the only capability omitted, and it raises a
+`NativeExtensionUnavailableError` that states the reason.
+
 ## Tensor Quick Start
 
 Insert a probe at intermediate tensors inside a captured dataflow. This example

@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import sys
 
 from setuptools import setup
@@ -42,18 +43,29 @@ def get_extensions():
     if is_metadata_command():
         return [], {}
 
+    if os.environ.get("TCGD_NO_TENSOR_COLLECTION") == "1":
+        return [], {}
+
     try:
         import torch
         from torch.utils.cpp_extension import BuildExtension, CUDAExtension
     except Exception as exc:  # pragma: no cover - exercised during package build only.
         raise RuntimeError(
             "torch-cudagraph-debug requires PyTorch at build time. Install a CUDA-enabled "
-            "PyTorch first, then install this package with build isolation disabled if needed."
+            "PyTorch first, then install this package with build isolation disabled "
+            "(`pip install --no-build-isolation torch-cudagraph-debug`). To install "
+            "without tensor collection instead, set TCGD_NO_TENSOR_COLLECTION=1 during "
+            "installation: memory collection and analysis stay fully available, and "
+            "tensor bundles remain loadable and comparable offline."
         ) from exc
 
     if not torch.cuda._is_compiled():
         raise RuntimeError(
-            "torch-cudagraph-debug must be built against a CUDA-enabled PyTorch installation."
+            "torch-cudagraph-debug must be built against a CUDA-enabled PyTorch "
+            "installation for tensor collection. Set TCGD_NO_TENSOR_COLLECTION=1 "
+            "during installation to skip the compiled extension: memory collection "
+            "and analysis stay fully available, and tensor bundles remain loadable "
+            "and comparable offline."
         )
 
     root = Path(__file__).parent

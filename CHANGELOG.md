@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `TCGD_NO_TENSOR_COLLECTION=1` at install time skips building the compiled
+  extension, so machines without a CUDA toolchain can install the package.
+  Memory collection and analysis stay fully available, and tensor bundles
+  remain loadable and comparable offline; collecting tensors from a live
+  process is the only capability omitted. The build-time errors and
+  `NativeExtensionUnavailableError` now name the variable and the remaining
+  capabilities.
+
 ## v0.2.0 - 2026-07-11
 
 This release rebuilds the tensor-debug domain and introduces the

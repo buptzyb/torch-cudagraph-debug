@@ -131,6 +131,12 @@ native probe creation. If every action has `enabled=False`, the probe is a
 pure no-op: it does not load the native extension, initialize CUDA, or allocate
 a replay counter.
 
+Enabled probes require the compiled native extension. On installs made with
+`TCGD_NO_TENSOR_COLLECTION=1` the extension is omitted, and creating an
+enabled probe or recording live tensors raises
+`NativeExtensionUnavailableError`; memory collection and analysis and offline
+tensor bundle analysis are unaffected.
+
 Every enabled probe owns a zero-dimensional CUDA `int64` replay counter on
 `device`, or on the current CUDA device when `device=None`. An integer device
 index is accepted. Every active source tensor must be on the same device.
