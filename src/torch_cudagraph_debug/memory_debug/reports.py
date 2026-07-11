@@ -174,6 +174,12 @@ class MemoryAllocationLifetimeAnalysis:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        """Render the cohort report as text.
+
+        ``limit`` and ``stack_depth`` are presentation-only overrides of the
+        stored display defaults and raise ValueError when not integers >= 1.
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -260,6 +266,8 @@ class MemoryAllocationLifetimeAnalysis:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
+        """Return the complete JSON payload; display limits never truncate it."""
+
         return {
             "schema": REPORT_SCHEMA,
             "kind": "allocation-lifetime-analysis",
@@ -293,6 +301,8 @@ class MemoryAllocationLifetimeAnalysis:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        """Render the cohort report as HTML using the text display rules."""
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -363,6 +373,13 @@ class MemoryAllocationLifetimeAnalysis:
         stack_depth: int | None = None,
         overwrite: bool = False,
     ) -> dict[str, Path]:
+        """Write text, JSON, HTML, and CSV artifacts into ``output_dir``.
+
+        Returns a mapping of artifact kind to path and refuses a non-empty
+        directory unless ``overwrite=True``. Display limits shape text and
+        HTML only; JSON and CSV rows are never truncated.
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -660,6 +677,15 @@ class _MemoryStateComparison:
         stack_depth: int | None = None,
         depth: TreeDepth | None = None,
     ) -> str:
+        """Render the comparison as text.
+
+        ``include_unchanged=False`` drops unchanged device/pool/stream rows.
+        ``depth`` truncates the rendered tree at "device", "pool", or
+        "stream" (ValueError otherwise); ``limit`` and ``stack_depth``
+        override the stored display defaults and raise ValueError when not
+        integers >= 1.
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -722,6 +748,8 @@ class _MemoryStateComparison:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
+        """Return the complete JSON payload; display options never filter it."""
+
         return {
             "schema": REPORT_SCHEMA,
             "kind": self._COMPARISON_KIND,
@@ -775,6 +803,8 @@ class _MemoryStateComparison:
         stack_depth: int | None = None,
         depth: TreeDepth | None = None,
     ) -> str:
+        """Render the comparison as HTML using the text display rules."""
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -881,6 +911,14 @@ class _MemoryStateComparison:
         depth: TreeDepth | None = None,
         overwrite: bool = False,
     ) -> dict[str, Path]:
+        """Write text, JSON, HTML, and CSV artifacts into ``output_dir``.
+
+        Returns a mapping of artifact kind to path and refuses a non-empty
+        directory unless ``overwrite=True``. ``include_unchanged`` also
+        filters CSV rows; ``limit``/``stack_depth``/``depth`` shape text and
+        HTML only, and JSON is never truncated.
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -977,6 +1015,9 @@ class MemoryTimeline:
 
     @property
     def warnings(self) -> tuple[str, ...]:
+        """Point warnings prefixed with their point index and label, plus
+        deduplicated comparison and lifetime warnings."""
+
         point_warning_values = {
             warning for point in self.run.points for warning in point.warnings
         }
@@ -1059,6 +1100,14 @@ class MemoryTimeline:
         stack_depth: int | None = None,
         depth: TreeDepth | None = None,
     ) -> str:
+        """Render every point as text.
+
+        ``include_unchanged=False`` drops unchanged rows, ``depth`` truncates
+        the rendered tree at "device", "pool", or "stream" (ValueError
+        otherwise), and ``limit``/``stack_depth`` override the stored display
+        defaults (ValueError when not integers >= 1).
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -1121,6 +1170,8 @@ class MemoryTimeline:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
+        """Return the complete JSON payload; display options never filter it."""
+
         return {
             "schema": REPORT_SCHEMA,
             "kind": "timeline",
@@ -1153,6 +1204,8 @@ class MemoryTimeline:
         stack_depth: int | None = None,
         depth: TreeDepth | None = None,
     ) -> str:
+        """Render the timeline as HTML using the text display rules."""
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -1302,6 +1355,13 @@ class MemoryTimeline:
         depth: TreeDepth | None = None,
         overwrite: bool = False,
     ) -> dict[str, Path]:
+        """Write text, JSON, HTML, and CSV artifacts into ``output_dir``.
+
+        Returns a mapping of artifact kind to path and refuses a non-empty
+        directory unless ``overwrite=True``. ``include_unchanged`` also
+        filters CSV rows; JSON is never truncated by display options.
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -1423,6 +1483,13 @@ class MemoryPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        """Render the four-point phase equations as text.
+
+        ``include_unchanged=False`` drops unchanged rows; ``limit`` and
+        ``stack_depth`` override the stored display defaults and raise
+        ValueError when not integers >= 1.
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -1504,6 +1571,8 @@ class MemoryPhaseComparison:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
+        """Return the complete JSON payload; display options never filter it."""
+
         return {
             "schema": REPORT_SCHEMA,
             "kind": "phase-comparison",
@@ -1532,6 +1601,8 @@ class MemoryPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        """Render the phase comparison as HTML using the text display rules."""
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -1667,6 +1738,13 @@ class MemoryPhaseComparison:
         stack_depth: int | None = None,
         overwrite: bool = False,
     ) -> dict[str, Path]:
+        """Write text, JSON, HTML, and CSV artifacts into ``output_dir``.
+
+        Returns a mapping of artifact kind to path and refuses a non-empty
+        directory unless ``overwrite=True``. ``include_unchanged`` also
+        filters CSV rows; JSON is never truncated by display options.
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -1837,6 +1915,8 @@ class MemoryRunGroupSummary:
     warnings: tuple[str, ...] = ()
 
     def to_text(self) -> str:
+        """Render per-point cross-rank extrema as text, never summing GPUs."""
+
         lines = [
             f"Memory run group summary {self.run_group.name!r} "
             f"ranks={list(self.run_group.ranks)}",
@@ -1876,6 +1956,8 @@ class MemoryRunGroupSummary:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
+        """Return the complete JSON payload with every metric row."""
+
         return {
             "schema": REPORT_SCHEMA,
             "kind": "run-group-summary",
@@ -1888,6 +1970,8 @@ class MemoryRunGroupSummary:
         }
 
     def to_html(self) -> str:
+        """Render cross-rank and per-rank state tables as HTML."""
+
         aggregate_rows = [
             item.to_dict()
             for item in self.point_aggregates
@@ -1934,6 +2018,12 @@ class MemoryRunGroupSummary:
         *,
         overwrite: bool = False,
     ) -> dict[str, Path]:
+        """Write text, JSON, HTML, and CSV artifacts into ``output_dir``.
+
+        Returns a mapping of artifact kind to path and refuses a non-empty
+        directory unless ``overwrite=True``.
+        """
+
         root, paths = _write_report_documents(
             output_dir,
             overwrite=overwrite,
@@ -2015,6 +2105,13 @@ class MemoryRunGroupPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        """Render cross-rank phase skew and per-rank attribution as text.
+
+        ``include_unchanged=False`` drops unchanged rows; ``limit`` and
+        ``stack_depth`` override the stored display defaults and raise
+        ValueError when not integers >= 1.
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -2082,6 +2179,8 @@ class MemoryRunGroupPhaseComparison:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
+        """Return the complete JSON payload; display options never filter it."""
+
         return {
             "schema": REPORT_SCHEMA,
             "kind": "run-group-phase-comparison",
@@ -2112,6 +2211,8 @@ class MemoryRunGroupPhaseComparison:
         limit: int | None = None,
         stack_depth: int | None = None,
     ) -> str:
+        """Render the group comparison as HTML using the text display rules."""
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,
@@ -2212,6 +2313,13 @@ class MemoryRunGroupPhaseComparison:
         stack_depth: int | None = None,
         overwrite: bool = False,
     ) -> dict[str, Path]:
+        """Write text, JSON, HTML, and CSV artifacts into ``output_dir``.
+
+        Returns a mapping of artifact kind to path and refuses a non-empty
+        directory unless ``overwrite=True``. ``include_unchanged`` also
+        filters CSV rows; JSON is never truncated by display options.
+        """
+
         limit, stack_depth = _resolve_display_options(
             default_limit=self.display_limit,
             default_stack_depth=self.display_stack_depth,

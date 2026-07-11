@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 - 2026-07-09
+## v0.2.0 - 2026-07-10
 
 This release rebuilds the tensor-debug domain and introduces the
 memory-debug domain.
@@ -73,8 +73,8 @@ memory-debug domain.
 - Optional live-allocation stack attribution with explicit partial coverage,
   plus strict marker-delimited allocator-event attribution and typed unavailable,
   boundary, truncated, and reconciliation failures. OOM trace entries keep the
-  device free-byte count in `device_free_bytes` instead of `addr` and report
-  pool-attribution confidence `not_applicable`.
+  device free-byte count in `device_free_bytes` instead of `addr`, report
+  pool-attribution confidence `not_applicable`, and render as `pool[n/a]`.
 - Allocation cohort lifetime analysis requiring complete allocator event history,
   with address-reuse generation splitting,
   owner-active versus awaiting-free point states, event-backed birth,
@@ -98,6 +98,9 @@ memory-debug domain.
   phase and rank reports, and `--device-map` CLI forms.
 - Rank-local provenance and application-owned metadata plus `MemoryRunGroup`
   summary and rank-paired phase analysis without summing memory across GPUs.
+  Group phase comparison skips an incomplete rank that lacks a requested
+  endpoint with a warning and fails only when no common rank contains the
+  complete phase.
 - Canonical gzip JSON run bundles with atomic writes, exact manifest fields,
   point-owned `states/NNNN.json.gz` allocator state, adjacent
   `events/NNNN-NNNN.json.gz` evidence, independent lazy caches, strict JSON

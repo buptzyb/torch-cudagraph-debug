@@ -82,25 +82,35 @@ class MemoryProbeSnapshot:
 
     @cached_property
     def by_key(self) -> Mapping[MemoryObservationKey, MemoryObservation]:
+        """Observations keyed by (device, pool, stream) identity."""
+
         return MappingProxyType({item.key: item for item in self.observations})
 
     @cached_property
     def observation_stats(self) -> Mapping[MemoryObservationKey, MemoryStats]:
+        """Absolute stats per (device, pool, stream) observation key."""
+
         return MappingProxyType(
             {key: observation.stats for key, observation in self.by_key.items()}
         )
 
     @cached_property
     def pool_stats(self) -> Mapping[MemoryPoolKey, MemoryStats]:
+        """Per-pool stats with stream observations summed into pools."""
+
         return MappingProxyType(summarize_pools(self.observation_stats))
 
     @cached_property
     def allocator_scope_stats(self) -> Mapping[AllocatorScope, MemoryStats]:
+        """All/default/private rollups of the pool stats."""
+
         return MappingProxyType(summarize_allocator_scopes(self.pool_stats))
 
     def observation(
         self, device_index: int, pool_id: Any, stream: Any
     ) -> MemoryObservation:
+        """Look up one observation; raises KeyError when absent."""
+
         key = MemoryObservationKey(device_index, pool_id, stream)
         try:
             return self.by_key[key]
@@ -112,6 +122,8 @@ class MemoryProbeSnapshot:
 
     @property
     def allocator_settings(self) -> Mapping[str, FrozenJSONValue]:
+        """Allocator settings from the state payload, empty when absent."""
+
         raw = self.allocator_state()
         if not isinstance(raw, Mapping):
             return MappingProxyType({})
@@ -142,6 +154,8 @@ class MemoryProbeSnapshot:
         return cast(FrozenJSONValue, self._raw_snapshot)
 
     def descriptor(self) -> dict[str, object]:
+        """Return a JSON-serializable identity and device-memory summary."""
+
         return {
             "probe_id": self.probe_id,
             "probe_name": self.probe_name,

@@ -19,6 +19,8 @@ from .run_groups import TensorRunGroup, compare_run_groups
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the ``tcgd-tensor`` argument parser."""
+
     parser = argparse.ArgumentParser(
         prog="tcgd-tensor",
         description="Inspect and compare torch-cudagraph-debug tensor bundles.",
@@ -160,6 +162,12 @@ def _point_mapping(values: Sequence[str]) -> dict[str, str] | None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the tensor CLI and return its exit code.
+
+    Returns 0 on success, 1 when a comparison result is a mismatch or
+    inconclusive, and 2 for usage or domain errors.
+    """
+
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

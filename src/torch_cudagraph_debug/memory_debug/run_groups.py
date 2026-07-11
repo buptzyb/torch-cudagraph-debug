@@ -107,6 +107,8 @@ class MemoryRankPointAggregate:
 
     @property
     def worst_rank(self) -> int:
+        """Alias of ``max_rank``: larger is worse for allocator metrics."""
+
         return self.max_rank
 
     @property
@@ -176,7 +178,7 @@ class MemoryRankDevicePhaseDecomposition:
 
 @dataclass(frozen=True)
 class MemoryMetricExtrema:
-    """Per-rank extrema and spread for one phase component."""
+    """Cross-rank extrema and spread for one phase component."""
 
     min_bytes: int
     min_rank: int
@@ -352,6 +354,15 @@ class MemoryRunGroup:
         *,
         root: str | Path | None = None,
     ) -> "MemoryRunGroup":
+        """Validate and index compatible runs by rank.
+
+        Raises MemoryBundleError for rank-less, duplicate, or
+        out-of-world-size ranks, differing names, group IDs, or world sizes,
+        and point-label sequences that diverge beyond a prefix. An incomplete
+        rank whose labels are a strict prefix of the longest sequence (a
+        crashed rank) is accepted with a warning.
+        """
+
         materialized = tuple(runs)
         if not materialized:
             raise MemoryBundleError("memory run group requires at least one run")
@@ -520,7 +531,14 @@ def compare_run_group_phases(
     device_mappings: Mapping[int, Mapping[int, int]] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryRunGroupPhaseComparison:
-    """Compare four-point phase equations rank by rank and report skew."""
+    """Compare four-point phase equations rank by rank and report skew.
+
+    Raises MemoryBundleError when the groups share no common ranks, a
+    complete run is missing a requested point, or every common rank is
+    skipped, and ValueError when ``pool_mappings`` or ``device_mappings``
+    name a rank outside the comparison. Incomplete runs missing a requested
+    point skip their rank with a warning instead of failing.
+    """
 
     common_ranks = tuple(sorted(set(baseline.runs) & set(candidate.runs)))
     if not common_ranks:

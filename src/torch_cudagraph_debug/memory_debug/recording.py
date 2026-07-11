@@ -297,25 +297,35 @@ class MemoryPoint:
 
     @cached_property
     def by_key(self) -> Mapping[MemoryObservationKey, MemoryObservation]:
+        """Observations keyed by (device, pool, stream) identity."""
+
         return MappingProxyType({item.key: item for item in self.observations})
 
     @cached_property
     def observation_stats(self) -> Mapping[MemoryObservationKey, MemoryStats]:
+        """Absolute stats per (device, pool, stream) observation key."""
+
         return MappingProxyType(
             {key: observation.stats for key, observation in self.by_key.items()}
         )
 
     @cached_property
     def pool_stats(self) -> Mapping[MemoryPoolKey, MemoryStats]:
+        """Per-pool stats with stream observations summed into pools."""
+
         return MappingProxyType(summarize_pools(self.observation_stats))
 
     @cached_property
     def allocator_scope_stats(self) -> Mapping[AllocatorScope, MemoryStats]:
+        """All/default/private rollups of the pool stats."""
+
         return MappingProxyType(summarize_allocator_scopes(self.pool_stats))
 
     def observation(
         self, device_index: int, pool_id: Any, stream: Any
     ) -> MemoryObservation:
+        """Look up one observation; raises KeyError when absent."""
+
         key = MemoryObservationKey(device_index, pool_id, stream)
         try:
             return self.by_key[key]
@@ -326,6 +336,8 @@ class MemoryPoint:
 
     @property
     def allocator_settings(self) -> Mapping[str, FrozenJSONValue]:
+        """Allocator settings from the state payload, empty when absent."""
+
         state = self.allocator_state()
         settings = state.get("allocator_settings", MappingProxyType({}))
         if not isinstance(settings, Mapping):
@@ -568,6 +580,13 @@ class MemoryRun:
                 point._load_event_evidence()
 
     def point(self, ref: str | int | MemoryPoint) -> MemoryPoint:
+        """Resolve a point reference by index, label, or identity.
+
+        An int selects by position (IndexError when absent), a str matches a
+        label (KeyError), and a MemoryPoint is validated for ownership
+        (MemoryOwnershipError). Booleans are rejected (TypeError).
+        """
+
         if isinstance(ref, bool):
             raise TypeError("memory point reference must not be a boolean")
         if isinstance(ref, MemoryPoint):
@@ -601,6 +620,11 @@ class MemoryRun:
     def between(
         self, start: str | int | MemoryPoint, end: str | int | MemoryPoint
     ) -> "MemoryRange":
+        """Return the ordered range between two owned points.
+
+        Raises ValueError unless the end point comes after the start point.
+        """
+
         start_point = self.point(start)
         end_point = self.point(end)
         if end_point.index <= start_point.index:
@@ -614,6 +638,8 @@ class MemoryRun:
         *,
         attribution: MemoryAttributionOptions | None = None,
     ) -> MemoryPointComparison:
+        """Compare two ordered points of this run with optional attribution."""
+
         from .attribution import MemoryAttributionOptions
         from .comparison import _compare_same_run
 
@@ -630,6 +656,8 @@ class MemoryRun:
         *,
         attribution: MemoryAttributionOptions | None = None,
     ) -> MemoryTimeline:
+        """Build a timeline over every point; ``attribution`` adds evidence."""
+
         from .attribution import MemoryAttributionOptions
         from .timeline import _build_timeline
 
@@ -642,7 +670,12 @@ class MemoryRun:
         through: MemoryPointReference | None = None,
         options: MemoryLifetimeOptions | None = None,
     ) -> MemoryAllocationLifetimeAnalysis:
-        """Analyze allocation cohorts selected by an explicit lifetime query."""
+        """Analyze allocation cohorts selected by an explicit lifetime query.
+
+        ``through`` stops tracing at that point instead of the final point.
+        Raises MemoryDebugError for a run without points and ValueError when
+        ``through`` precedes the selection anchor or the born_between end.
+        """
 
         from .attribution import MemoryLifetimeOptions
         from .lifetimes import analyze_allocation_lifetimes
@@ -943,7 +976,16 @@ class MemoryRange:
 
 
 class MemoryRecorder:
-    """Collect private PyTorch allocator snapshots and produce a MemoryRun."""
+    """Collect private PyTorch allocator snapshots and produce a MemoryRun.
+
+    ``name`` labels the run and ``bundle_dir`` selects persistence, raising
+    FileExistsError when the directory exists and is not empty. ``devices``
+    selects the observed devices and ``synchronize`` controls per-point
+    synchronization. ``rank`` and ``world_size`` fall back to the RANK and
+    WORLD_SIZE environment variables or the initialized torch.distributed
+    process group when omitted; ``group_id`` and ``run_metadata`` persist
+    group identity and user metadata on the run.
+    """
 
     def __init__(
         self,
@@ -1201,6 +1243,8 @@ class MemoryRecorder:
 
     @property
     def result(self) -> MemoryRun:
+        """The terminal run; raises MemoryDebugError before finish/abort."""
+
         if self._result is None:
             raise MemoryDebugError("memory recorder has not been finished")
         return self._result

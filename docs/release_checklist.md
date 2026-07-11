@@ -8,9 +8,10 @@
   changelog are current.
 - Confirm the API reference describes the exact supported public facades and
   serialized formats shipped in this repository.
-- Compare every user-visible text/HTML label with its renderer. Define its
-  source, formula, sampling scope, and relationship to structured fields; mark
-  intentionally sparse text sections and dynamic example values explicitly.
+- Compare every user-visible text/HTML label with its renderer. Confirm the
+  documentation defines each label's source, formula, sampling scope, and
+  relationship to structured fields, and that intentionally sparse text
+  sections and dynamic example values are marked explicitly.
 - Confirm the root README stays limited to concise quick starts and links to
   the dedicated Tensor Debug and Memory Debug guides.
 - Confirm tensor lifecycle, single-capture ownership, eager single-stream and
@@ -45,7 +46,7 @@ bash -n examples/memory_debug/cli/workflows.sh
 python -m ruff check src tests examples
 python -m ruff check --select I src tests examples
 python -m ruff format --check src tests examples
-python -m pytest -q
+TCGD_FAIL_ON_SKIP=1 python -m pytest -q
 rm -rf dist
 python -m build --sdist --no-isolation
 python -m twine check dist/*
@@ -72,6 +73,7 @@ python -m pip install -r requirements-dev.txt
 python -m pip install --upgrade "setuptools>=77.0.3" wheel
 rm -rf dist
 python -m build --sdist --wheel --no-isolation
+python -m twine check dist/*
 TCGD_SDIST="$(find dist -maxdepth 1 -name 'torch_cudagraph_debug-*.tar.gz' -print -quit)"
 python -m pip install --no-build-isolation --no-deps "${TCGD_SDIST}"
 cd "${TCGD_RUN_ROOT}"

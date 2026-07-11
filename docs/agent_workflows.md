@@ -18,7 +18,7 @@ Both entry points follow the same workflow:
 2. collect fresh evidence with public Probe or Recorder APIs;
 3. analyze public reports before raw PyTorch data;
 4. preserve commands, logs, bundles, and environment metadata;
-5. separate tool evidence, supplemental work, inference, and tool gaps.
+5. separate tool evidence, supplemental analysis, inference, and tool gaps.
 
 ## Codex
 

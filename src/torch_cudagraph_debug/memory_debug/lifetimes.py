@@ -67,7 +67,7 @@ def _cohort_id(
 
 @dataclass(frozen=True)
 class CohortPointState:
-    """Owner-active and stream-waiting state at one memory point."""
+    """Owner-active and awaiting-free state at one memory point."""
 
     point_index: int
     point_label: str
@@ -208,7 +208,7 @@ class CohortFreeRequest(_CohortTransition):
 
 @dataclass(frozen=True)
 class CohortFreeCompletion(_CohortTransition):
-    """Allocator reuse-ready transitions grouped by marker interval."""
+    """Allocator reuse-ready transitions grouped by interval and completion stack."""
 
 
 @dataclass(frozen=True)
@@ -218,6 +218,11 @@ class AllocationCohort:
     Framed allocations group by their complete normalized allocation stack.
     Unframed allocations also include block and requested sizes in the identity
     so unrelated same-pool allocations are not merged.
+
+    ``peak_active_bytes`` is the maximum active bytes across point snapshots;
+    ``event_owner_peak_bytes`` and ``event_unreusable_peak_bytes`` are running
+    peaks replayed in allocator-event order; ``snapshot_active_span_bytes`` is
+    the max-minus-min of the per-point active bytes.
     """
 
     cohort_id: str

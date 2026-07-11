@@ -45,7 +45,11 @@ REPORT_SCHEMA = "torch-cudagraph-debug/tensor-report"
 
 @dataclass(frozen=True)
 class TensorComparisonOptions:
-    """Numerical and metadata policy for offline tensor comparison."""
+    """Numerical and metadata policy for offline tensor comparison.
+
+    ``limit`` caps the worst-mismatch listings that reports and
+    ``worst_observation_comparisons()`` include.
+    """
 
     mode: ComparisonMode = "allclose"
     rtol: float = 1e-5
@@ -204,6 +208,11 @@ class _TensorStateComparison:
         *,
         limit: int | None = None,
     ) -> tuple[TensorObservationComparison, ...]:
+        """Return value-kind mismatches that report a mismatch fraction,
+        sorted worst-first by mismatch fraction and then by max absolute
+        error. ``limit`` caps the listing and falls back to
+        ``options.limit`` when ``None``."""
+
         if limit is not None and (type(limit) is not int or limit < 1):
             raise ValueError("limit must be a positive integer or None")
         selected = [
@@ -652,7 +661,13 @@ def compare_snapshots(
     *,
     options: TensorComparisonOptions | None = None,
 ) -> TensorSnapshotComparison:
-    """Compare standalone tensor snapshots by observation name/invocation key."""
+    """Compare standalone tensor snapshots by observation name/invocation key.
+
+    Snapshots taken by the same probe (equal ``probe_id``) must be passed in
+    chronological order: a candidate whose ``snapshot_index`` does not follow
+    the reference raises ``ValueError``. Snapshots from different probes are
+    compared as given.
+    """
 
     if (
         reference.probe_id == candidate.probe_id
@@ -818,6 +833,13 @@ def compare_runs(
     options: TensorComparisonOptions | None = None,
 ) -> TensorRunComparison:
     """Compare aligned points from two runs.
+
+    Without ``point_mapping``, points align by identical label. An explicit
+    mapping must claim each candidate label at most once (``ValueError``)
+    and raises ``KeyError`` for labels absent from either run. Reference
+    labels the mapping does not cover still auto-align by identical label;
+    when such a label collides with a candidate label the mapping already
+    claimed, the merge raises ``ValueError``.
 
     Points recorded on only one side are a mismatch, except when the other
     run is incomplete and the unmatched points are its crash tail: missing

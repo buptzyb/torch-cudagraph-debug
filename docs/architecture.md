@@ -60,7 +60,7 @@ flowchart TB
     TPS -->|supports| TI["Direct inspection or snapshot comparison"]
     MPS -->|supports| MI["Direct inspection or snapshot comparison"]
     TRun -->|supports| TA["Point, run, series, and run-group analysis"]
-    MRun -->|supports| MA["Point, timeline, phase, and run-group analysis"]
+    MRun -->|supports| MA["Point, timeline, lifetime, phase, and run-group analysis"]
 
     TC -. "same role; no cross-domain base class" .-> MC
     ETC -. "tensor-specific eager path" .-> TC

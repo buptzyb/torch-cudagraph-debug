@@ -81,7 +81,7 @@ probe.close(synchronize=False)
 One `TensorProbeSnapshot` aggregates every named capture slot visible at one
 query point. `(name, invocation_index)` is the semantic key; the index starts
 from zero independently for each name, while `order` preserves capture-call
-order. After a graph replay, its `replay_index` identifies
+order. After a graph replay, the snapshot's `replay_index` identifies
 that replay. By default, `snapshot.tensor()` uses `snapshot.probe_name` as
 the observation name and `invocation_index=0`.
 The default `when="capture"` makes eager warmup calls transparent no-ops.
@@ -182,11 +182,13 @@ still a no-op; the same value is rejected when capture is active.
 Pass the replay or eager execution stream when it is known. `False` is valid
 only after the application has synchronized every relevant D2H copy.
 
-Normal recorder context exit freezes a `complete=True` run. If the body raises,
-the recorder instead freezes and persists the collected points as a terminal
-`complete=False` run, blocks later collection, closes its native resources,
-and lets the application exception propagate. `result` remains available for
-postmortem analysis in either case.
+Normal recorder context exit — or an explicit `finish()` call outside a `with`
+block — freezes a `complete=True` run. `preview()` returns a nonterminal view
+of the collected points during collection and the terminal result afterward.
+If the body raises, the recorder instead freezes and persists the collected
+points as a terminal `complete=False` run, blocks later collection, closes its
+native resources, and lets the application exception propagate. `result`
+remains available for postmortem analysis in either case.
 
 ### Full And Summary Payloads
 
@@ -282,8 +284,10 @@ Omit the candidate bundle from `compare-points` or `compare-point-series` to
 reuse the reference bundle.
 
 Use `--mode exact`, `--promote-dtypes`, `--ignore-layout`, `--rtol`, `--atol`,
-`--equal-nan`, and `--only-changed` to control comparison and presentation.
-Output directories are optional and require `--overwrite` when nonempty.
+`--equal-nan`, `--limit`, and `--only-changed` to control comparison and
+presentation. On the compare and group commands, output directories are
+optional and require `--overwrite` when nonempty; `summary` prints to stdout
+and takes no `--output`.
 Mismatch and inconclusive reports return a nonzero status.
 
 ### Multi-Rank Run Groups
@@ -340,8 +344,9 @@ keyword-only `synchronize` argument:
 Omitting `synchronize`, or passing `None`, inherits the Probe or Recorder
 policy. Explicit targets accept only `bool`, `torch.cuda.Stream`, or CUDA
 `torch.device`; strings, integer device indices, and CPU devices are rejected.
-A stream or device from another CUDA device is also an error. A synchronization-enabled query during
-CUDA Graph capture raises an error.
+A stream or device bound to a CUDA device other than the probe's is also an
+error. A synchronization-enabled query during CUDA Graph capture raises an
+error.
 Defer host queries until after capture: `False` skips synchronization, and a
 record-only probe still rejects `snapshot()` during capture outright because
 reading its replay counter would invalidate the capture; callback-backed
@@ -359,7 +364,11 @@ only after prior synchronization has completed all probe work. For a captured
 probe, every graph containing it must also be unable to replay again; otherwise
 a later replay accesses resources released by `close()`. The probe cannot verify
 either condition. An unsynchronized close is rejected while eager callbacks or
-eager copies are provably in flight; the probe stays open and fully usable. Eager (`when="always"`)
+eager copies are provably in flight; the probe stays open and fully usable.
+
+## Eager Slots And Failure Recovery
+
+Eager (`when="always"`)
 probes keep one slot per observation name: repeated names sample in place
 (latest value) and new names append slots, so `snapshot()` returns the latest
 value of every name observed so far. In-place re-samples are counted per name
@@ -487,6 +496,10 @@ order. It does not replace the tensor or transform gradients. The hook still fol
 the probe's `when` policy: with the default `when="capture"`, an eager backward
 call is a no-op and the backward work must itself be captured.
 
+`TensorRecorder.watch_grad()` provides the same registration for the complete
+workflow: the hook records a named gradient observation into the current run,
+and the method additionally accepts a per-hook `payload=` override.
+
 ## Non-Contiguous Inputs
 
 The default `non_contiguous="error"` avoids hidden graph-pool allocations.
@@ -536,8 +549,7 @@ is required.
   single-thread increment kernel to its captured graph.
 - `PrintAction` and `CheckAction` host callbacks can create large GPU bubbles
   and are intended for targeted correctness debugging, not performance
-  measurement. Their cost scales with payload and has no hardware-independent
-  byte threshold; prefer `RecordAction` plus offline analysis for large tensors.
+  measurement; see the action tradeoffs under Core Usage.
 - Shared staging means one probe's graph must not be replayed concurrently.
 - Eager `when="always"` use is also single-stream, and a probe cannot return to
   eager use after its capture.

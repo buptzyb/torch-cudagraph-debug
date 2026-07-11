@@ -140,6 +140,8 @@ _SUMMARY_CHUNK_ELEMENTS = 1_000_000
 
 
 def validate_execution_mode(value: str) -> ExecutionMode:
+    """Validate the tensor run execution mode."""
+
     if not isinstance(value, str):
         raise TypeError("execution must be a string")
     if value not in {"eager", "cuda_graph"}:
@@ -148,6 +150,8 @@ def validate_execution_mode(value: str) -> ExecutionMode:
 
 
 def validate_payload_kind(value: str) -> PayloadKind:
+    """Validate the tensor observation payload kind."""
+
     if not isinstance(value, str):
         raise TypeError("payload must be a string")
     if value not in {"full", "summary"}:
@@ -575,6 +579,15 @@ class TensorRun:
         }
 
     def point(self, ref: str | int | TensorPoint) -> TensorPoint:
+        """Return one owned point by label, index, or identity.
+
+        A ``str`` looks up the point label and raises ``KeyError`` when
+        absent; an ``int`` indexes ``points`` and raises ``IndexError``
+        when out of range; a ``TensorPoint`` is validated to belong to this
+        run and raises ``TensorOwnershipError`` otherwise. Booleans are
+        rejected with ``TypeError``.
+        """
+
         if isinstance(ref, bool):
             raise TypeError("tensor point reference must not be a boolean")
         if isinstance(ref, TensorPoint):
@@ -627,6 +640,14 @@ class TensorRun:
         *,
         cache_tensors: bool = False,
     ) -> "TensorRun":
+        """Load a persisted tensor run from its bundle directory.
+
+        ``cache_tensors=True`` memoizes payloads materialized from blob
+        files on each observation instead of re-reading them per access.
+        Raises ``TensorBundleError`` for an unreadable, malformed, or
+        unsupported bundle.
+        """
+
         root = Path(bundle_dir).resolve()
         manifest_path = root / "manifest.json"
         try:
@@ -848,7 +869,26 @@ class _CaptureSlot:
 
 
 class TensorRecorder:
-    """Collect named eager or CUDA Graph tensor observations into a TensorRun."""
+    """Collect named eager or CUDA Graph tensor observations into a TensorRun.
+
+    ``execution`` gates the whole collection mode: ``"eager"`` stages
+    device-to-host copies inside ``record_point()`` contexts, while
+    ``"cuda_graph"`` captures ``observe()`` calls into a native collector
+    and reads back replayed values. ``name`` labels the run and must be
+    non-empty. ``payload`` selects what each observation keeps by default:
+    ``"full"`` stores the tensor bytes, ``"summary"`` drops them and keeps
+    the numerical summary only. ``bundle_dir`` persists the run as a bundle
+    and raises ``FileExistsError`` when the directory exists and is
+    non-empty. ``synchronize`` is the default synchronization target for
+    ``record_point()`` and ``close()``. ``device`` selects the CUDA device;
+    when omitted it defaults to the current device for ``"cuda_graph"`` and
+    is inferred from the first observation for ``"eager"``. ``rank`` and
+    ``world_size`` auto-resolve from the ``RANK`` and ``WORLD_SIZE``
+    environment variables or an initialized ``torch.distributed`` process
+    group when omitted. ``group_id`` names the multi-rank collection this
+    run belongs to, and ``run_metadata`` is a JSON-serializable mapping
+    persisted verbatim with the run.
+    """
 
     def __init__(
         self,
@@ -1028,7 +1068,14 @@ class TensorRecorder:
         payload: PayloadKind | None = None,
         strict: bool = False,
     ) -> RemovableHandle | None:
-        """Register an autograd hook that records a named gradient observation."""
+        """Register an autograd hook that records a named gradient observation.
+
+        When the tensor does not require grad, the default ``strict=False``
+        silently registers nothing and returns ``None``, so its gradients
+        are never observed; ``strict=True`` raises instead. ``payload``
+        overrides the recorder's default payload kind for the gradient
+        observations.
+        """
 
         self._ensure_open()
         name = validate_observation_name(name)
@@ -1147,6 +1194,9 @@ class TensorRecorder:
 
     @property
     def result(self) -> TensorRun:
+        """Return the terminal run; raises ``TensorDebugError`` before
+        finish or abort."""
+
         if self._result is None:
             raise TensorDebugError("tensor recorder has not been finished")
         return self._result
@@ -1156,10 +1206,11 @@ class TensorRecorder:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> None:
-        """Release native resources after the captured graph can no longer
-        replay, and remove every gradient hook registered through
-        ``watch_grad()``. Raises while a point is active; a rejected close
-        leaves the recorder fully usable."""
+        """Release native resources and remove every gradient hook registered
+        through ``watch_grad()``. Callers must first destroy every captured
+        graph that references this recorder so it can no longer replay.
+        Raises while a point is active; a rejected close leaves the recorder
+        fully usable."""
 
         if self._closed:
             return

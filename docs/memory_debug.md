@@ -26,7 +26,7 @@ multi-rank workflows. For exact signatures, see the
 
 Allocator history is not required for pool, stream, segment, block, or
 fragmentation state. Stack attribution uses available live-block frames, while
-event and lifetime analysis require the corresponding complete history.
+event and lifetime analyses require the corresponding complete history.
 Neither the probe nor the recorder
 enables history on the application's behalf.
 
@@ -119,9 +119,10 @@ device[0]
 ```
 
 `CUDA used = residual + allocator reserved`; allocator reserved is the sum of
-its pools, and each pool is the sum of its streams. The CUDA Runtime and
-allocator measurements are consecutive rather than atomic, so the residual can
-be positive or negative. Interior allocator, pool, and stream nodes put
+its pools, and each pool is the sum of its streams. The residual can be
+positive or negative;
+[Device-Wide CUDA Runtime Memory](#device-wide-cuda-runtime-memory) explains
+its measurement and scope. Interior allocator, pool, and stream nodes put
 `reserved:` first, followed by the remaining core metrics and sparse structural
 diagnostics. The `diagnostics` line is intentionally sparse: text and HTML
 surface structural metrics only when they explain an absolute state or change;
@@ -177,7 +178,12 @@ print(after.allocator_scope_stats["private"])
 print(comparison.to_text())
 ```
 
-`snapshot()` returns one complete allocator state. `probe.compare()` validates
+`snapshot()` returns one complete allocator state. The probe's `synchronize=`
+constructor argument sets the default synchronization target, and each
+`snapshot(synchronize=...)` call may override it — the same bool/stream/device
+contract as `record_point()`. `MemoryProbeSnapshot.raw_snapshot()` keeps the
+complete in-memory raw snapshot available for low-level local inspection.
+`probe.compare()` validates
 that both snapshots belong to that probe and are in increasing index order.
 Top-level `compare_snapshots(reference, candidate, device_mapping=...,
 pool_mapping=...)` also compares independent probes, which is useful for two
@@ -189,8 +195,9 @@ unless `pool_mapping` explicitly pairs them, exactly like cross-run
 
 Structured pool and stream rows carry `MatchKind`; device rows carry
 `DeviceMatchKind`. Pool values are `same_probe`, `same_run`, `default`,
-`mapped`, `reference_only`, or `candidate_only`. Device values additionally
-distinguish `same_index` and `pool_mapping`. Text and HTML show tags only when
+`mapped`, `reference_only`, or `candidate_only`. Device values replace
+`default` with `same_index` and add `pool_mapping`. Text and HTML show tags
+only when
 the decision matters: `[mapped]`, `[pool_mapping]`, `[reference_only]`, or
 `[candidate_only]`. Owner-local and automatic same-index/default matches stay
 untagged.
@@ -254,7 +261,9 @@ a point whose boundary marker could not be recorded fails with
 (`boundary_unavailable` is the per-device status recorded at collection).
 
 `MemoryRecorder` only collects data. `finish()` returns an immutable
-`MemoryRun`; analysis belongs to the run and result objects:
+`MemoryRun`, and `preview()` returns a view of the collected points during
+collection (the terminal result afterward); analysis belongs to the run and
+result objects:
 
 ```python
 comparison = run.compare("before_capture", "after_capture")
@@ -422,9 +431,12 @@ sample renders as `n/a` and produces no fabricated delta. Sample availability
 at only one endpoint still makes the device comparison changed, and devices
 whose pools exist without samples still render their allocator subtree.
 
+### Allocation Cohort Lifetimes
+
 Allocation cohort lifetimes are an optional focused same-run analysis, not a
-replacement for those modes. To answer "what was live here, and when did it
-go away?", anchor the analysis at the point of interest:
+replacement for the timeline and comparison modes above. To answer "what was
+live here, and when did it go away?", anchor the analysis at the point of
+interest:
 
 ```python
 lifetimes = run.lifetimes(
@@ -536,6 +548,8 @@ retain every segment and active-block address. Missing addresses produce an
 multiplicity. Independent runs report lifecycle as `unavailable` rather than
 claiming address identity across processes.
 
+### Cross-Run Comparison
+
 For independent runs, use `compare_points()`:
 
 ```python
@@ -551,6 +565,10 @@ end_gap = compare_points(
 )
 ```
 
+Points from the same run raise `MemoryOwnershipError` here — same-run analysis
+belongs to `MemoryRun.compare`. A foreign snapshot passed to `probe.compare()`
+raises the same error.
+
 Cross-run identity is conservative and deterministic:
 
 1. An explicit one-to-one `device_mapping` pairs reference and candidate devices.
@@ -565,6 +583,8 @@ Cross-run identity is conservative and deterministic:
 
 An explicit device map and every pool map must agree; conflicting or many-to-one
 mappings raise `ValueError`.
+
+### Four-Point Phase Comparison
 
 The optional four-point helper separates start-state differences from phase
 change:
@@ -656,23 +676,14 @@ allocator-state or event-payload access is worth the additional host memory.
 
 ## Reports And Bundles
 
-State comparisons, timelines, phase comparisons, and group phase comparisons
-provide:
-
-- `to_text(include_unchanged=True, limit=None, stack_depth=None)`
-- `to_dict()`
-- `to_html(include_unchanged=True, limit=None, stack_depth=None)`
-- `write(output_dir, include_unchanged=True, limit=None, stack_depth=None, overwrite=False)`
-
-State comparisons and timelines additionally accept `depth` on `to_text`,
-`to_html`, and `write` (`"device"`, `"pool"`, or `"stream"`, default
-`"stream"`) to truncate the rendered tree; CSV and JSON stay complete. The
-`tcgd-memory timeline` and `compare-points` commands expose it as `--depth`.
-
-Lifetime analyses have no unchanged-row filter and provide `to_text(limit=None,
-stack_depth=None)`, `to_dict()`, `to_html(limit=None, stack_depth=None)`, and
-`write(output_dir, limit=None, stack_depth=None, overwrite=False)`. Run-group
-`overwrite` on `write()`.
+Every result renders through the same family of methods — `to_text()`,
+`to_dict()`, `to_html()`, and `write(output_dir)` — with display options
+(`include_unchanged`, `limit`, `stack_depth`, and, for state comparisons and
+timelines, the `depth` tree cutoff exposed on the CLI as `--depth`) that vary
+slightly by result type. Lifetime analyses have no unchanged-row filter, and
+run-group summaries take no display options at all — their `write()` accepts
+only `overwrite`. See the
+[API reference](api.md#memory-debug) for the exact per-result signatures.
 
 Allocation-stack and allocator-event identity always uses complete
 normalized stacks. Public attribution models expose those stacks as
@@ -702,33 +713,28 @@ additionally add `device_decomposition.csv`. Attribution can add
 `pool_decomposition.csv` and `allocator_scope_decomposition.csv`. Lifetime
 reports add `cohorts.csv`, `cohort_points.csv`, `size_histograms.csv`,
 `size_outcomes.csv`, and optional transition-stack CSVs. Group summaries add
-`rank_points.csv`, `rank_devices.csv`, and `point_aggregates.csv`. Group phase
-reports add `rank_decomposition.csv`, `rank_pool_decomposition.csv`,
-`rank_device_decomposition.csv`, and `phase_aggregates.csv`. Attributed
+`rank_points.csv`, optional `rank_devices.csv`, and `point_aggregates.csv`.
+Group phase reports add `rank_decomposition.csv`,
+`rank_pool_decomposition.csv`, optional `rank_device_decomposition.csv`, and
+`phase_aggregates.csv`. Attributed
 group-phase reports additionally export full rank/component
 `allocation_stack_comparisons.csv` and `events.csv`. Timeline HTML includes
 allocated, reserved, active, requested, and optional cohort charts.
 `include_unchanged=False` filters zero-change rows from text, HTML, and CSV;
 JSON always retains the complete result.
 
-Bundles use the `torch-cudagraph-debug/memory-run` schema: `manifest.json`, one
-`states/NNNN.json.gz` allocator-state file per point, and one
-`events/NNNN-NNNN.json.gz` event-evidence file per adjacent interval. Point zero
-has no event file. State files omit cumulative `device_traces`; event files keep
-the raw mappings for only their interval. Manifest, point, and observation fields
-are canonical; derived awaiting-free, inactive, and fragmentation values are not
-stored. Each point manifest also stores its `device_memory` samples as
-`free_bytes`/`total_bytes` per decimal device index, empty when sampling was
-skipped. Each point manifest authenticates its state and event gzip payload with
-SHA-256. Loading a run still reads only the manifest and compact summaries.
-`point.allocator_state()` loads the immutable state lazily, verifies its digest,
-and rejects disagreement between recomputed state summaries and the manifest.
-`run.validate_payloads()` bypasses lazy caches and rereads every persisted state
-and event payload. Ordinary access uses separate state and event caches when
-the run was loaded with `cache_snapshots=True`, the `MemoryRun.load()` default.
-The CLI and `MemoryRunGroup.load()` use bounded-memory loading, retaining only
-current comparison payloads and compact indexes. The format is JSON-only. Use
-one bundle per process/rank and one writer per bundle.
+Bundles use the `torch-cudagraph-debug/memory-run` schema: a `manifest.json`
+beside per-point `states/NNNN.json.gz` and per-interval
+`events/NNNN-NNNN.json.gz` payloads, each authenticated with SHA-256. Loading a
+run reads only the manifest and compact summaries; `point.allocator_state()`
+verifies and loads state lazily, and `run.validate_payloads()` bypasses lazy
+caches to reread every persisted payload. `MemoryRun.load()` defaults to
+`cache_snapshots=True`, while the CLI and `MemoryRunGroup.load()` use
+bounded-memory loading that retains only current comparison payloads and
+compact indexes. Malformed or unreadable bundles raise `MemoryBundleError`.
+The format is JSON-only; use one bundle per process/rank and one writer per
+bundle. The [Bundle Format](api.md#bundle-format) reference documents the
+exact manifest fields and payload layout.
 
 ## CLI
 
@@ -785,7 +791,8 @@ output. `allocation-lifetimes` instead accepts `--stack-depth` and
 `summary` writes to standard output. All report commands print text and write
 files only when `--output` is supplied. Reusing a nonempty output directory
 requires `--overwrite`. Cross-run event and lifetime requests are rejected
-because allocator addresses and histories have no cross-run identity.
+with `MemoryDebugError` because allocator addresses and histories have no
+cross-run identity.
 
 ## Advanced Helpers
 
@@ -802,7 +809,7 @@ change in a minor release. Their snapshot summaries (`summarize_snapshot`,
   interval raise `MemoryHistoryTruncatedError`. Enable
   `_record_memory_history()` before the first analyzed point and keep it
   enabled: PyTorch does not expose a continuity signal that lets the recorder
-  detect a mid-interval stop. Increase `max_entries` or record real points more
+  detect a mid-interval stop. Increase `max_entries` or record points more
   frequently when the ring is too small.
 - Lifetime analysis is per process and rank and requires complete marker-bounded
   event history. `born_between` retains transient allocations that are active at
@@ -814,6 +821,10 @@ change in a minor release. Their snapshot summaries (`summarize_snapshot`,
   call `_set_memory_metadata` while either operation is taking a snapshot:
   interleaved markers misclassify event windows and can leave a stale marker in
   the global metadata.
+- The metadata APIs are private to PyTorch and may be absent from a given
+  build. Collection then records a warning and the point's boundary is not
+  marked; state analysis stays usable, while event or lifetime queries crossing
+  that interval raise `MemoryHistoryBoundaryError`.
 - Marker placement is not atomic with the snapshot. Allocator events issued by
   other threads in the instant between taking a snapshot and restoring the
   metadata can fall outside both adjacent event windows; net-visible effects
@@ -823,10 +834,9 @@ change in a minor release. Their snapshot summaries (`summarize_snapshot`,
 - Device-wide CUDA Runtime sampling (`torch.cuda.mem_get_info`) is attempted
   during CUDA Graph capture as well as normal execution. Collection does not
   synchronize inside capture. A query failure omits only that device and adds a
-  warning; allocator state from the same point remains usable.
-- The allocator snapshot and CUDA Runtime reading are consecutive but not
-  atomic. Concurrent allocations from this or another process can move the
-  device-wide values between the two calls.
+  warning; allocator state from the same point remains usable. The reading is
+  consecutive with the allocator snapshot, not atomic, so concurrent activity
+  can move device-wide values between the two calls.
 
 ## Further Reading
 

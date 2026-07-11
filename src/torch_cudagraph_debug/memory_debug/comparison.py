@@ -125,7 +125,16 @@ def compare_snapshots(
     device_mapping: Mapping[int, int] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemorySnapshotComparison:
-    """Compare Probe snapshots using same- or cross-Probe semantics."""
+    """Compare Probe snapshots using same- or cross-Probe semantics.
+
+    ``pool_mapping`` and ``device_mapping`` pair pools and devices across
+    independent Probes; ``attribution`` selects stack, event, and lifetime
+    evidence. Raises ValueError when a same-probe candidate does not follow
+    the reference or mappings are passed for a same-probe pair,
+    MemoryDebugError when events or lifetimes are requested across
+    independent Probes, and the MemoryHistory* errors when requested
+    same-probe event or lifetime evidence is unusable.
+    """
 
     options = attribution or MemoryAttributionOptions()
     same_probe = reference.probe_id == candidate.probe_id
@@ -167,7 +176,14 @@ def compare_points(
     device_mapping: Mapping[int, int] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryPointComparison:
-    """Compare points from independent runs without address/event identity."""
+    """Compare points from independent runs without address/event identity.
+
+    ``pool_mapping`` and ``device_mapping`` pair private pools and devices
+    across the runs; ``attribution`` may request stacks only. Raises
+    MemoryOwnershipError for points from the same run (use
+    ``MemoryRun.compare`` instead) and MemoryDebugError when events or
+    lifetimes attribution is requested.
+    """
 
     if reference.run_id == candidate.run_id:
         raise MemoryOwnershipError(
@@ -364,7 +380,12 @@ def compare_phases(
     device_mapping: Mapping[int, int] | None = None,
     attribution: MemoryAttributionOptions | None = None,
 ) -> MemoryPhaseComparison:
-    """Decompose candidate-vs-baseline phase memory using four points."""
+    """Decompose candidate-vs-baseline phase memory using four points.
+
+    Raises ValueError when both phases come from the same run. The cross-run
+    ``start_gap``/``end_gap`` legs silently drop requested ``events`` and
+    ``lifetimes`` attribution; only the within-run change legs carry them.
+    """
 
     if baseline.run.run_id == candidate.run.run_id:
         raise ValueError(

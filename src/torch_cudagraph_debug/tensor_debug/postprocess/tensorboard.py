@@ -44,6 +44,10 @@ def export_snapshots_to_tensorboard(
     summary statistics are skipped. Histograms require a full payload and pass
     the writer a detached copy, so summary-only observations export scalars and
     skip the histogram.
+
+    ``step=None`` uses each snapshot's ``replay_index`` as the global step;
+    an ``int`` or a per-snapshot callable overrides it. Observations with
+    ``numel == 0`` export only the ``numel`` scalar.
     """
 
     if type(write_scalars) is not bool or type(write_histograms) is not bool:

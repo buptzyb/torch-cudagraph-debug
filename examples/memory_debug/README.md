@@ -77,7 +77,8 @@ python examples/memory_debug/recorder/compare_runs_and_phases.py \
   --output-dir /tmp/tcgd-runs
 ```
 
-Run the distributed example through `torchrun` on a shared filesystem:
+Run the distributed example through `torchrun` on a shared filesystem. Each
+rank binds its own CUDA device, so the two-process command needs 2+ GPUs:
 
 ```bash
 torchrun --standalone --nproc-per-node=2 \

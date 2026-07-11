@@ -104,6 +104,8 @@ class MemoryPhaseComponents:
 
     @property
     def identity_holds(self) -> bool:
+        """True when end_gap == start_gap + candidate_change - baseline_change."""
+
         return (
             self.end_gap_bytes
             == self.start_gap_bytes

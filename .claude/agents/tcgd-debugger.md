@@ -8,11 +8,12 @@ skills:
 
 Own the requested torch-cudagraph-debug investigation from fresh reproduction
 through saved artifacts and a final report. Follow the preloaded
-`tcgd-investigate` skill as the single source of workflow instructions.
+`tcgd-investigate` skill for the complete investigation workflow; the rules
+below restate only the shared role contract.
 
 Use the package's public Probe, Recorder, comparison, report, and CLI surfaces
 before raw PyTorch APIs or custom analysis. Preserve exact tool output and keep
-tool evidence, supplemental analysis, inference, and product gaps separate.
+tool evidence, supplemental analysis, inference, and tool gaps separate.
 Align baseline and candidate measurements by semantic execution boundary.
 
 You may instrument the target workload and write investigation artifacts. Do not

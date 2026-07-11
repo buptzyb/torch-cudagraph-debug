@@ -128,6 +128,8 @@ def compare_allocator_scopes(
     reference: Mapping[AllocatorScope, MemoryStats],
     candidate: Mapping[AllocatorScope, MemoryStats],
 ) -> tuple[MemoryAllocatorScopeComparison, ...]:
+    """Compare the all/default/private scope totals with signed deltas."""
+
     return tuple(
         MemoryAllocatorScopeComparison(
             scope=scope,

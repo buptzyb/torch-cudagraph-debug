@@ -33,7 +33,20 @@ if TYPE_CHECKING:
 
 
 class TensorProbe:
-    """Transparent tensor probe for eager execution or CUDA Graph capture and replay."""
+    """Transparent tensor probe for eager execution or CUDA Graph capture and replay.
+
+    ``name`` identifies the probe and doubles as the default observation
+    name. ``actions`` must be a non-empty sequence (``ValueError`` when
+    empty); a probe whose actions are all disabled collects nothing.
+    ``when`` selects the sampling window: the default ``"capture"`` makes
+    calls outside CUDA Graph capture transparent no-ops, while ``"always"``
+    also samples eager invocations. ``non_contiguous`` either rejects
+    non-contiguous tensors (``"error"``) or allows a debug-only contiguous
+    copy (``"copy"``). ``synchronize`` is the default synchronization
+    target for queries such as ``snapshot()`` and ``check_status()``.
+    ``device`` selects the CUDA device that owns the probe's replay
+    counter; it defaults to the current CUDA device.
+    """
 
     def __init__(
         self,
@@ -66,7 +79,8 @@ class TensorProbe:
 
     @property
     def replay_index(self) -> torch.Tensor | None:
-        """Return a detached GPU copy of the graph replay counter."""
+        """Return a detached GPU copy of the graph replay counter, or ``None``
+        for a probe whose actions are all disabled."""
 
         return self._collector.replay_index
 
@@ -101,7 +115,12 @@ class TensorProbe:
         name: str | None = None,
         strict: bool = False,
     ) -> RemovableHandle | None:
-        """Register an autograd hook that probes the tensor's backward gradient."""
+        """Register an autograd hook that probes the tensor's backward gradient.
+
+        When the tensor does not require grad, the default ``strict=False``
+        silently registers nothing and returns ``None``, so its gradients
+        are never observed; ``strict=True`` raises instead.
+        """
 
         self._ensure_open()
         resolved_name = validate_observation_name(self.name if name is None else name)
@@ -278,9 +297,10 @@ class TensorProbe:
         *,
         synchronize: SynchronizeTarget | None = None,
     ) -> None:
-        """Release native resources after captured graphs can no longer
-        replay, and remove every gradient hook registered through
-        ``watch_grad()``. A rejected close leaves the probe fully usable."""
+        """Release native resources and remove every gradient hook registered
+        through ``watch_grad()``. Callers must first destroy every captured
+        graph that references this probe so it can no longer replay. A
+        rejected close leaves the probe fully usable."""
 
         if not self._closed:
             selected = self.synchronize if synchronize is None else synchronize

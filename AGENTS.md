@@ -36,7 +36,7 @@ When investigating tensor or memory behavior in an application:
    only when the public report cannot answer the remaining question. State why
    the escalation was necessary.
 8. Separate final reporting into public tool evidence, supplemental analysis,
-   inference, and product gaps. Never describe supplemental raw-snapshot work
+   inference, and tool gaps. Never describe supplemental raw-snapshot work
    as output produced by this package.
 
 Use the `tcgd-investigate` skill for the complete investigation procedure. Use

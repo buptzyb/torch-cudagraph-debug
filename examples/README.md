@@ -37,7 +37,7 @@ output details.
 | 1 | Does a complete eager run match a CUDA Graph run? | [Eager vs CUDA Graph](tensor_debug/recorder/eager_vs_cuda_graph.py) | `TensorRecorder`, `compare_points()`, `compare_runs()` |
 | 2 | How are forward activations and backward gradients persisted together? | [Forward and backward](tensor_debug/recorder/forward_backward.py) | `observe()`, `watch_grad()`, `preview()` |
 | 3 | On which replay did drift first appear? | [Replay series](tensor_debug/recorder/replay_series.py) | summary/full payloads, `compare_point_series()` |
-| 4 | Do eager and CUDA Graph values agree on every rank? | [Distributed run groups](tensor_debug/recorder/distributed_run_groups.py) | `TensorRunGroup`, `compare_run_groups()` |
+| 4 | Do eager and CUDA Graph values agree on every rank? (needs 2+ GPUs) | [Distributed run groups](tensor_debug/recorder/distributed_run_groups.py) | `TensorRunGroup`, `compare_run_groups()` |
 
 ### CLI Workflow
 

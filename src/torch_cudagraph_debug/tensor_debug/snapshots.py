@@ -19,7 +19,13 @@ from .recording import (
 
 @dataclass(frozen=True)
 class TensorCheckStatus:
-    """Latest check status for a tensor probe."""
+    """Latest check status for a tensor probe.
+
+    Success is encoded by sentinels: an ``ok`` status has ``order == -1``,
+    ``name is None``, and ``invocation_index == -1``, and its ``key``
+    resolves to ``None``. A failed status identifies exactly one
+    observation.
+    """
 
     ok: bool
     message: str
@@ -53,7 +59,7 @@ class TensorCheckStatus:
 
 @dataclass(frozen=True)
 class TensorProbeSnapshot:
-    """All observations returned by one query point.
+    """All observations returned by one query.
 
     The snapshot contains one CUDA Graph replay, the latest eager sample per
     name, or zero-filled captured slots before the first replay. Eager and
@@ -136,6 +142,8 @@ class TensorProbeSnapshot:
         name: str | None = None,
         invocation_index: int = 0,
     ) -> TensorObservation:
+        """Return one observation; ``name=None`` resolves to ``probe_name``."""
+
         resolved_name = (
             self.probe_name if name is None else validate_observation_name(name)
         )
@@ -153,6 +161,8 @@ class TensorProbeSnapshot:
         name: str | None = None,
         invocation_index: int = 0,
     ) -> torch.Tensor:
+        """Return one recorded tensor; ``name=None`` resolves to ``probe_name``."""
+
         return self.observation(name, invocation_index).tensor()
 
     def descriptor(self) -> dict[str, object]:

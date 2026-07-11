@@ -21,6 +21,8 @@ from .run_groups import MemoryRunGroup, compare_run_group_phases
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the ``tcgd-memory`` argument parser."""
+
     parser = argparse.ArgumentParser(
         prog="tcgd-memory",
         description="Analyze torch-cudagraph-debug memory run bundles.",
@@ -135,6 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run one CLI command, returning 0 on success or 2 on caught errors."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -308,7 +312,7 @@ def _add_device_map_option(
         "--device-map",
         action="append",
         default=[],
-        metavar=("RANK@REFERENCE=CANDIDATE" if ranked else "REFERENCE=CANDIDATE"),
+        metavar=("RANK@BASELINE=CANDIDATE" if ranked else "REFERENCE=CANDIDATE"),
         help=(
             "Per-rank CUDA device mapping, for example 0@0=1"
             if ranked
@@ -364,8 +368,7 @@ def _parse_rank_pool_mappings(
         rank_text, separator, mapping_text = value.partition("@")
         if not separator or not rank_text or not mapping_text:
             raise ValueError(
-                f"invalid rank pool mapping {value!r}; "
-                "expected RANK@REFERENCE=CANDIDATE"
+                f"invalid rank pool mapping {value!r}; expected RANK@BASELINE=CANDIDATE"
             )
         try:
             rank = int(rank_text)
@@ -414,7 +417,7 @@ def _parse_rank_device_mappings(
         if not separator or not rank_text or not mapping_text:
             raise ValueError(
                 f"invalid rank device mapping {value!r}; "
-                "expected RANK@REFERENCE=CANDIDATE"
+                "expected RANK@BASELINE=CANDIDATE"
             )
         try:
             rank = int(rank_text)

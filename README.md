@@ -52,7 +52,9 @@ python -m pip install --upgrade "setuptools>=77.0.3" wheel
 python -m pip install --no-build-isolation .
 ```
 
-To install directly from the repository:
+To install directly from the repository, run the same `setuptools`/`wheel`
+upgrade first (with `--no-build-isolation`, pip does not install the build
+requirements for you):
 
 ```bash
 python -m pip install --no-build-isolation \
@@ -250,8 +252,8 @@ Read the report top-down:
 
 The main signal here is the `pool[1,0] (private)` subtree: graph capture added
 a 16 MiB active allocation in a private pool. The small default-pool change is
-separate allocator/runtime activity; this state-only report does not identify
-its owner.
+separate allocator/runtime activity that a state-only report likewise leaves
+unattributed.
 Private-pool capacity can remain reserved after its blocks become inactive; see
 the [guide](docs/memory_debug.md#interpreting-cuda-graph-private-pool-inactive-memory)
 and [focused example](examples/memory_debug/probe/private_pool_inactive.py) for

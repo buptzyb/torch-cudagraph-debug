@@ -101,14 +101,20 @@ class MemoryStats:
 
     @property
     def awaiting_free_bytes(self) -> int:
+        """Active bytes awaiting free: ``active_bytes - allocated_bytes``."""
+
         return self.active_bytes - self.allocated_bytes
 
     @property
     def inactive_bytes(self) -> int:
+        """Reserved but inactive bytes: ``reserved_bytes - active_bytes``."""
+
         return self.reserved_bytes - self.active_bytes
 
     @property
     def internal_fragmentation_bytes(self) -> int:
+        """Active-block over-allocation: ``active_bytes - requested_bytes``."""
+
         return self.active_bytes - self.requested_bytes
 
     @classmethod

@@ -87,10 +87,13 @@ def normalize_snapshot(
 ) -> tuple[Mapping[str, Any], ...]:
     """Return normalized segment dictionaries from a PyTorch snapshot shape.
 
-    Absent defaultable identity, requested-size, and state fields use their
+    Absent segment ``device``, ``segment_pool_id``, and ``requested_size``
+    fields and absent block ``requested_size`` and ``state`` fields use their
     documented substitutes and are reported through ``warnings`` (aggregated
-    per field). Structural segment sizes and block ``size`` are required; any
-    field that is present with an invalid type or value raises.
+    per field); an absent ``stream`` (the unknown stream) or ``segment_type``
+    ("unknown") defaults silently. Structural segment sizes and block
+    ``size`` are required; any field that is present with an invalid type or
+    value raises.
     """
 
     segments = _segments_from_snapshot(snapshot)
@@ -459,6 +462,8 @@ def stack_key_from_frames(frames: Sequence[Mapping[str, Any]]) -> str:
 
 
 def format_bytes(value: int) -> str:
+    """Render bytes in binary units (B/KiB/MiB/GiB/TiB) with two decimals."""
+
     sign = "-" if value < 0 else ""
     amount = float(abs(value))
     units = ("B", "KiB", "MiB", "GiB", "TiB")
@@ -473,12 +478,16 @@ def format_bytes(value: int) -> str:
 
 
 def format_delta_bytes(value: int) -> str:
+    """Format a byte delta; nonzero values carry an explicit sign."""
+
     if value > 0:
         return "+" + format_bytes(value)
     return format_bytes(value)
 
 
 def format_comparison(reference: int, candidate: int, delta: int) -> str:
+    """Render ``reference -> candidate (delta)`` byte values."""
+
     return (
         f"{format_bytes(reference)} -> {format_bytes(candidate)} "
         f"({format_delta_bytes(delta)})"

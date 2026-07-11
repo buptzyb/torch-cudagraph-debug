@@ -127,6 +127,15 @@ class TensorRunGroup:
         *,
         cache_tensors: bool = False,
     ) -> "TensorRunGroup":
+        """Load every direct child bundle directory as one tensor run group.
+
+        Scans ``root`` for direct child directories that contain a
+        ``manifest.json``, loads each as a ``TensorRun`` (forwarding
+        ``cache_tensors``), and validates them through ``from_runs``.
+        Raises ``TensorBundleError`` when ``root`` is not a directory or
+        holds no bundles.
+        """
+
         group_root = Path(root).resolve()
         if not group_root.is_dir():
             raise TensorBundleError(
@@ -155,6 +164,15 @@ class TensorRunGroup:
         *,
         root: str | Path | None = None,
     ) -> "TensorRunGroup":
+        """Build a validated rank-indexed group from per-rank tensor runs.
+
+        Raises ``TensorBundleError`` for an empty iterable, a run without a
+        rank, a duplicate rank, differing run names or execution modes, or
+        point labels that diverge from the longest rank's sequence other
+        than as a strict prefix. An incomplete (crashed) rank whose labels
+        are a strict prefix is accepted with a warning.
+        """
+
         materialized = tuple(runs)
         if not materialized:
             raise TensorBundleError("tensor run group requires at least one run")

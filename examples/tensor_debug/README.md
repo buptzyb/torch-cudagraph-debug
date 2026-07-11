@@ -48,7 +48,8 @@ the intentional second-replay mismatch conclusive.
 
 `recorder/distributed_run_groups.py` records eager and CUDA Graph bundles on
 each rank, loads both `TensorRunGroup` objects, and writes rank-preserving
-summary and comparison reports.
+summary and comparison reports. Each rank binds its own CUDA device, so the
+two-process `torchrun` command below needs 2+ GPUs.
 
 Recorder examples require an absent output directory because bundle writers do
 not overwrite nonempty bundles:

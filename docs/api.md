@@ -166,7 +166,7 @@ report replay index 0. Eager observations own one slot per observation name:
 a repeated name samples in place (latest value) with `invocation_index=0`,
 while each new name appends a slot. Positional `CheckAction` entries bind
 eager slots in first-use name order. Observation names are a fixed
-vocabulary — generating a fresh name per iteration grows a slot each time.
+vocabulary — generating a fresh name per iteration adds a new slot each time.
 Validation and host-side slot preparation failures do not consume a
 name's first-use order; a failed replacement also preserves the previous
 eager value. The probe's one capture then establishes its own slot
@@ -498,8 +498,8 @@ class TensorRun:
     points: tuple[TensorPoint, ...]
     group_id: str | None
     world_size: int | None
-    provenance: Mapping[str, Any]
-    run_metadata: Mapping[str, Any]
+    provenance: Mapping[str, FrozenJSONValue]
+    run_metadata: Mapping[str, FrozenJSONValue]
     bundle_dir: Path | None
 
 TensorRun.load(bundle_dir, *, cache_tensors=False) -> TensorRun
@@ -607,8 +607,9 @@ range; mean and relative errors remain floating-point metrics.
 `TensorSnapshotComparison`, `TensorPointComparison`, `TensorRunComparison`,
 `TensorPointSeriesComparison`, and `TensorRunGroupComparison` expose `status`,
 `ok`, `conclusive`, `assert_ok()`, `to_text()`, `to_dict()`, `to_html()`, and
-`write()`. Point reports additionally provide `first_issue` and
-`worst_observation_comparisons()`. Text, HTML, and CSV include matches by
+`write()`. Snapshot and point reports also provide `first_issue` and
+`worst_observation_comparisons()`; run and series reports expose `first_issue`
+as a `(label, issue)` pair. Text, HTML, and CSV include matches by
 default and accept `include_unchanged=False`; JSON remains complete. Report
 files are written atomically. `write()` rejects a nonempty directory unless
 `overwrite=True`.
@@ -648,7 +649,7 @@ is accepted with the incomplete-bundle warning; a complete rank with fewer
 points or any non-prefix sequence is an error. Conflicting non-null
 group IDs or world sizes are errors; missing identity, missing declared ranks,
 incomplete bundles, provenance differences, and metadata differences are
-warnings. `TensorRankPointSummary` records rank, run ID, point index/label, observation
+warnings. `TensorRankPointSummary` records rank, point index/label, observation
 count, and full/summary payload counts. `TensorRankRunComparison` pairs a rank
 with its `TensorRunComparison` and derived status. `TensorRunGroupSummary`
 carries the group, ordered rank-point rows, and warnings;
@@ -704,7 +705,8 @@ Exit status is zero for a match, one for a mismatch or inconclusive result, and
 two for invalid input or an operational error.
 
 `TensorBundleError` reports malformed or unreadable bundles.
-`TensorOwnershipError` reports foreign run objects, and
+`TensorOwnershipError` reports points or snapshots used with a run or probe
+that does not own them, and
 `TensorPayloadUnavailableError` reports attempts to materialize summary-only
 values.
 
@@ -862,9 +864,9 @@ MemoryRecorder(
     *,
     name: str = "run",
     bundle_dir: str | pathlib.Path | None = None,
+    rank: int | None = None,
     devices: torch.device | str | int | Sequence[torch.device | str | int]
         | Literal["all"] | None = None,
-    rank: int | None = None,
     synchronize: bool | torch.cuda.Stream | torch.device = True,
     group_id: str | None = None,
     world_size: int | None = None,
@@ -1422,7 +1424,8 @@ reports:
   optional sample, the device allocator rollup `stats` with its previous-point
   `delta`, and sample deltas that stay `None` together when either endpoint
   lacks the sample.
-- `MemoryPhaseComponents` carries the five terms of one phase equation.
+- `MemoryPhaseComponents` carries the four stored terms of one phase equation
+  plus the derived `change_gap_bytes`.
   `MemoryAllocatorScopePhaseDecomposition` adds a scope,
   `MemoryPoolPhaseDecomposition` adds both mapped pool keys, and
   `MemoryDevicePhaseDecomposition` adds `baseline_device_index` and
@@ -1552,7 +1555,7 @@ followed by atomic replacement, and every path is validated to remain inside the
 bundle.
 
 Manifest, point, and observation objects have canonical required fields.
-Observation rows persist the ten base `MemoryStats` fields. `awaiting_free_bytes`,
+Observation rows persist the eleven base `MemoryStats` fields. `awaiting_free_bytes`,
 `inactive_bytes`, and `internal_fragmentation_bytes` are derived after loading.
 Each point also persists `device_memory` as an object keyed by decimal device
 index whose entries store exactly `free_bytes` and `total_bytes`; `used_bytes`
@@ -1581,16 +1584,19 @@ tcgd-memory allocation-lifetimes BUNDLE \
 tcgd-memory timeline BUNDLE [--output DIR]
 tcgd-memory compare-points REFERENCE_BUNDLE [CANDIDATE_BUNDLE] \
   --reference-point POINT --candidate-point POINT \
-  [--pool-map DEVICE:POOL0,POOL1=DEVICE:POOL0,POOL1] [--output DIR]
+  [--pool-map DEVICE:POOL0,POOL1=DEVICE:POOL0,POOL1] \
+  [--device-map REFERENCE=CANDIDATE] [--output DIR]
 tcgd-memory compare-phases BASELINE_BUNDLE CANDIDATE_BUNDLE \
   --baseline-start POINT --baseline-end POINT \
   --candidate-start POINT --candidate-end POINT \
-  [--pool-map DEVICE:POOL0,POOL1=DEVICE:POOL0,POOL1] [--output DIR]
+  [--pool-map DEVICE:POOL0,POOL1=DEVICE:POOL0,POOL1] \
+  [--device-map REFERENCE=CANDIDATE] [--output DIR]
 tcgd-memory group-summary GROUP_DIR [--output DIR]
 tcgd-memory compare-run-group-phases BASELINE_GROUP CANDIDATE_GROUP \
   --baseline-start POINT --baseline-end POINT \
   --candidate-start POINT --candidate-end POINT \
-  [--pool-map RANK@DEVICE:POOL0,POOL1=DEVICE:POOL0,POOL1] [--output DIR]
+  [--pool-map RANK@DEVICE:POOL0,POOL1=DEVICE:POOL0,POOL1] \
+  [--device-map RANK@BASELINE=CANDIDATE] [--output DIR]
 ```
 
 `summary` prints run completion and rank identity, then each point's
@@ -1632,6 +1638,7 @@ Snapshot and state types:
 ```python
 advanced.AllocatorSnapshotData
 advanced.MemoryObservationKey
+advanced.MemoryPoolKey
 advanced.MemoryStats
 advanced.AllocatorTraceEntry
 advanced.KNOWN_TRACE_ACTIONS
@@ -1747,7 +1754,8 @@ advanced.mutable_snapshot(source)
 - `TensorCheckError`: online `CheckAction` mismatch reported by `assert_check_ok()`.
 - `TensorComparisonError`: failed offline comparison assertion.
 - `TensorBundleError`: malformed, unsupported, or unreadable tensor bundle.
-- `TensorOwnershipError`: point used with a run that does not own it.
+- `TensorOwnershipError`: point or snapshot used with a run or probe that does
+  not own it.
 - `TensorPayloadUnavailableError`: full values requested from a summary observation.
 - `MemoryDebugError`: memory domain base.
 - `MemoryHistoryError`: requested history unavailable or incomplete.

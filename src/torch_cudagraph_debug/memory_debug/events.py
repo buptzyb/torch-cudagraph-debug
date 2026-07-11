@@ -296,10 +296,12 @@ def extract_event_window(
     end_marker: str | None,
     start_label: str,
 ) -> EventWindow:
-    """Extract events after the last start marker, through the last end
-    marker or — with ``end_marker=None`` — the end of the trace.
+    """Extract events after the last start marker and before the last end
+    marker, or — with ``end_marker=None`` — through the end of the trace.
 
-    A requested end marker that is absent yields a truncated window.
+    Neither boundary entry is included. A start marker that is None or
+    missing from the trace yields a truncated window, as does a requested
+    end marker that is absent.
     """
 
     if not entries:
@@ -453,7 +455,14 @@ def summarize_allocator_events(
     reference_segments: Sequence[Mapping[str, Any]],
     candidate_segments: Sequence[Mapping[str, Any]],
 ) -> tuple[AllocatorEventSummary, ...]:
-    """Aggregate historical events separately from active allocation stacks."""
+    """Aggregate historical events separately from active allocation stacks.
+
+    Reference and candidate segments feed the address-to-pool attribution
+    index used when an entry reports no pool. ``attribution_confidence`` is
+    ``reported``, ``matched``, ``ambiguous``, ``unknown``, or
+    ``not_applicable`` (OOM entries). ``snapshot`` actions are skipped, and
+    each group sums the absolute values of its entry sizes.
+    """
 
     ranges = build_pool_range_index(candidate_segments, reference_segments)
     totals: dict[tuple[int, PoolId | None, Any, str, str, str], Counter[str]] = (

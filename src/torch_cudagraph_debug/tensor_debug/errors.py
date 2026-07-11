@@ -20,7 +20,8 @@ class TensorBundleError(TensorDebugError):
 
 
 class TensorOwnershipError(TensorDebugError):
-    """Raised when an object is used with a tensor run that does not own it."""
+    """Raised when an object is used with a tensor run or probe that does not
+    own it."""
 
 
 class TensorPayloadUnavailableError(TensorDebugError):

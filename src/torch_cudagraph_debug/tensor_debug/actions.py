@@ -33,7 +33,19 @@ def validate_non_contiguous_policy(policy: str) -> NonContiguousPolicy:
 
 @dataclass(frozen=True)
 class PrintAction:
-    """Print a compact tensor summary through a CUDA host callback."""
+    """Print a compact tensor summary through a CUDA host callback.
+
+    Each line goes to stderr and always carries the replay index, the
+    observation name and invocation, the enqueue order, the dtype, and the
+    shape. ``every`` throttles printing: a captured observation prints when
+    the graph replay index is divisible by it, while an eager observation
+    prints on every ``every``-th eager callback of the probe, counted from
+    one across all observations. ``max_items`` caps how many leading
+    elements appear in the printed value listing; longer tensors are
+    truncated with an ellipsis. ``summary=True`` adds numel, the min, max,
+    and mean over finite values, and the NaN and inf counts;
+    ``summary=False`` prints only the header, shape, and leading values.
+    """
 
     max_items: int = 16
     every: int = 1
