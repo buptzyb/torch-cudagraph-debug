@@ -1,0 +1,14 @@
+{
+  "name": "torch-cudagraph-debug",
+  "owner": {
+    "name": "torch-cudagraph-debug contributors"
+  },
+  "description": "Agent assets for torch-cudagraph-debug CUDA Graph debugging",
+  "plugins": [
+    {
+      "name": "tcgd",
+      "source": "./plugins/tcgd",
+      "description": "Evidence-backed PyTorch CUDA Graph tensor and allocator-memory investigations: the tcgd-investigate skill and the tcgd-debugger agent."
+    }
+  ]
+}

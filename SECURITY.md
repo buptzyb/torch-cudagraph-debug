@@ -6,10 +6,11 @@ Security fixes are handled on the latest released minor version.
 
 ## Reporting a Vulnerability
 
-Report security issues through the public repository's private vulnerability
-reporting channel if it is enabled. If private reporting is not available, email
-the maintainers listed in the repository metadata.
+Report security issues through
+[GitHub's private vulnerability reporting form](https://github.com/buptzyb/torch-cudagraph-debug/security/advisories/new).
+If that form is unavailable, open a public issue that asks the maintainers to
+enable a private contact path, but do not include vulnerability details in that
+issue.
 
 Do not open a public issue for a vulnerability until maintainers have confirmed
 that disclosure is appropriate.
-

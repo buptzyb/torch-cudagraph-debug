@@ -1,23 +1,96 @@
-"""Tensor value debugging helpers for CUDA Graph replay."""
+"""Tensor value debugging for eager and CUDA Graph execution."""
 
+from ._identity import TensorObservationKey
 from .actions import (
-    NonContiguousPolicy,
-    TensorCompare,
-    TensorPrint,
-    TensorRecord,
+    CheckAction,
+    PrintAction,
+    RecordAction,
+    TensorExpected,
+    TensorExpectedValue,
 )
-from .errors import TensorCompareMismatchError, TensorDebugError
-from .probe import CudaGraphTensorProbe, ProbeMode
-from .records import TensorSnapshot
+from .comparison import (
+    ComparisonMode,
+    ComparisonStatus,
+    DTypePolicy,
+    LayoutPolicy,
+    ObservationComparisonKind,
+    TensorComparisonOptions,
+    TensorObservationComparison,
+    TensorPointComparison,
+    TensorPointSeriesComparison,
+    TensorRunComparison,
+    TensorSnapshotComparison,
+    compare_point_series,
+    compare_points,
+    compare_runs,
+    compare_snapshots,
+)
+from .errors import (
+    TensorBundleError,
+    TensorCheckError,
+    TensorComparisonError,
+    TensorDebugError,
+    TensorOwnershipError,
+    TensorPayloadUnavailableError,
+)
+from .probe import TensorProbe
+from .recording import (
+    TensorObservation,
+    TensorPoint,
+    TensorRecorder,
+    TensorRun,
+    TensorValueSummary,
+)
+from .run_groups import (
+    TensorRankPointSummary,
+    TensorRankRunComparison,
+    TensorRunGroup,
+    TensorRunGroupComparison,
+    TensorRunGroupSummary,
+    compare_run_groups,
+)
+from .snapshots import TensorCheckStatus, TensorProbeSnapshot
 
 __all__ = [
-    "CudaGraphTensorProbe",
-    "TensorPrint",
-    "TensorRecord",
-    "TensorCompare",
-    "TensorSnapshot",
+    "CheckAction",
+    "ComparisonMode",
+    "ComparisonStatus",
+    "DTypePolicy",
+    "LayoutPolicy",
+    "ObservationComparisonKind",
+    "PrintAction",
+    "RecordAction",
+    "TensorBundleError",
+    "TensorCheckError",
+    "TensorCheckStatus",
+    "TensorComparisonError",
+    "TensorComparisonOptions",
+    "TensorExpected",
+    "TensorExpectedValue",
     "TensorDebugError",
-    "TensorCompareMismatchError",
-    "NonContiguousPolicy",
-    "ProbeMode",
+    "TensorObservation",
+    "TensorObservationComparison",
+    "TensorObservationKey",
+    "TensorOwnershipError",
+    "TensorPayloadUnavailableError",
+    "TensorPoint",
+    "TensorPointComparison",
+    "TensorPointSeriesComparison",
+    "TensorProbe",
+    "TensorProbeSnapshot",
+    "TensorRankPointSummary",
+    "TensorRankRunComparison",
+    "TensorRecorder",
+    "TensorRun",
+    "TensorRunComparison",
+    "TensorRunGroup",
+    "TensorRunGroupComparison",
+    "TensorRunGroupSummary",
+    "TensorSnapshotComparison",
+    "TensorValueSummary",
+    "compare_point_series",
+    "compare_points",
+    "compare_run_groups",
+    "compare_runs",
+    "compare_snapshots",
 ]

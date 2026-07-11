@@ -7,5 +7,23 @@ class TensorDebugError(CudaGraphDebugError):
     """Base error for tensor debug probes."""
 
 
-class TensorCompareMismatchError(TensorDebugError, AssertionError):
-    """Raised when a tensor comparison action reported a mismatch."""
+class TensorCheckError(TensorDebugError, AssertionError):
+    """Raised when an online tensor check reports a mismatch."""
+
+
+class TensorComparisonError(TensorDebugError, AssertionError):
+    """Raised when an offline tensor comparison is not a match."""
+
+
+class TensorBundleError(TensorDebugError):
+    """Raised for malformed, unsupported, or unreadable tensor bundles."""
+
+
+class TensorOwnershipError(TensorDebugError):
+    """Raised when an object is used with a tensor run or probe that does not
+    own it."""
+
+
+class TensorPayloadUnavailableError(TensorDebugError):
+    """Raised when an operation needs a full tensor payload but the
+    observation is summary-only."""

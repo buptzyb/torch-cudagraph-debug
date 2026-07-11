@@ -4,16 +4,16 @@ import numpy as np
 import pytest
 import torch
 
-import torch_cudagraph_debug.tensor_debug as tensor_debug
 from torch_cudagraph_debug.tensor_debug import (
-    TensorCompare,
-    TensorPrint,
-    TensorRecord,
+    CheckAction,
+    PrintAction,
+    RecordAction,
+    TensorObservationKey,
 )
 
 
 def test_print_action_spec() -> None:
-    spec = TensorPrint(max_items=4, every=2, summary=False)._to_native()
+    spec = PrintAction(max_items=4, every=2, summary=False)._to_native()
 
     assert spec == {
         "kind": "print",
@@ -25,15 +25,15 @@ def test_print_action_spec() -> None:
 
 
 def test_record_action_spec() -> None:
-    assert TensorRecord()._to_native() == {"kind": "record", "enabled": True}
+    assert RecordAction()._to_native() == {"kind": "record", "enabled": True}
 
 
-def test_compare_accepts_expected_tensor_sequence() -> None:
+def test_check_accepts_expected_tensor_sequence() -> None:
     expected = torch.tensor([1.0, 2.0])
 
-    spec = TensorCompare([expected], rtol=0.1, atol=0.2, equal_nan=True)._to_native()
+    spec = CheckAction([expected], rtol=0.1, atol=0.2, equal_nan=True)._to_native()
 
-    assert spec["kind"] == "compare"
+    assert spec["kind"] == "check"
     assert spec["rtol"] == 0.1
     assert spec["atol"] == 0.2
     assert spec["equal_nan"] is True
@@ -43,37 +43,67 @@ def test_compare_accepts_expected_tensor_sequence() -> None:
     assert spec["expected"][0].is_contiguous()
 
 
-def test_compare_accepts_numpy_array_sequence() -> None:
+def test_check_accepts_numpy_array_sequence() -> None:
     expected = np.array([1, 2, 3], dtype=np.int32)
 
-    spec = TensorCompare([expected])._to_native()
+    spec = CheckAction([expected])._to_native()
 
     assert torch.equal(spec["expected"][0], torch.tensor([1, 2, 3], dtype=torch.int32))
 
 
-def test_compare_rejects_bare_tensor_or_numpy_array() -> None:
-    with pytest.raises(TypeError, match="wrap a single expected tensor"):
-        TensorCompare(torch.tensor([1.0]))._to_native()
+def test_check_accepts_single_tensor_or_numpy_array() -> None:
+    tensor_spec = CheckAction(torch.tensor([1.0]))._to_native()
+    array_spec = CheckAction(np.array([2.0], dtype=np.float32))._to_native()
 
-    with pytest.raises(TypeError, match="wrap a single expected tensor"):
-        TensorCompare(np.array([1.0], dtype=np.float32))._to_native()
+    assert len(tensor_spec["expected"]) == 1
+    assert torch.equal(tensor_spec["expected"][0], torch.tensor([1.0]))
+    assert len(array_spec["expected"]) == 1
+    assert torch.equal(array_spec["expected"][0], torch.tensor([2.0]))
 
 
-def test_compare_rejects_empty_expected_sequence() -> None:
+def test_check_accepts_semantic_observation_mapping() -> None:
+    hidden_key = TensorObservationKey("hidden", 0)
+    output_key = TensorObservationKey("output", 1)
+
+    spec = CheckAction(
+        {
+            hidden_key: torch.tensor([1.0]),
+            output_key: np.array([2.0], dtype=np.float32),
+        }
+    )._to_native()
+
+    assert [(item["name"], item["invocation_index"]) for item in spec["expected"]] == [
+        ("hidden", 0),
+        ("output", 1),
+    ]
+    assert all(isinstance(item["tensor"], torch.Tensor) for item in spec["expected"])
+
+    with pytest.raises(TypeError, match="TensorObservationKey"):
+        CheckAction({"hidden": torch.tensor([1.0])})._to_native()  # type: ignore[dict-item]
+
+
+def test_check_rejects_empty_expected_sequence() -> None:
     with pytest.raises(ValueError, match="non-empty"):
-        TensorCompare([])._to_native()
+        CheckAction([])._to_native()
 
 
-def test_compare_rejects_non_cpu_expected() -> None:
+@pytest.mark.gpu
+def test_check_rejects_non_cpu_expected() -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
 
     with pytest.raises(ValueError, match="CPU"):
-        TensorCompare([torch.ones(1, device="cuda")])._to_native()
+        CheckAction([torch.ones(1, device="cuda")])._to_native()
 
 
-def test_multi_expected_compare_action_is_not_exported() -> None:
-    legacy_name = "Tensor" + "Compare" + "Each"
-
-    assert legacy_name not in tensor_debug.__all__
-    assert not hasattr(tensor_debug, legacy_name)
+def test_actions_reject_lossy_scalar_types() -> None:
+    with pytest.raises(TypeError, match="max_items"):
+        PrintAction(max_items=True)
+    with pytest.raises(TypeError, match="every"):
+        PrintAction(every=1.5)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="enabled"):
+        RecordAction(enabled=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="rtol must be finite"):
+        CheckAction(torch.ones(1), rtol=float("nan"))
+    with pytest.raises(TypeError, match="equal_nan"):
+        CheckAction(torch.ones(1), equal_nan=1)  # type: ignore[arg-type]

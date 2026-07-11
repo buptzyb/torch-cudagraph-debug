@@ -4,17 +4,20 @@ Thanks for improving `torch-cudagraph-debug`.
 
 ## Development Setup
 
-Install a CUDA-enabled PyTorch build first, then install this package from the
-source checkout:
+Install a CUDA-enabled PyTorch build, a compatible CUDA development toolkit,
+and a C++17 compiler first. Source installation builds the native tensor
+extension for the whole package. Then install from the source checkout:
 
 ```bash
-python -m pip install --upgrade pip
+python -m pip install --upgrade pip "setuptools>=77.0.3" wheel
+python -m pip install -r requirements-dev.txt
 python -m pip install --no-build-isolation -e .
-python -m pip install pytest build twine
 ```
 
-CPU-only environments can run Python-level tests. CUDA graph behavior requires a
-CUDA-enabled PyTorch runtime and a GPU.
+CPU-only environments can run the Python-level tests directly from the
+checkout (the test suite adds `src/` to `sys.path`); installing the package
+itself requires a CUDA-enabled PyTorch build even without a GPU. CUDA Graph
+behavior requires a CUDA-enabled PyTorch runtime and a GPU.
 
 ## Checks
 
@@ -22,13 +25,33 @@ Run local checks before opening a pull request:
 
 ```bash
 python -m py_compile $(find src tests examples -name '*.py')
+python -m ruff check src tests examples
+python -m ruff check --select I src tests examples
+python -m ruff format --check src tests examples
+bash -n examples/tensor_debug/cli/workflows.sh
+bash -n examples/memory_debug/cli/workflows.sh
 python -m pytest -q tests
-python -m build --sdist
+python -m build --sdist --no-isolation
 python -m twine check dist/*
 ```
 
+`requirements-dev.txt` pins the formatter version used by CI so local and
+automated formatting decisions stay identical.
+
 GPU tests are marked with `pytest.mark.gpu` but are included in the default test
 suite; they skip automatically when CUDA or the native extension is unavailable.
+
+## Agent Assets
+
+The canonical investigation skill lives at
+`.agents/skills/tcgd-investigate/SKILL.md`. Claude Code discovers that same
+directory through `.claude/skills/tcgd-investigate`; keep it as a symbolic link
+and do not copy the skill content into a second location.
+
+Codex and Claude custom-agent files contain only runtime-specific metadata and
+the shared role contract. Put investigation procedure changes in the canonical
+skill, then run `python -m pytest -q tests/test_agent_assets.py` to validate
+metadata, links, and referenced examples.
 
 ## Native Extension Notes
 
@@ -41,4 +64,3 @@ work, enqueue it before the host callback so it becomes part of graph capture.
 This project publishes source distributions first. Do not add prebuilt CUDA
 wheels unless the release process also covers PyTorch, CUDA, Python, and platform
 compatibility for those wheels.
-

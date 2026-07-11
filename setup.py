@@ -5,8 +5,37 @@ from setuptools import setup
 
 
 def is_metadata_command() -> bool:
-    metadata_commands = {"egg_info", "dist_info", "sdist", "clean", "--name", "--version"}
-    return any(arg in metadata_commands for arg in sys.argv[1:])
+    """True only when no requested command needs the native extension.
+
+    distutils runs every command of one invocation with the same
+    ``ext_modules``, so a build-style command anywhere in argv must win:
+    ``setup.py sdist bdist_wheel`` would otherwise silently produce a pure
+    wheel without ``_C``, and ``clean build_ext --inplace`` a no-op rebuild.
+    """
+
+    build_commands = {
+        "build",
+        "build_ext",
+        "build_py",
+        "bdist",
+        "bdist_wheel",
+        "bdist_egg",
+        "install",
+        "develop",
+        "editable_wheel",
+    }
+    metadata_commands = {
+        "egg_info",
+        "dist_info",
+        "sdist",
+        "clean",
+        "--name",
+        "--version",
+    }
+    args = sys.argv[1:]
+    if any(arg in build_commands for arg in args):
+        return False
+    return any(arg in metadata_commands for arg in args)
 
 
 def get_extensions():
@@ -32,8 +61,9 @@ def get_extensions():
     sources = [
         csrc / "bindings.cpp",
         csrc / "tensor_debug" / "probe_context.cpp",
+        csrc / "tensor_debug" / "replay_counter.cu",
         csrc / "tensor_debug" / "tensor_format.cpp",
-        csrc / "tensor_debug" / "compare.cpp",
+        csrc / "tensor_debug" / "check.cpp",
     ]
 
     extension = CUDAExtension(

@@ -1,12 +1,20 @@
 include README.md
+include AGENTS.md
+include CLAUDE.md
+recursive-include .agents *.md
+recursive-include .claude *.md
+recursive-include .claude-plugin *.json
+recursive-include .codex *.toml
+recursive-include plugins *.md *.json
 include CHANGELOG.md
 include LICENSE
 include CONTRIBUTING.md
 include SECURITY.md
 include pyproject.toml
+include requirements-dev.txt
 include setup.py
 recursive-include docs *.md
-recursive-include examples *.py
-recursive-include src/torch_cudagraph_debug/csrc *.cpp *.h
+recursive-include examples *.md *.py *.sh
+recursive-include src/torch_cudagraph_debug/csrc *.cpp *.cu *.h
 recursive-include src/torch_cudagraph_debug py.typed
 recursive-include tests *.py

@@ -1,39 +1,52 @@
-"""Object API for CUDA Graph tensor probes."""
+"""Object API for eager and CUDA Graph tensor probes."""
 
 from __future__ import annotations
 
+import hashlib
+import time
+import uuid
 from collections.abc import Sequence
-from typing import Any, Literal, overload
+from typing import TYPE_CHECKING
 
 import torch
 from torch.utils.hooks import RemovableHandle
 
-from torch_cudagraph_debug import _native
-
-from .actions import (
-    NonContiguousPolicy,
-    TensorCompare,
-    TensorPrint,
-    TensorRecord,
-    validate_non_contiguous_policy,
+from ._collector import (
+    DeviceLike,
+    ProbeWhen,
+    SynchronizeTarget,
+    TensorAction,
+    _TensorCollector,
+    validate_synchronize_target,
 )
-from .errors import TensorCompareMismatchError
-from .records import TensorSnapshot
+from ._identity import validate_observation_name
+from .actions import NonContiguousPolicy
+from .errors import TensorCheckError, TensorDebugError, TensorOwnershipError
+from .recording import (
+    TensorObservation,
+    _summarize_tensor,
+)
+from .snapshots import TensorCheckStatus, TensorProbeSnapshot
 
-TensorAction = TensorPrint | TensorRecord | TensorCompare
-ProbeMode = Literal["capture", "always"]
-
-
-def validate_probe_mode(mode: str) -> ProbeMode:
-    """Validate when a probe should enqueue debug work."""
-
-    if mode not in {"capture", "always"}:
-        raise ValueError('mode must be either "capture" or "always"')
-    return mode  # type: ignore[return-value]
+if TYPE_CHECKING:
+    from .comparison import TensorComparisonOptions, TensorSnapshotComparison
 
 
-class CudaGraphTensorProbe:
-    """Transparent tensor probe that injects CUDA Graph debug side effects."""
+class TensorProbe:
+    """Transparent tensor probe for eager execution or CUDA Graph capture and replay.
+
+    ``name`` identifies the probe and doubles as the default observation
+    name. ``actions`` must be a non-empty sequence (``ValueError`` when
+    empty); a probe whose actions are all disabled collects nothing.
+    ``when`` selects the sampling window: the default ``"capture"`` makes
+    calls outside CUDA Graph capture transparent no-ops, while ``"always"``
+    also samples eager invocations. ``non_contiguous`` either rejects
+    non-contiguous tensors (``"error"``) or allows a debug-only contiguous
+    copy (``"copy"``). ``synchronize`` is the default synchronization
+    target for queries such as ``snapshot()`` and ``check_status()``.
+    ``device`` selects the CUDA device that owns the probe's replay
+    counter; it defaults to the current CUDA device.
+    """
 
     def __init__(
         self,
@@ -41,148 +54,289 @@ class CudaGraphTensorProbe:
         actions: Sequence[TensorAction],
         *,
         non_contiguous: NonContiguousPolicy = "error",
-        mode: ProbeMode = "capture",
-    ):
-        if not name:
-            raise ValueError("name must be non-empty")
-        if not actions:
-            raise ValueError("actions must be non-empty")
-
+        when: ProbeWhen = "capture",
+        device: DeviceLike | None = None,
+        synchronize: SynchronizeTarget = True,
+    ) -> None:
+        validate_synchronize_target(synchronize)
+        self.synchronize = synchronize
+        name = validate_observation_name(name)
         self.name = name
+        self._probe_id = uuid.uuid4().hex
         self._closed = False
-        self._actions = tuple(actions)
-        self.non_contiguous = validate_non_contiguous_policy(non_contiguous)
-        self.mode = validate_probe_mode(mode)
-        self._enabled_actions = tuple(
-            action for action in self._actions if bool(action.enabled)
+        self._collector = _TensorCollector(
+            name,
+            actions,
+            non_contiguous=non_contiguous,
+            when=when,
+            device=device,
         )
-        if self._enabled_actions:
-            action_specs = [action._to_native() for action in self._enabled_actions]
-            native = _native.require_native()
-            self._handle: Any | None = native.create_tensor_debug_probe(
-                name, action_specs, self.non_contiguous, self.mode
-            )
-        else:
-            self._handle = None
+        self.non_contiguous = self._collector.non_contiguous
+        self.when = self._collector.when
+        self._capture_invocation_counts: dict[str, int] = {}
+        self._next_snapshot_index = 0
+        self._grad_handles: list[RemovableHandle] = []
 
-    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Return ``tensor`` unchanged while enqueueing debug work on the current stream."""
+    @property
+    def replay_index(self) -> torch.Tensor | None:
+        """Return a detached GPU copy of the graph replay counter, or ``None``
+        for a probe whose actions are all disabled."""
+
+        return self._collector.replay_index
+
+    def __call__(
+        self,
+        tensor: torch.Tensor,
+        *,
+        name: str | None = None,
+    ) -> torch.Tensor:
+        """Return ``tensor`` unchanged while enqueueing one named observation."""
+
+        resolved_name = validate_observation_name(self.name if name is None else name)
+        invocation_index, counted = self._classify_invocation(
+            tensor,
+            resolved_name,
+        )
+        result = self._collector.enqueue(
+            tensor,
+            name=resolved_name,
+            invocation_index=invocation_index,
+        )
+        # Commit the invocation index only after the enqueue succeeded: a
+        # rejected call must not burn the index its retry will need.
+        if counted:
+            self._capture_invocation_counts[resolved_name] = invocation_index + 1
+        return result
+
+    def watch_grad(
+        self,
+        tensor: torch.Tensor,
+        *,
+        name: str | None = None,
+        strict: bool = False,
+    ) -> RemovableHandle | None:
+        """Register an autograd hook that probes the tensor's backward gradient.
+
+        When the tensor does not require grad, the default ``strict=False``
+        silently registers nothing and returns ``None``, so its gradients
+        are never observed; ``strict=True`` raises instead.
+        """
 
         self._ensure_open()
-        if self._handle is None:
-            return tensor
-        return self._handle.enqueue(tensor)
-
-    @overload
-    def attach_grad(
-        self,
-        tensor: torch.Tensor,
-        *,
-        strict: bool = False,
-        return_handle: Literal[False] = False,
-    ) -> torch.Tensor: ...
-
-    @overload
-    def attach_grad(
-        self,
-        tensor: torch.Tensor,
-        *,
-        strict: bool = False,
-        return_handle: Literal[True],
-    ) -> tuple[torch.Tensor, RemovableHandle | None]: ...
-
-    def attach_grad(
-        self,
-        tensor: torch.Tensor,
-        *,
-        strict: bool = False,
-        return_handle: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, RemovableHandle | None]:
-        """Register an autograd hook that probes ``tensor``'s backward gradient."""
-
-        self._ensure_open()
+        resolved_name = validate_observation_name(self.name if name is None else name)
         if not tensor.requires_grad:
             if strict:
                 raise RuntimeError(
-                    "cannot attach grad probe to a tensor that does not require grad"
+                    "cannot watch gradients for a tensor that does not require grad"
                 )
-            if return_handle:
-                return tensor, None
-            return tensor
+            return None
 
         def hook(grad: torch.Tensor | None) -> torch.Tensor | None:
             if grad is None:
                 return None
-            self(grad)
+            self(grad, name=resolved_name)
             return grad
 
         handle = tensor.register_hook(hook)
-        if return_handle:
-            return tensor, handle
-        return tensor
+        self._grad_handles.append(handle)
+        return handle
 
-    def records(self) -> list[TensorSnapshot]:
-        """Return latest CPU tensor snapshots ordered by logical slot."""
+    def snapshot(
+        self,
+        *,
+        synchronize: SynchronizeTarget | None = None,
+    ) -> TensorProbeSnapshot:
+        """Return the latest recorded value of every slot as one aggregate
+        snapshot. Requires an enabled RecordAction; a record-only probe
+        rejects queries during CUDA Graph capture."""
 
         self._ensure_open()
-        if self._handle is None:
-            return []
-        records: list[TensorSnapshot] = []
-        for item in self._handle.records():
-            tensor = item["tensor"]
-            records.append(
-                TensorSnapshot(
-                    probe_name=str(item["probe_name"]),
-                    replay_index=int(item["replay_index"]),
-                    tensor=tensor,
-                    shape=tuple(item.get("shape", tuple(tensor.shape))),
-                    dtype=getattr(tensor, "dtype"),
-                    device=str(item.get("device", "")),
-                    invocation_index=int(item.get("invocation_index", 0)),
+        if not self._collector.record_enabled:
+            raise TensorDebugError(
+                "TensorProbe.snapshot() requires an enabled RecordAction"
+            )
+        selected = self.synchronize if synchronize is None else synchronize
+        collected = self._collector.collect(synchronize=selected)
+        if not collected:
+            raise TensorDebugError("TensorProbe has no recorded invocation snapshot")
+        replay_indices = {item.replay_index for item in collected}
+        if len(replay_indices) != 1:
+            raise TensorDebugError(
+                "recorded tensor invocations reported different replay indices"
+            )
+        observations = []
+        for item in collected:
+            tensor = item.tensor.detach().contiguous().cpu()
+            raw = tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
+            observations.append(
+                TensorObservation(
+                    order=item.order,
+                    name=item.name,
+                    invocation_index=item.invocation_index,
+                    shape=item.shape,
+                    stride=item.stride,
+                    dtype=item.dtype,
+                    source_device=item.source_device,
+                    nbytes=len(raw),
+                    payload="full",
+                    sha256=hashlib.sha256(raw).hexdigest(),
+                    summary=_summarize_tensor(tensor),
+                    _tensor_cache={"tensor": tensor},
+                    _cache_tensors=True,
                 )
             )
-        return records
+        snapshot = TensorProbeSnapshot(
+            probe_id=self._probe_id,
+            probe_name=self.name,
+            snapshot_index=self._next_snapshot_index,
+            replay_index=next(iter(replay_indices)),
+            timestamp=time.time(),
+            observations=tuple(observations),
+            eager_overwrites=tuple(
+                (item.name, item.eager_overwrites)
+                for item in collected
+                if item.eager_overwrites > 0
+            ),
+        )
+        self._next_snapshot_index += 1
+        return snapshot
 
-    def clear_records(self) -> None:
-        """Clear latest record buffers by zeroing their retained host storage."""
+    def compare(
+        self,
+        reference: TensorProbeSnapshot,
+        candidate: TensorProbeSnapshot,
+        *,
+        options: TensorComparisonOptions | None = None,
+    ) -> TensorSnapshotComparison:
+        """Compare two chronologically ordered snapshots owned by this probe."""
+
+        for role, snapshot in (
+            ("reference", reference),
+            ("candidate", candidate),
+        ):
+            if snapshot.probe_id != self._probe_id:
+                raise TensorOwnershipError(
+                    f"{role} snapshot does not belong to TensorProbe({self.name!r})"
+                )
+        if candidate.snapshot_index <= reference.snapshot_index:
+            raise ValueError("candidate snapshot must follow reference snapshot")
+
+        from .comparison import compare_snapshots
+
+        return compare_snapshots(reference, candidate, options=options)
+
+    def check_status(
+        self,
+        *,
+        synchronize: SynchronizeTarget | None = None,
+    ) -> TensorCheckStatus:
+        """Return the native CheckAction status, synchronizing first only
+        when a callback-backed action (Print/Check) is enabled."""
 
         self._ensure_open()
-        if self._handle is None:
-            return
-        self._handle.clear_records()
+        selected = self.synchronize if synchronize is None else synchronize
+        native_check_status = self._collector.check_status(synchronize=selected)
+        required = {
+            "ok",
+            "message",
+            "replay_index",
+            "order",
+            "name",
+            "invocation_index",
+        }
+        missing = required - set(native_check_status)
+        if missing:
+            raise TensorDebugError(
+                f"native check status is missing fields {sorted(missing)!r}"
+            )
+        ok = native_check_status["ok"]
+        message = native_check_status["message"]
+        replay_index = native_check_status["replay_index"]
+        order = native_check_status["order"]
+        raw_name = native_check_status["name"]
+        invocation_index = native_check_status["invocation_index"]
+        if type(ok) is not bool:
+            raise TensorDebugError("native check status ok must be a boolean")
+        if not isinstance(message, str):
+            raise TensorDebugError("native check status message must be a string")
+        if type(replay_index) is not int or replay_index < 0:
+            raise TensorDebugError(
+                "native check status replay_index must be non-negative"
+            )
+        if type(order) is not int:
+            raise TensorDebugError("native check status order must be an integer")
+        if raw_name is not None and not isinstance(raw_name, str):
+            raise TensorDebugError("native check status name must be a string or None")
+        if type(invocation_index) is not int:
+            raise TensorDebugError(
+                "native check status invocation_index must be an integer"
+            )
+        return TensorCheckStatus(
+            ok=ok,
+            message=message,
+            replay_index=replay_index,
+            order=order,
+            name=raw_name,
+            invocation_index=invocation_index,
+        )
 
-    def status(self) -> dict[str, Any]:
-        """Return native comparison status."""
+    def assert_check_ok(
+        self,
+        *,
+        synchronize: SynchronizeTarget | None = None,
+    ) -> None:
+        """Raise for a callback check mismatch, synchronizing first only
+        when a callback-backed action is enabled."""
 
-        self._ensure_open()
-        if self._handle is None:
-            return {"ok": True, "message": "", "replay_index": 0, "invocation_index": -1}
-        return dict(self._handle.status())
+        check_status = self.check_status(synchronize=synchronize)
+        if not check_status.ok:
+            raise TensorCheckError(check_status.message or "tensor check failed")
 
-    def assert_ok(self) -> None:
-        """Raise if any comparison action has reported a mismatch."""
-
-        status = self.status()
-        if not bool(status.get("ok", False)):
-            message = str(status.get("message", "tensor comparison failed"))
-            raise TensorCompareMismatchError(message)
-
-    def close(self) -> None:
-        """Release native resources.
-
-        The caller must guarantee that no CUDA graph which captured this probe can replay again.
-        """
+    def close(
+        self,
+        *,
+        synchronize: SynchronizeTarget | None = None,
+    ) -> None:
+        """Release native resources and remove every gradient hook registered
+        through ``watch_grad()``. Callers must first destroy every captured
+        graph that references this probe so it can no longer replay. A
+        rejected close leaves the probe fully usable."""
 
         if not self._closed:
-            if self._handle is not None:
-                self._handle.close()
+            selected = self.synchronize if synchronize is None else synchronize
+            self._collector.close(synchronize=selected)
+            # Remove gradient hooks only after the collector accepted the
+            # close: a rejected close must leave the probe fully usable,
+            # while a hook that outlives a successful close would fire
+            # against the closed collector inside a later backward pass.
+            for handle in self._grad_handles:
+                handle.remove()
+            self._grad_handles.clear()
             self._closed = True
+
+    def _classify_invocation(
+        self,
+        tensor: torch.Tensor,
+        name: str,
+    ) -> tuple[int, bool]:
+        """Return ``(invocation_index, counted)`` without consuming the index."""
+
+        if (
+            not self._collector.enabled
+            or not isinstance(tensor, torch.Tensor)
+            or tensor.device.type != "cuda"
+        ):
+            return 0, False
+        with torch.cuda.device(tensor.device):
+            if not torch.cuda.is_current_stream_capturing():
+                return 0, False
+        return self._capture_invocation_counts.get(name, 0), True
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RuntimeError(f"CudaGraphTensorProbe({self.name!r}) is closed")
+            raise RuntimeError(f"TensorProbe({self.name!r}) is closed")
 
-    def __enter__(self) -> "CudaGraphTensorProbe":
+    def __enter__(self) -> "TensorProbe":
         self._ensure_open()
         return self
 
