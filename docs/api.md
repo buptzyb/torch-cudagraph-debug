@@ -663,7 +663,7 @@ summaries write `rank_points.csv`; group comparisons write
 
 ### Tensor Bundle And CLI
 
-The schema is `torch-cudagraph-debug/tensor-run`:
+The schema is `torch-cudagraph-debug/tensor-run` with `format_version=1`:
 
 ```text
 manifest.json
@@ -1199,10 +1199,12 @@ unrelated unattributed sizes are not merged. Each cohort retains:
 
 A transient generation born and freed between points contributes to the event
 peaks even when both snapshot fields are zero. A trace entry that carries its
-own pool ID (PyTorch 2.12+, pytorch/pytorch#177717) uses that reported value
-directly. Otherwise the pool is anchored temporally: an endpoint snapshot
-testifies about the birth address only when no covering segment churn
-separates them. Expandable anchoring treats every mapped range with the same
+own pool ID (PyTorch 2.12+; see
+[pytorch/pytorch#177717](https://github.com/pytorch/pytorch/pull/177717)) uses
+that reported value directly. Otherwise the pool is anchored temporally: an
+endpoint snapshot testifies about the birth address only when no covering
+segment churn separates them. Expandable anchoring treats every mapped range
+with the same
 (device, stream, pool, segment type) key as one reservation-liveness witness,
 matching the allocator's normal behavior. This is a heuristic: under extreme
 fragmentation multiple reservations may share the key, and snapshots expose
@@ -1441,7 +1443,10 @@ reports:
   retain per-generation size distributions; `CohortBirth`,
   `CohortFreeRequest`, and `CohortFreeCompletion` retain interval, origin,
   stack, byte, and count totals. `AllocationCohort` combines those rows with
-  identity; sampled active, owner-active, awaiting-free, and block-count peaks;
+  identity; its `pool_id` is a normal two-integer `PoolId` when attribution is
+  known or the explicit `("unknown",)` sentinel for an unattributable transient
+  (`["unknown"]` in `to_dict()`), while `pool_label` renders `pool[unknown]`;
+  sampled active, owner-active, awaiting-free, and block-count peaks;
   active-byte span across points; event peaks; first/last sampled or event
   boundaries; birth/free totals; and terminal owner-active/awaiting-free
   totals.

@@ -522,9 +522,10 @@ neither endpoint snapshot. It
 reports birth, free-request, and free-completion stacks, plus event-derived
 owner-active and allocator-unreusable peaks.
 
-When a transient allocation event carries its own pool ID (PyTorch 2.12+,
-pytorch/pytorch#177717), that reported value is used directly. Otherwise its
-pool is anchored temporally to the birth interval's endpoint snapshots: an
+When a transient allocation event carries its own pool ID (PyTorch 2.12+; see
+[pytorch/pytorch#177717](https://github.com/pytorch/pytorch/pull/177717)), that
+reported value is used directly. Otherwise its pool is anchored temporally to
+the birth interval's endpoint snapshots: an
 endpoint testifies only when no covering segment churn separates it from the
 birth. Expandable anchoring treats all mapped ranges with the same (device,
 stream, pool, segment type) key as one reservation-liveness witness. This

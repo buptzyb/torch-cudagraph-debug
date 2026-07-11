@@ -19,7 +19,14 @@
 ## Experimental Design
 
 <List the controlled baseline/candidate difference and the exact semantic
-measurement points or tensor observations.>
+measurement points or tensor observations. Include warm-up, repetition count,
+variant order, and the plan for measuring or bounding instrumentation overhead.>
+
+## Run Matrix
+
+| Run | Variant | Order / repetition | Instrumentation | Completed | Artifact path |
+|---|---|---|---|---|---|
+| <id> | <baseline/candidate/no-tool> | <A1/B1/...> | <none/tool> | <yes/no> | <absolute path> |
 
 ## Commands
 
@@ -60,4 +67,5 @@ the package answered the complete question.>
 - Candidate completed: `<yes/no/not applicable>`
 - Required observations present: `<yes/no>`
 - Artifacts verified: `<yes/no>`
+- Instrumentation observer effect assessed: `<yes/no/not applicable>`
 - Remaining uncertainty: `<text or none>`

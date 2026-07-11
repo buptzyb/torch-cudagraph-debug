@@ -36,11 +36,12 @@ def export_snapshots_to_tensorboard(
 ) -> None:
     """Export recorded tensor snapshots to TensorBoard summaries.
 
-    The caller owns synchronization, writer lifecycle, snapshot clearing, and any raw tensor
-    persistence. This helper intentionally does not import TensorBoard; it accepts any object
-    with ``add_scalar`` and ``add_histogram`` methods.
+    The caller owns synchronization, writer lifecycle, snapshot retention, and
+    any raw tensor persistence. This helper intentionally does not import
+    TensorBoard; it accepts any object with ``add_scalar`` and
+    ``add_histogram`` methods.
 
-    Scalars come from the persisted float64 ``observation.summary``; undefined
+    Scalars come from each snapshot observation's float64 ``summary``; undefined
     summary statistics are skipped. Histograms require a full payload and pass
     the writer a detached copy, so summary-only observations export scalars and
     skip the histogram.

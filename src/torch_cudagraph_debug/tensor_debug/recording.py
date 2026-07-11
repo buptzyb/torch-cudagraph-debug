@@ -625,6 +625,12 @@ class TensorRun:
         *,
         options: TensorComparisonOptions | None = None,
     ) -> TensorPointComparison:
+        """Compare two points owned by this run.
+
+        Point references follow ``point()`` lookup and ordering rules. The
+        returned result uses ``options`` or the default tensor comparison policy.
+        """
+
         from .comparison import compare_points
 
         return compare_points(

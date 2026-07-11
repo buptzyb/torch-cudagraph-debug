@@ -100,6 +100,8 @@ class TensorRunGroup:
         }
 
     def summary(self) -> "TensorRunGroupSummary":
+        """Summarize full and summary payload counts for every rank and point."""
+
         rows = []
         for rank, run in self.runs.items():
             for point in run.points:

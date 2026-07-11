@@ -41,8 +41,9 @@ snapshot. Never require application code to pass private-pool handles.
 - For a two-point delta, place endpoints immediately around the suspected
   phase.
 - For eager versus CUDA Graph, align semantic work: for example, compare after
-  all eager forward layers with the point after graph capture has completed all
-  corresponding forward work.
+  all eager forward layers with the point after an aligned graph replay has
+  completed the corresponding forward work. Capture constructs the replay; it
+  is not itself the candidate execution to compare.
 - For capture growth, separate pre-capture state, capture construction, graph
   replay, backward, and optimizer initialization when the workload contains
   those phases.

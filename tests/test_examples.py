@@ -218,19 +218,16 @@ def test_root_readme_memory_output_uses_device_aware_identities() -> None:
     memory_section = readme.split("## Memory Quick Start", 1)[1].split(
         "## Agent Workflows", 1
     )[0]
-    output = memory_section.split("Output from the tested run:", 1)[1].split(
-        "Read the report top-down:", 1
+    output = memory_section.split("Representative excerpt", 1)[1].split(
+        "The key signal", 1
     )[0]
 
     assert "  device[0]\n" in output
     assert "pool[0,0] (default)" in output
     assert "pool[1,0] (private)" in output
-    assert "stream[" in output
-    assert "CUDA scope: device-wide, includes other processes" in output
-    assert "residual:" in output
-    assert "diagnostics:" in output
     assert "(delta " not in output
-    assert "each device's `pool[0,0]`" in memory_section
+    assert "Device-wide CUDA samples" in memory_section
+    assert "defines every metric and report level" in " ".join(memory_section.split())
 
 
 def test_tensor_summary_statistics_are_defined() -> None:
@@ -410,10 +407,15 @@ def test_docs_do_not_reference_removed_example_paths() -> None:
 
 def _public_markdown_files() -> tuple[Path, ...]:
     paths = {
+        ROOT / "AGENTS.md",
+        ROOT / "CLAUDE.md",
         ROOT / "README.md",
         ROOT / "CHANGELOG.md",
         ROOT / "CONTRIBUTING.md",
         ROOT / "SECURITY.md",
+        *ROOT.joinpath(".agents").rglob("*.md"),
+        *ROOT.joinpath(".claude", "agents").glob("*.md"),
+        *ROOT.joinpath("plugins").rglob("*.md"),
         *ROOT.joinpath("docs").glob("*.md"),
         *EXAMPLES.rglob("README.md"),
     }
@@ -478,6 +480,17 @@ def test_api_reference_covers_every_supported_export() -> None:
             assert name in reference, (
                 f"docs/api.md does not cover {module.__name__}.{name}"
             )
+
+
+def test_api_reference_documents_bundle_versions_and_unknown_cohort_pool() -> None:
+    reference = (ROOT / "docs" / "api.md").read_text(encoding="utf-8")
+    tensor_section = reference.split("## Tensor Debug", 1)[1].split(
+        "## Memory Debug", 1
+    )[0]
+
+    assert "format_version=1" in tensor_section
+    assert '`("unknown",)` sentinel' in reference
+    assert "`pool[unknown]`" in reference
 
 
 def test_memory_result_models_have_field_level_reference() -> None:
@@ -562,6 +575,16 @@ def test_public_docs_use_supported_api_terminology() -> None:
     assert "stable facade" not in combined
     assert "clear_snapshot" not in combined
     assert re.search(r"status queries,\s+clear,", combined) is None
+
+    tensorboard_source = ROOT.joinpath(
+        "src",
+        "torch_cudagraph_debug",
+        "tensor_debug",
+        "postprocess",
+        "tensorboard.py",
+    ).read_text(encoding="utf-8")
+    assert "snapshot clearing" not in tensorboard_source
+    assert "persisted float64" not in tensorboard_source
 
 
 def test_examples_use_current_memory_option_keywords() -> None:

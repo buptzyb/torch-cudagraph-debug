@@ -34,16 +34,17 @@ Codex reads the canonical skill from
 `.codex/agents/tcgd-debugger.toml`.
 
 For direct cross-project Codex use without installing a plugin, link the
-canonical skill into the user-level Codex configuration:
+canonical skill and custom agent into their documented user-level directories:
 
 ```bash
+mkdir -p ~/.agents/skills ~/.codex/agents
 ln -s /path/to/torch-cudagraph-debug/.agents/skills/tcgd-investigate \
-  ~/.codex/skills/tcgd-investigate
+  ~/.agents/skills/tcgd-investigate
+ln -s /path/to/torch-cudagraph-debug/.codex/agents/tcgd-debugger.toml \
+  ~/.codex/agents/tcgd-debugger.toml
 ```
 
-User-level custom-agent discovery varies by Codex version; when a user-level
-agents directory is unsupported, start Codex from this checkout for the
-`tcgd-debugger` agent instead.
+Repository-scoped discovery still requires starting Codex from this checkout.
 
 ## Claude Code
 

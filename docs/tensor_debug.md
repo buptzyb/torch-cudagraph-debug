@@ -104,11 +104,15 @@ The same instrumented function can feed an eager reference and a CUDA Graph
 candidate:
 
 ```python
+import torch
+
 from torch_cudagraph_debug.tensor_debug import (
     TensorRecorder,
     TensorRun,
     compare_points,
 )
+
+static_x = torch.arange(8, device="cuda", dtype=torch.float32)
 
 def forward(inputs, recorder):
     inputs = recorder.observe(inputs, name="input")

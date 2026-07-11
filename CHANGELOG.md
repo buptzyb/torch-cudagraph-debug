@@ -37,14 +37,10 @@ memory-debug domain.
   duplicate active addresses, and duplicate free requests. When allocation
   events omit their pool ID, transient pools are anchored temporally to the
   birth interval's endpoints with an expandable same-key reservation-liveness
-  heuristic; its rare multiple-reservation ambiguity is documented. Interval
-  indexes batch segment-event evidence and endpoint range lookup instead of
-  rescanning the full trace and segment list per transient. Pool-recycled
-  eras that touch neither endpoint report `pool[unknown]`, era changes
-  witnessed by segment churn attribute to the surviving endpoint, and
-  quiet-endpoint pool conflicts or unexplained mapping gaps raise
-  reconciliation errors. Device comparisons also treat one-sided CUDA sample
-  availability as a change without fabricating a delta.
+  heuristic. Unattributable pool-recycled eras report `pool[unknown]`, while
+  contradictory endpoint evidence raises a reconciliation error. Device
+  comparisons also treat one-sided CUDA sample availability as a change
+  without fabricating a delta.
 - `setup.py` treats an invocation as metadata-only only when no requested
   command needs the native extension; `python setup.py sdist bdist_wheel`
   previously produced a pure-Python wheel without `_C` and

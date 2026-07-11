@@ -80,6 +80,8 @@ Record at least:
 - Python, PyTorch, CUDA, driver, and GPU identity;
 - exact commands and relevant environment variables;
 - random seeds and input-shape parameters;
+- warm-up policy, repetition count, and variant execution order;
+- whether each run used no instrumentation, tool instrumentation, or both;
 - the requested question and selected measurement points.
 
 Do not copy old bundles into a fresh evidence root. Existing bundles may be
@@ -93,9 +95,12 @@ the current environment. If a GPU resource-management skill is available, use
 it and follow its allocation, reuse, and release policy. Request a new resource
 only when no suitable active resource exists.
 
-Keep baseline and candidate on equivalent hardware and software. When the user
-asks whether instrumentation caused a failure, run a paired no-tool/tool A/B on
-the same node with all other inputs fixed.
+Keep baseline and candidate on equivalent hardware and software. Treat
+instrumentation as a possible observer effect, especially for timing, memory,
+or race-sensitive failures. When practical, run a paired no-tool/tool check on
+the same node with all other inputs fixed. If that check is unnecessary or too
+expensive, state that the observer effect was not measured; do not silently
+assume it is absent.
 
 ## 4. Instrument With Public APIs
 
@@ -134,9 +139,13 @@ logs.
 
 ## 5. Run Controlled Variants
 
-Run the baseline first and the candidate second unless the workload requires a
-different order. Keep code revision, model inputs, seeds, precision, device
-count, and launch settings fixed except for the intended variant.
+Predeclare the variant order. One matched baseline/candidate pair is sufficient
+for a deterministic correctness question. For noisy timing or memory questions,
+use repeated counterbalanced `AB/BA` (or randomized) order after equivalent
+warm-up so drift and cache state are not confounded with the candidate. Record
+the order and repetition number for every run. Keep code revision, model inputs,
+seeds, precision, device count, and launch settings fixed except for the
+intended variant.
 
 For each run:
 
@@ -201,4 +210,6 @@ from active use, and distinguish correlation from a demonstrated cause.
 
 Before finishing, verify that all paths in the report are absolute, commands
 are reproducible, required artifacts exist, and no claimed output came from an
-unrecorded manual transformation.
+unrecorded manual transformation. State whether an instrumentation observer
+effect was measured and whether the number/order of runs supports the requested
+claim.

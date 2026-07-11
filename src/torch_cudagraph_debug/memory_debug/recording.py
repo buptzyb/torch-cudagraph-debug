@@ -968,6 +968,8 @@ class MemoryRange:
     def compare(
         self, *, attribution: MemoryAttributionOptions | None = None
     ) -> MemoryPointComparison:
+        """Compare this range's ordered endpoints within their owning run."""
+
         return self.run.compare(
             self.start,
             self.end,

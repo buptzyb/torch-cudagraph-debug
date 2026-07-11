@@ -3,7 +3,7 @@
 ## Metadata And Documentation
 
 - Confirm `pyproject.toml` and `torch_cudagraph_debug.__version__` match the
-  intended tag.
+  intended tag, and the changelog release heading uses the actual release date.
 - Confirm package URLs, Apache-2.0 license metadata, README install command, and
   changelog are current.
 - Confirm the API reference describes the exact supported public facades and
@@ -247,9 +247,11 @@ install with a locally built sdist and hide public-ref-only failures
 
 ```bash
 python -m pip install --upgrade "setuptools>=77.0.3" wheel
-REF=<commit-or-branch>
+git fetch origin
+REF=<full-release-commit-sha>
+test "$(git rev-parse "$REF")" = "$(git rev-parse origin/main)"
 python -m pip install --no-build-isolation \
-  "git+https://github.com/buptzyb/torch-cudagraph-debug.git@${REF}"
+  "git+https://github.com/buptzyb/torch-cudagraph-debug.git@$REF"
 ```
 
 ## Publish
@@ -257,15 +259,23 @@ python -m pip install --no-build-isolation \
 After every gate passes:
 
 ```bash
-git tag -a v0.2.0 -m "torch-cudagraph-debug v0.2.0"
-git push origin v0.2.0
+VERSION=0.2.0
+TAG="v$VERSION"
+git fetch origin
+test -z "$(git status --porcelain)"
+RELEASE_COMMIT="$(git rev-parse HEAD)"
+test "$(git rev-parse origin/main)" = "$RELEASE_COMMIT"
+test -z "$(git tag --list "$TAG")"
+git tag -a "$TAG" -m "torch-cudagraph-debug $TAG" "$RELEASE_COMMIT"
+git push origin "$TAG"
 ```
 
 Verify installation from the tag in a clean CUDA-enabled environment:
 
 ```bash
+TAG=v0.2.0
 python -m pip install --no-build-isolation \
-  "git+https://github.com/buptzyb/torch-cudagraph-debug.git@v0.2.0"
+  "git+https://github.com/buptzyb/torch-cudagraph-debug.git@$TAG"
 ```
 
 The release remains source-only; users build against their installed

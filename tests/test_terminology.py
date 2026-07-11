@@ -179,3 +179,13 @@ def test_public_classes_have_semantic_docstrings() -> None:
                 f"{domain.__name__}.{name} exposes only an auto-generated "
                 "constructor signature"
             )
+
+
+def test_core_public_convenience_methods_have_docstrings() -> None:
+    methods = (
+        tensor_debug.TensorRun.compare,
+        tensor_debug.TensorRunGroup.summary,
+        memory_debug.MemoryRange.compare,
+    )
+    for method in methods:
+        assert method.__doc__ and method.__doc__.strip(), method

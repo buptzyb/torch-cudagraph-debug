@@ -136,6 +136,24 @@ def test_agent_workflow_documentation_is_linked() -> None:
     assert "$tcgd-investigate" in guide
     assert "/tcgd-investigate" in guide
     assert "tcgd-debugger" in guide
+    assert "~/.agents/skills/tcgd-investigate" in guide
+    assert "~/.codex/agents/tcgd-debugger.toml" in guide
+
+
+def test_investigation_method_controls_order_and_observer_effects() -> None:
+    skill = SKILL.read_text(encoding="utf-8")
+    workflow_map = (SKILL_ROOT / "references" / "workflow-map.md").read_text(
+        encoding="utf-8"
+    )
+    report_template = (SKILL_ROOT / "assets" / "report-template.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "counterbalanced `AB/BA`" in skill
+    assert "observer effect" in skill
+    assert "Run Matrix" in report_template
+    assert "after an aligned graph replay" in workflow_map
+    assert "after graph capture has completed" not in workflow_map
 
 
 def test_plugin_wraps_canonical_assets_through_marketplace_links() -> None:

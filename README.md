@@ -7,7 +7,10 @@ Focused debugging tools for PyTorch CUDA Graphs:
 - `memory_debug` records allocator states and analyzes default and
   non-default pools, including CUDA Graph private pools.
 
-The package targets Linux, Python 3.10+, and CUDA-enabled PyTorch 2.6+.
+The package requires Linux, Python 3.10+, and CUDA-enabled PyTorch 2.6 or
+newer. Memory Debug reads private PyTorch allocator interfaces whose schemas
+can change between PyTorch minors; validate a new PyTorch/container combination
+with the GPU compatibility gate before relying on it in production.
 
 ## Architecture at a Glance
 
@@ -174,94 +177,39 @@ growth = probe.compare(before_capture, after_capture)
 print(growth.to_text(include_unchanged=False))
 ```
 
-Output from the tested run:
+Representative excerpt (addresses, pool/stream IDs, and byte values vary by
+environment and allocator state):
 
 ```text
 Memory comparison 'graph-capture@snapshot-0' -> 'graph-capture@snapshot-1' (same probe)
   address lifecycle: exact
-  CUDA scope: device-wide, includes other processes; residual = CUDA used - allocator reserved. CUDA and allocator measurements are consecutive, not atomic.
-
   device[0]
-    CUDA used: 434.19 MiB -> 540.19 MiB (+106.00 MiB)
-      residual: 434.19 MiB -> 522.19 MiB (+88.00 MiB)
-      allocator:
-        reserved: 0 B -> 18.00 MiB (+18.00 MiB)
+    allocator:
+      reserved: 0 B -> 18.00 MiB (+18.00 MiB)
+      pool[0,0] (default)
+        reserved: 0 B -> 2.00 MiB (+2.00 MiB)
+        lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
+      pool[1,0] (private)
+        reserved: 0 B -> 16.00 MiB (+16.00 MiB)
         allocated: 0 B -> 16.00 MiB (+16.00 MiB), active: 0 B -> 16.00 MiB (+16.00 MiB), requested: 0 B -> 16.00 MiB (+16.00 MiB)
-        diagnostics: inactive=0 B -> 2.00 MiB (+2.00 MiB), fragmentation=0 B -> 1008 B (+1008 B), segments=0 -> 2 (+2), blocks=0 -> 4 (+4), inactive blocks=0 -> 1 (+1), largest inactive block=0 B -> 2.00 MiB (+2.00 MiB)
-        pool[0,0] (default)
-          reserved: 0 B -> 2.00 MiB (+2.00 MiB)
-          allocated: 0 B -> 1.00 KiB (+1.00 KiB), active: 0 B -> 1.00 KiB (+1.00 KiB), requested: 0 B -> 16 B (+16 B)
-          diagnostics: inactive=0 B -> 2.00 MiB (+2.00 MiB), fragmentation=0 B -> 1008 B (+1008 B), segments=0 -> 1 (+1), blocks=0 -> 3 (+3), inactive blocks=0 -> 1 (+1), largest inactive block=0 B -> 2.00 MiB (+2.00 MiB)
-          lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
-          stream[939901248]
-            reserved: 0 B -> 2.00 MiB (+2.00 MiB)
-            allocated: 0 B -> 1.00 KiB (+1.00 KiB), active: 0 B -> 1.00 KiB (+1.00 KiB), requested: 0 B -> 16 B (+16 B)
-            diagnostics: inactive=0 B -> 2.00 MiB (+2.00 MiB), fragmentation=0 B -> 1008 B (+1008 B), segments=0 -> 1 (+1), blocks=0 -> 3 (+3), inactive blocks=0 -> 1 (+1), largest inactive block=0 B -> 2.00 MiB (+2.00 MiB)
-            lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
-        pool[1,0] (private)
-          reserved: 0 B -> 16.00 MiB (+16.00 MiB)
-          allocated: 0 B -> 16.00 MiB (+16.00 MiB), active: 0 B -> 16.00 MiB (+16.00 MiB), requested: 0 B -> 16.00 MiB (+16.00 MiB)
-          diagnostics: segments=0 -> 1 (+1), blocks=0 -> 1 (+1)
-          lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
-          stream[939901248]
-            reserved: 0 B -> 16.00 MiB (+16.00 MiB)
-            allocated: 0 B -> 16.00 MiB (+16.00 MiB), active: 0 B -> 16.00 MiB (+16.00 MiB), requested: 0 B -> 16.00 MiB (+16.00 MiB)
-            diagnostics: segments=0 -> 1 (+1), blocks=0 -> 1 (+1)
-            lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
+        lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
 ```
 
-Read the report top-down:
+The key signal is the new `pool[1,0] (private)` subtree: capture added a 16 MiB
+active allocation to a graph-private pool. Read the full report top-down:
 
-1. Every value is `reference -> candidate (signed change)`; timeline text
-   renders `absolute (signed change)` instead.
-2. Each `device[N]` subtree is one decomposition whose levels sum: `CUDA used`
-   splits into the CUDA/allocator `residual` plus allocator `reserved`, allocator
-   `reserved` is the sum of its pools, and each pool is the sum of its streams.
-   The account balances at every level: 540.19 = 522.19 + 18.00 MiB here, and
-   18.00 = 2.00 + 16.00 MiB.
-3. `CUDA used` and `residual` are device-wide evidence. The residual is the
-   difference between consecutive CUDA Runtime and allocator measurements; it
-   may be positive or negative and can include concurrent activity, the CUDA
-   context, external allocations from this process, and every other process on
-   a shared GPU. Here 88 MiB of growth is not explained by allocator reserved;
-   this state-only report does not identify its owner.
-4. Interior nodes lead with `reserved:` — their share of the parent — and pack
-   the remaining base metrics on one line. `requested` is the original active
-   allocation request, `allocated` is block space still owned by live
-   allocations, `active` is space not yet reusable, and `reserved` is the
-   full segment capacity held by the caching allocator.
-5. `(default)` marks each device's `pool[0,0]`; every other pool id is
-   `(private)`, including CUDA Graph pools. Match tags appear only where a
-   matching decision carries information (`[mapped]`, `[pool_mapping]`,
-   `[reference_only]`, `[candidate_only]` in cross-run comparisons); same-probe
-   and same-run rows carry none.
-6. `diagnostics` explains the allocator structure behind the byte totals.
-   `inactive` is `reserved - active`, capacity currently reusable within that
-   pool; `fragmentation` is `active - requested`, allocator rounding inside
-   active or awaiting-free blocks. Segment and block counts show how that
-   capacity is divided, while inactive-block count and largest inactive block
-   describe reusable blocks.
-7. `lifecycle` compares segment and active-block identity between the two
-   snapshots. `new segment` and `newly active` report identities added at the
-   candidate endpoint; `removed segment` and `became inactive` appear when
-   reference segment or active-block identities are absent from the candidate
-   endpoint. The top-level `address lifecycle` value states whether address
-   matching is `exact` or `approximate`. This snapshot-derived comparison does
-   not require allocator event history and is distinct from event-backed
-   `lifetimes()` analysis.
+- Values are `reference -> candidate (signed change)`.
+- `reserved` decomposes by pool and then stream; `allocated`, `active`, and
+  `requested` describe different allocator quantities.
+- `lifecycle` is endpoint address evidence, not event-backed ownership or leak
+  proof.
+- Device-wide CUDA samples and allocator snapshots are consecutive rather than
+  atomic, so their residual can include other processes and external CUDA use.
 
-The main signal here is the `pool[1,0] (private)` subtree: graph capture added
-a 16 MiB active allocation in a private pool. The small default-pool change is
-separate allocator/runtime activity that a state-only report likewise leaves
-unattributed.
-Private-pool capacity can remain reserved after its blocks become inactive; see
-the [guide](docs/memory_debug.md#interpreting-cuda-graph-private-pool-inactive-memory)
-and [focused example](examples/memory_debug/probe/private_pool_inactive.py) for
-the correct interpretation.
-
-Absolute values, allocator rounding, pool and stream IDs, incidental
-default-pool activity, and the changed rows that appear can vary with the
-PyTorch/CUDA environment and prior allocator state.
+Private-pool capacity can remain reserved after its blocks become inactive.
+The [Memory Debug guide](docs/memory_debug.md) defines every metric and report
+level; the [focused example](examples/memory_debug/probe/private_pool_inactive.py)
+explains retained private-pool capacity.
 
 Beyond two-point comparison, Memory Debug can:
 
