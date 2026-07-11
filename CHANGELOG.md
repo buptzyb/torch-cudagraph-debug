@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 - 2026-07-10
+## v0.2.0 - 2026-07-11
 
 This release rebuilds the tensor-debug domain and introduces the
 memory-debug domain.
