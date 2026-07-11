@@ -177,34 +177,45 @@ growth = probe.compare(before_capture, after_capture)
 print(growth.to_text(include_unchanged=False))
 ```
 
-Representative excerpt (addresses, pool/stream IDs, and byte values vary by
-environment and allocator state):
+Representative excerpt (stream rows and sparse diagnostics elided; addresses,
+pool/stream IDs, and byte values vary by environment and allocator state):
 
 ```text
 Memory comparison 'graph-capture@snapshot-0' -> 'graph-capture@snapshot-1' (same probe)
   address lifecycle: exact
+  CUDA scope: device-wide, includes other processes; residual = CUDA used - allocator reserved. CUDA and allocator measurements are consecutive, not atomic.
+
   device[0]
-    allocator:
-      reserved: 0 B -> 18.00 MiB (+18.00 MiB)
-      pool[0,0] (default)
-        reserved: 0 B -> 2.00 MiB (+2.00 MiB)
-        lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
-      pool[1,0] (private)
-        reserved: 0 B -> 16.00 MiB (+16.00 MiB)
+    CUDA used: 434.19 MiB -> 540.19 MiB (+106.00 MiB)
+      residual: 434.19 MiB -> 522.19 MiB (+88.00 MiB)
+      allocator:
+        reserved: 0 B -> 18.00 MiB (+18.00 MiB)
         allocated: 0 B -> 16.00 MiB (+16.00 MiB), active: 0 B -> 16.00 MiB (+16.00 MiB), requested: 0 B -> 16.00 MiB (+16.00 MiB)
-        lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
+        pool[0,0] (default)
+          reserved: 0 B -> 2.00 MiB (+2.00 MiB)
+          allocated: 0 B -> 1.00 KiB (+1.00 KiB), active: 0 B -> 1.00 KiB (+1.00 KiB), requested: 0 B -> 16 B (+16 B)
+          lifecycle: new segment=2.00 MiB, newly active=1.00 KiB
+        pool[1,0] (private)
+          reserved: 0 B -> 16.00 MiB (+16.00 MiB)
+          allocated: 0 B -> 16.00 MiB (+16.00 MiB), active: 0 B -> 16.00 MiB (+16.00 MiB), requested: 0 B -> 16.00 MiB (+16.00 MiB)
+          lifecycle: new segment=16.00 MiB, newly active=16.00 MiB
 ```
 
 The key signal is the new `pool[1,0] (private)` subtree: capture added a 16 MiB
 active allocation to a graph-private pool. Read the full report top-down:
 
 - Values are `reference -> candidate (signed change)`.
-- `reserved` decomposes by pool and then stream; `allocated`, `active`, and
-  `requested` describe different allocator quantities.
-- `lifecycle` is endpoint address evidence, not event-backed ownership or leak
-  proof.
-- Device-wide CUDA samples and allocator snapshots are consecutive rather than
-  atomic, so their residual can include other processes and external CUDA use.
+- Levels sum: `CUDA used` (device-wide, sampled from
+  `torch.cuda.mem_get_info`) splits into `residual` plus allocator `reserved`;
+  `reserved` decomposes by pool and then stream.
+- `residual` is device-wide evidence minus process-local allocator state: CUDA
+  context and module overhead, external CUDA allocations such as NCCL buffers,
+  and other processes all land there. Device-wide CUDA samples and allocator
+  snapshots are consecutive rather than atomic, so `residual` carries sampling
+  noise and can be negative.
+- `allocated`, `active`, and `requested` describe different allocator
+  quantities; `lifecycle` is endpoint address evidence, not event-backed
+  ownership or leak proof.
 
 Private-pool capacity can remain reserved after its blocks become inactive.
 The [Memory Debug guide](docs/memory_debug.md) defines every metric and report
