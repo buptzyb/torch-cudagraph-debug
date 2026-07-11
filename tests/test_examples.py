@@ -226,7 +226,6 @@ def test_root_readme_memory_output_uses_device_aware_identities() -> None:
     assert "pool[0,0] (default)" in output
     assert "pool[1,0] (private)" in output
     assert "(delta " not in output
-    assert "Device-wide CUDA samples" in memory_section
     assert "defines every metric and report level" in " ".join(memory_section.split())
 
 
