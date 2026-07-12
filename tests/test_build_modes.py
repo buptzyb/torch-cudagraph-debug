@@ -216,20 +216,22 @@ def test_mode_is_documented_everywhere() -> None:
         "docs/api.md",
         "docs/architecture.md",
         "docs/release_checklist.md",
-        ".github/workflows/ci.yml",
     )
     for relative in documented:
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert MODE_ENV in text, relative
+    checked = [
+        ROOT / "setup.py",
+        ROOT / "README.md",
+        ROOT / "CHANGELOG.md",
+        *(ROOT / "docs").glob("*.md"),
+    ]
+    ci_config = ROOT / ".github" / "workflows" / "ci.yml"
+    if ci_config.exists():  # the sdist ships no CI configuration by design
+        assert MODE_ENV in ci_config.read_text(encoding="utf-8")
+        checked.append(ci_config)
     assert OLD_FLAG not in "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (
-            ROOT / "setup.py",
-            ROOT / "README.md",
-            ROOT / "CHANGELOG.md",
-            *(ROOT / "docs").glob("*.md"),
-            ROOT / ".github/workflows/ci.yml",
-        )
+        path.read_text(encoding="utf-8") for path in checked
     )
 
 
