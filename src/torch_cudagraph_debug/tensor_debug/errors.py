@@ -7,6 +7,10 @@ class TensorDebugError(CudaGraphDebugError):
     """Base error for tensor debug probes."""
 
 
+class LiveTensorDebugUnavailableError(TensorDebugError):
+    """Raised when an offline install is asked to use live Tensor Debug."""
+
+
 class TensorCheckError(TensorDebugError, AssertionError):
     """Raised when an online tensor check reports a mismatch."""
 

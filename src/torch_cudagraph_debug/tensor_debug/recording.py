@@ -44,6 +44,7 @@ from torch_cudagraph_debug.types import (
     _thaw_json,
 )
 
+from ._availability import require_live_tensor_debug
 from ._collector import (
     _EagerTensorCollector,
     _TensorCollector,
@@ -924,6 +925,7 @@ class TensorRecorder:
         self.strict_scope = strict_scope
         validate_synchronize_target(synchronize)
         self.synchronize = synchronize
+        require_live_tensor_debug()
         self.rank, self.world_size = resolve_distributed_identity(rank, world_size)
         self.group_id = group_id
         validate_group_identity(self.rank, self.group_id, self.world_size)

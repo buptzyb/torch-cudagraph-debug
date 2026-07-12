@@ -53,16 +53,47 @@ python -m twine check dist/*
 git diff --check   # uncommitted whitespace/conflict markers only
 ```
 
-Verify the no-tensor-collection install from the fresh sdist in a clean
+Verify the offline Tensor Debug install from the fresh sdist in a clean
 virtual environment (CI runs the same gate on every pull request):
 
 ```bash
-python -m venv /tmp/tcgd-ntc-venv && . /tmp/tcgd-ntc-venv/bin/activate
+export TCGD_OFFLINE_BUNDLE
+TCGD_OFFLINE_BUNDLE="$(mktemp -d /tmp/tcgd-offline-smoke.XXXXXX)/run.tcgd-tensor"
+PYTHONPATH=src python - <<'PY'
+import os
+import torch
+from tests.tensor_debug._run_helpers import make_tensor_run
+
+make_tensor_run(
+    [("reference", [("output", torch.tensor([1.0]), "full")])],
+    bundle_dir=os.environ["TCGD_OFFLINE_BUNDLE"],
+)
+PY
+python -m venv /tmp/tcgd-offline-venv && . /tmp/tcgd-offline-venv/bin/activate
 python -m pip install --upgrade pip
-TCGD_NO_TENSOR_COLLECTION=1 python -m pip install dist/*.tar.gz
+TCGD_TENSOR_DEBUG_MODE=offline \
+  python -m pip install --no-cache-dir dist/*.tar.gz
+python -c "import torch_cudagraph_debug as t; assert t.tensor_debug_mode() == 'offline'"
 python -c "from torch_cudagraph_debug import _native; assert not _native.extension_available()"
+tcgd-tensor summary "$TCGD_OFFLINE_BUNDLE"
 python -m pip install -r requirements-dev.txt numpy
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 python -m pytest -q tests
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 python -m pytest -q \
+  tests/memory_debug \
+  tests/tensor_debug/test_actions.py \
+  tests/tensor_debug/test_availability.py \
+  tests/tensor_debug/test_public_api.py \
+  tests/test_agent_assets.py \
+  tests/test_build_config.py \
+  tests/test_build_modes.py \
+  tests/test_examples.py \
+  tests/test_terminology.py
+deactivate
+
+python -m venv --system-site-packages /tmp/tcgd-offline-editable
+. /tmp/tcgd-offline-editable/bin/activate
+TCGD_TENSOR_DEBUG_MODE=offline \
+  python -m pip install --no-cache-dir --no-deps -e .
+python -c "import torch_cudagraph_debug as t; assert t.tensor_debug_mode() == 'offline'"
 deactivate
 ```
 
@@ -88,7 +119,8 @@ rm -rf dist
 python -m build --sdist --wheel --no-isolation
 python -m twine check dist/*
 TCGD_SDIST="$(find dist -maxdepth 1 -name 'torch_cudagraph_debug-*.tar.gz' -print -quit)"
-python -m pip install --no-build-isolation --no-deps "${TCGD_SDIST}"
+python -m pip install --no-cache-dir --no-build-isolation --no-deps "${TCGD_SDIST}"
+python -c "import torch_cudagraph_debug as t; assert t.tensor_debug_mode() == 'full'"
 cd "${TCGD_RUN_ROOT}"
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 \
   TCGD_FAIL_ON_SKIP=1 \
@@ -238,31 +270,40 @@ NPROC_PER_NODE=2 bash \
   distributed "${EXAMPLE_ROOT}/cli-distributed"
 ```
 
-Still on the GPU node, verify the no-tensor-collection install: memory
-collection must work end to end against real CUDA allocations, and enabled
-tensor collection must fail with the typed error. Use a separate virtual
+Still on the GPU node, verify the offline Tensor Debug install: Memory Debug
+collection must work end to end against real CUDA allocations, and every live
+Tensor Debug workflow must fail with the typed error. Use a separate virtual
 environment so the full install stays untouched:
 
 ```bash
-python -m venv /tmp/tcgd-ntc-gpu-venv && . /tmp/tcgd-ntc-gpu-venv/bin/activate
+python -m venv /tmp/tcgd-offline-gpu-venv && . /tmp/tcgd-offline-gpu-venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install numpy torch
-TCGD_NO_TENSOR_COLLECTION=1 python -m pip install "${TCGD_SDIST}"
+TCGD_TENSOR_DEBUG_MODE=offline \
+  python -m pip install --no-cache-dir "${TCGD_SDIST}"
+python -c "import torch_cudagraph_debug as t; assert t.tensor_debug_mode() == 'offline'"
 python -c "from torch_cudagraph_debug import _native; assert not _native.extension_available()"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/quickstart.py"
 python - <<'EOF'
-import torch
-from torch_cudagraph_debug import NativeExtensionUnavailableError
-from torch_cudagraph_debug.tensor_debug import RecordAction, TensorProbe
+from torch_cudagraph_debug.tensor_debug import (
+    LiveTensorDebugUnavailableError,
+    RecordAction,
+    TensorProbe,
+    TensorRecorder,
+)
 
-try:
-    probe = TensorProbe("hidden", [RecordAction()])
-    with torch.cuda.graph(torch.cuda.CUDAGraph()):
-        probe(torch.ones(4, device="cuda"), name="hidden")
-except NativeExtensionUnavailableError as exc:
-    assert "TCGD_NO_TENSOR_COLLECTION" in str(exc)
-else:
-    raise AssertionError("tensor collection unexpectedly succeeded")
+constructors = (
+    lambda: TensorProbe("hidden", [RecordAction()]),
+    lambda: TensorRecorder(execution="eager"),
+    lambda: TensorRecorder(execution="cuda_graph"),
+)
+for construct in constructors:
+    try:
+        construct()
+    except LiveTensorDebugUnavailableError as exc:
+        assert "TCGD_TENSOR_DEBUG_MODE=offline" in str(exc)
+    else:
+        raise AssertionError("live Tensor Debug unexpectedly succeeded")
 EOF
 deactivate
 ```
@@ -292,7 +333,7 @@ python -m pip install --upgrade "setuptools>=77.0.3" wheel
 git fetch origin
 REF=<full-release-commit-sha>
 test "$(git rev-parse "$REF")" = "$(git rev-parse origin/main)"
-python -m pip install --no-build-isolation \
+python -m pip install --no-cache-dir --no-build-isolation \
   "git+https://github.com/buptzyb/torch-cudagraph-debug.git@$REF"
 ```
 
@@ -316,7 +357,7 @@ Verify installation from the tag in a clean CUDA-enabled environment:
 
 ```bash
 TAG=v0.2.0
-python -m pip install --no-build-isolation \
+python -m pip install --no-cache-dir --no-build-isolation \
   "git+https://github.com/buptzyb/torch-cudagraph-debug.git@$TAG"
 ```
 

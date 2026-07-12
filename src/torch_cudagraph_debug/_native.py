@@ -27,10 +27,12 @@ def require_native() -> ModuleType:
     if _EXTENSION is not None:
         return _EXTENSION
     raise NativeExtensionUnavailableError(
-        "torch-cudagraph-debug native extension is unavailable, so this install cannot "
-        "collect tensors from a live process. Build the package against a CUDA-enabled "
-        "PyTorch installation, for example with `pip install --no-build-isolation .`. "
-        "Installs made with TCGD_NO_TENSOR_COLLECTION=1 omit the extension by design; "
-        "memory collection and analysis and offline tensor bundle analysis remain "
-        "fully available."
+        "torch-cudagraph-debug native extension is unavailable. In full Tensor Debug "
+        "mode, reinstall against a CUDA-enabled PyTorch installation with "
+        "`TCGD_TENSOR_DEBUG_MODE=full python -m pip install --no-cache-dir "
+        "--force-reinstall --no-build-isolation torch-cudagraph-debug`. "
+        "Offline mode omits the extension by design; select it with "
+        "TCGD_TENSOR_DEBUG_MODE=offline during "
+        "installation. Memory Debug and offline tensor bundle analysis remain "
+        "available."
     ) from _EXTENSION_ERROR

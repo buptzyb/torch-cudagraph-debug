@@ -52,7 +52,7 @@ and a C++17 compiler:
 
 ```bash
 python -m pip install --upgrade "setuptools>=77.0.3" wheel
-python -m pip install --no-build-isolation .
+python -m pip install --no-cache-dir --no-build-isolation .
 ```
 
 To install directly from the repository, run the same `setuptools`/`wheel`
@@ -60,28 +60,36 @@ upgrade first (with `--no-build-isolation`, pip does not install the build
 requirements for you):
 
 ```bash
-python -m pip install --no-build-isolation \
+python -m pip install --no-cache-dir --no-build-isolation \
   "git+https://github.com/buptzyb/torch-cudagraph-debug.git@main"
 ```
 
 Tensor Debug uses the native extension built during source installation.
 
 On machines without a CUDA toolchain — a laptop used for offline bundle
-analysis, or a container that only needs memory diagnostics — skip the
-compiled extension entirely:
+analysis, or a container that only needs memory diagnostics — install the
+offline Tensor Debug mode:
 
 ```bash
-TCGD_NO_TENSOR_COLLECTION=1 python -m pip install .
+TCGD_TENSOR_DEBUG_MODE=offline \
+  python -m pip install --no-cache-dir .
 ```
 
-Such an install needs no compiler and no CUDA-enabled PyTorch at build time,
-and default build isolation works — no `setuptools`/`wheel` preparation and no
-`--no-build-isolation` flag are required.
-Memory collection and analysis stay fully available (collection still requires
-a CUDA-enabled PyTorch at runtime), and tensor bundles remain loadable and
-comparable offline; collecting tensors from a live process (`TensorProbe` and
-`TensorRecorder` capture) is the only capability omitted, and it raises a
-`NativeExtensionUnavailableError` that states the reason.
+Offline mode needs no compiler and no CUDA-enabled PyTorch at build time, and
+default build isolation works — no `setuptools`/`wheel` preparation and no
+`--no-build-isolation` flag are required. It disables every live Tensor Debug
+workflow: enabled `TensorProbe` objects and both eager and CUDA Graph
+`TensorRecorder` modes raise `LiveTensorDebugUnavailableError`. Tensor bundle
+loading and comparison remain available, and Memory Debug collection and
+analysis are unchanged (memory collection still requires CUDA-enabled PyTorch
+at runtime).
+
+The mode is fixed at installation time and available through
+`torch_cudagraph_debug.tensor_debug_mode()`. On the first package import in
+each Python process, an offline install writes one concise capability and
+full-mode reinstall notice to standard error. Always pass `--no-cache-dir` for
+both full and offline source installs because pip's wheel cache does not encode
+the selected mode or the build-time PyTorch/CUDA ABI.
 
 ## Tensor Quick Start
 

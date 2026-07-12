@@ -173,12 +173,18 @@ instead. Memory collection is device-aware: device index is part of pool and
 observation identity, and one Probe or Recorder may select one device, a device
 sequence, or all visible devices.
 
-The compiled `_C` extension backs tensor collection only; every other surface —
-memory collection and analysis, tensor bundle loading and comparison, and both
-CLIs — is pure Python. Setting `TCGD_NO_TENSOR_COLLECTION=1` at install time
-skips building the extension, producing an install where `_native`
-deliberately reports the extension as unavailable and enabled tensor
-collection raises `NativeExtensionUnavailableError`; nothing else changes.
+The compiled `_C` extension backs enabled probes and CUDA Graph Recorder
+collection; eager Recorder collection is implemented in Python. Every other
+surface — memory collection and analysis, tensor bundle loading and comparison,
+and both CLIs — is pure Python. Setting
+`TCGD_TENSOR_DEBUG_MODE=offline` at installation skips `_C` and deliberately
+disables all live Tensor Debug workflows, including eager Recorder collection,
+so the public mode has one unambiguous boundary. Those entry points raise
+`LiveTensorDebugUnavailableError`; offline tensor analysis and Memory Debug
+are unchanged. The selected mode is persisted in distribution metadata and
+reported by `tensor_debug_mode()`. The top-level package emits one offline-mode
+capability and reinstall notice to standard error on its first import in each
+Python process.
 
 Each memory capture also attempts one `torch.cuda.mem_get_info` sample per
 selected device immediately after `_snapshot()` and before CPU normalization.

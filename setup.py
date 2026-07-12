@@ -1,8 +1,58 @@
-from pathlib import Path
 import os
+import shutil
 import sys
+from pathlib import Path
 
 from setuptools import setup
+from setuptools.command.build_py import build_py
+from setuptools.command.egg_info import egg_info
+
+TENSOR_DEBUG_MODE_ENV = "TCGD_TENSOR_DEBUG_MODE"
+TENSOR_DEBUG_MODE_FILE = "tcgd_tensor_debug_mode"
+TENSOR_DEBUG_MODES = frozenset({"full", "offline"})
+
+
+def configured_tensor_debug_mode() -> str:
+    """Return the validated tensor-debug mode requested for this build."""
+
+    mode = os.environ.get(TENSOR_DEBUG_MODE_ENV, "full")
+    if mode not in TENSOR_DEBUG_MODES:
+        choices = ", ".join(sorted(TENSOR_DEBUG_MODES))
+        raise RuntimeError(
+            f"{TENSOR_DEBUG_MODE_ENV} must be one of: {choices}; got {mode!r}"
+        )
+    return mode
+
+
+TENSOR_DEBUG_MODE = configured_tensor_debug_mode()
+
+
+class TCGDEggInfo(egg_info):
+    """Persist the selected tensor-debug mode in distribution metadata."""
+
+    def run(self) -> None:
+        super().run()
+        Path(self.egg_info, TENSOR_DEBUG_MODE_FILE).write_text(
+            f"{TENSOR_DEBUG_MODE}\n",
+            encoding="utf-8",
+        )
+
+
+class OfflineBuildPy(build_py):
+    """Build Python-only artifacts without reusing stale native outputs."""
+
+    def run(self) -> None:
+        package_dir = Path(self.build_lib, "torch_cudagraph_debug")
+        shutil.rmtree(package_dir, ignore_errors=True)
+        super().run()
+        stale_extensions = sorted(package_dir.glob("_C*.so"))
+        stale_extensions.extend(sorted(package_dir.glob("_C*.pyd")))
+        if stale_extensions:
+            paths = ", ".join(str(path) for path in stale_extensions)
+            raise RuntimeError(
+                "offline tensor-debug builds must not contain native extensions; "
+                f"found: {paths}"
+            )
 
 
 def is_metadata_command() -> bool:
@@ -40,11 +90,13 @@ def is_metadata_command() -> bool:
 
 
 def get_extensions():
+    commands = {"egg_info": TCGDEggInfo}
     if is_metadata_command():
-        return [], {}
+        return [], commands
 
-    if os.environ.get("TCGD_NO_TENSOR_COLLECTION") == "1":
-        return [], {}
+    if TENSOR_DEBUG_MODE == "offline":
+        commands["build_py"] = OfflineBuildPy
+        return [], commands
 
     try:
         import torch
@@ -53,19 +105,21 @@ def get_extensions():
         raise RuntimeError(
             "torch-cudagraph-debug requires PyTorch at build time. Install a CUDA-enabled "
             "PyTorch first, then install this package with build isolation disabled "
-            "(`pip install --no-build-isolation torch-cudagraph-debug`). To install "
-            "without tensor collection instead, set TCGD_NO_TENSOR_COLLECTION=1 during "
-            "installation: memory collection and analysis stay fully available, and "
-            "tensor bundles remain loadable and comparable offline."
+            "(`pip install --no-cache-dir --no-build-isolation "
+            "torch-cudagraph-debug`). To install with offline tensor analysis instead, "
+            "set TCGD_TENSOR_DEBUG_MODE=offline during installation and pass "
+            "`--no-cache-dir`: memory collection and analysis stay fully available, "
+            "and tensor bundles remain loadable and comparable offline."
         ) from exc
 
     if not torch.cuda._is_compiled():
         raise RuntimeError(
             "torch-cudagraph-debug must be built against a CUDA-enabled PyTorch "
-            "installation for tensor collection. Set TCGD_NO_TENSOR_COLLECTION=1 "
-            "during installation to skip the compiled extension: memory collection "
-            "and analysis stay fully available, and tensor bundles remain loadable "
-            "and comparable offline."
+            "installation for live tensor debugging. Set "
+            "TCGD_TENSOR_DEBUG_MODE=offline during installation and pass "
+            "`--no-cache-dir` to skip the compiled extension: memory collection and "
+            "analysis stay fully available, and tensor bundles remain loadable and "
+            "comparable offline."
         )
 
     root = Path(__file__).parent
@@ -87,7 +141,25 @@ def get_extensions():
             "nvcc": ["-O3", "-std=c++17"],
         },
     )
-    return [extension], {"build_ext": BuildExtension}
+
+    class FullModeBuildExt(BuildExtension):
+        """Chain an install-mode hint onto native toolchain build failures."""
+
+        def run(self) -> None:
+            try:
+                super().run()
+            except Exception as exc:
+                raise RuntimeError(
+                    "building the torch-cudagraph-debug native extension failed; "
+                    "the chained toolchain error is the root cause. To keep full "
+                    "Tensor Debug mode, fix the CUDA toolchain and reinstall. If "
+                    "you only need Memory Debug and offline tensor analysis, "
+                    "reinstall with TCGD_TENSOR_DEBUG_MODE=offline and "
+                    "`--no-cache-dir` instead."
+                ) from exc
+
+    commands["build_ext"] = FullModeBuildExt
+    return [extension], commands
 
 
 ext_modules, cmdclass = get_extensions()

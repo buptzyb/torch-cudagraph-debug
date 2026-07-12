@@ -11,6 +11,7 @@ def test_tensor_exact_public_facade() -> None:
         "ComparisonStatus",
         "DTypePolicy",
         "LayoutPolicy",
+        "LiveTensorDebugUnavailableError",
         "ObservationComparisonKind",
         "PrintAction",
         "RecordAction",
