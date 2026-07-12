@@ -71,10 +71,12 @@ analysis, or a container that only needs memory diagnostics — skip the
 compiled extension entirely:
 
 ```bash
-TCGD_NO_TENSOR_COLLECTION=1 python -m pip install --no-build-isolation .
+TCGD_NO_TENSOR_COLLECTION=1 python -m pip install .
 ```
 
-Such an install needs no compiler and no CUDA-enabled PyTorch at build time.
+Such an install needs no compiler and no CUDA-enabled PyTorch at build time,
+and default build isolation works — no `setuptools`/`wheel` preparation and no
+`--no-build-isolation` flag are required.
 Memory collection and analysis stay fully available (collection still requires
 a CUDA-enabled PyTorch at runtime), and tensor bundles remain loadable and
 comparable offline; collecting tensors from a live process (`TensorProbe` and

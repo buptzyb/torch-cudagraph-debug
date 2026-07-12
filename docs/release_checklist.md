@@ -245,10 +245,9 @@ environment so the full install stays untouched:
 
 ```bash
 python -m venv /tmp/tcgd-ntc-gpu-venv && . /tmp/tcgd-ntc-gpu-venv/bin/activate
-python -m pip install --upgrade pip "setuptools>=77.0.3" wheel
+python -m pip install --upgrade pip
 python -m pip install numpy torch
-TCGD_NO_TENSOR_COLLECTION=1 python -m pip install \
-  --no-build-isolation "${TCGD_SDIST}"
+TCGD_NO_TENSOR_COLLECTION=1 python -m pip install "${TCGD_SDIST}"
 python -c "from torch_cudagraph_debug import _native; assert not _native.extension_available()"
 python "${TCGD_REPO_ROOT}/examples/memory_debug/probe/quickstart.py"
 python - <<'EOF'
