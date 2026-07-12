@@ -26,6 +26,7 @@ from .comparison import (
     compare_snapshots,
 )
 from .errors import (
+    LiveTensorDebugUnavailableError,
     TensorBundleError,
     TensorCheckError,
     TensorComparisonError,
@@ -57,6 +58,7 @@ __all__ = [
     "ComparisonStatus",
     "DTypePolicy",
     "LayoutPolicy",
+    "LiveTensorDebugUnavailableError",
     "ObservationComparisonKind",
     "PrintAction",
     "RecordAction",

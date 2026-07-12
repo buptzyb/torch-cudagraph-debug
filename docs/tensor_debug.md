@@ -547,8 +547,14 @@ is required.
 
 ## Operational Constraints
 
-- Linux, CUDA, and the compiled native extension are required for enabled
-  tensor probes.
+- Linux, CUDA, and the compiled native extension are required for full live
+  Tensor Debug. Installs made with `TCGD_TENSOR_DEBUG_MODE=offline` omit the
+  extension and reject enabled `TensorProbe` objects and both eager and CUDA
+  Graph `TensorRecorder` modes with `LiveTensorDebugUnavailableError`.
+  All-disabled probes remain no-ops, and tensor bundles load and compare
+  offline exactly like a full install. The first top-level package import in
+  each Python process also writes a concise offline-mode capability and
+  full-mode reinstall notice to standard error.
 - Every enabled probe adds one small device counter allocation and one
   single-thread increment kernel to its captured graph.
 - `PrintAction` and `CheckAction` host callbacks can create large GPU bubbles

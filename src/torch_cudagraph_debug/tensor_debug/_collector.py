@@ -10,6 +10,7 @@ import torch
 
 from torch_cudagraph_debug import _native
 
+from ._availability import require_live_tensor_debug
 from .actions import (
     CheckAction,
     NonContiguousPolicy,
@@ -172,6 +173,7 @@ class _TensorCollector:
         self._replay_index: torch.Tensor | None = None
         self._device: torch.device | None = None
         if self._enabled_actions:
+            require_live_tensor_debug()
             native = _native.require_native()
             self._replay_index = _create_replay_index(device)
             self._device = self._replay_index.device

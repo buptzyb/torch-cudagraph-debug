@@ -465,6 +465,7 @@ def test_package_root_public_facade() -> None:
         "JSONScalar",
         "JSONValue",
         "NativeExtensionUnavailableError",
+        "tensor_debug_mode",
     }
     assert all(
         hasattr(torch_cudagraph_debug, name) for name in torch_cudagraph_debug.__all__

@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `TCGD_TENSOR_DEBUG_MODE=offline` installs offline Tensor Debug without
+  building the compiled extension. The selected `full` or `offline` mode is
+  persisted in distribution metadata and exposed by `tensor_debug_mode()`,
+  including for editable installs. Offline mode retains tensor bundle analysis
+  and all Memory Debug capabilities while enabled probes and both Recorder
+  execution modes raise `LiveTensorDebugUnavailableError`. Each Python process
+  also receives a concise standard-error notice on its first package import
+  when the installed mode is `offline`.
+- A full-mode native build that fails in the CUDA toolchain — a missing or
+  mismatched `nvcc`, missing headers, or a compiler error — now chains an
+  install-mode hint onto the original error, so the failure output itself
+  offers `TCGD_TENSOR_DEBUG_MODE=offline` as the fallback.
+
+### Fixed
+
+- Full and offline source-install instructions now use `--no-cache-dir`
+  because pip's wheel cache does not encode Tensor Debug mode or the
+  build-time PyTorch/CUDA ABI. Offline builds also clear their package build
+  directory so a stale `_C` binary cannot leak into a pure Python wheel.
+
 ## v0.2.0 - 2026-07-11
 
 This release rebuilds the tensor-debug domain and introduces the
@@ -196,7 +220,7 @@ First public 0.1.0 release of `torch-cudagraph-debug`.
 - Linux CUDA environments only.
 - Source builds only; prebuilt wheels are intentionally not provided for v0.1.
 - Build against the CUDA-enabled PyTorch installation in the target runtime with
-  `pip install --no-build-isolation`.
+  `pip install --no-cache-dir --no-build-isolation`.
 - Source-tree imports and all-disabled probes can run without the native
   extension, but enabled probes require a native extension built against
   CUDA-enabled PyTorch.

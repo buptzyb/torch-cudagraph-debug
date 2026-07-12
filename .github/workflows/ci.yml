@@ -92,3 +92,56 @@ jobs:
           tar -xzf dist/*.tar.gz -C /tmp/sdist-check
           cd /tmp/sdist-check/torch_cudagraph_debug-*
           python -m pytest -q tests
+
+      - name: Verify the offline Tensor Debug install from the sdist
+        run: |
+          export TCGD_OFFLINE_BUNDLE
+          TCGD_OFFLINE_BUNDLE="$(mktemp -d /tmp/tcgd-offline-smoke.XXXXXX)/run.tcgd-tensor"
+          PYTHONPATH=src python - <<'PY'
+          import os
+          import torch
+          from tests.tensor_debug._run_helpers import make_tensor_run
+
+          make_tensor_run(
+              [("reference", [("output", torch.tensor([1.0]), "full")])],
+              bundle_dir=os.environ["TCGD_OFFLINE_BUNDLE"],
+          )
+          PY
+          python -m venv /tmp/offline-venv
+          . /tmp/offline-venv/bin/activate
+          python -m pip install --upgrade pip
+          TCGD_TENSOR_DEBUG_MODE=offline python -m pip install --no-cache-dir dist/*.tar.gz
+          python -c "import torch_cudagraph_debug as t; assert t.tensor_debug_mode() == 'offline'"
+          python -c "from torch_cudagraph_debug import _native; assert not _native.extension_available()"
+          tcgd-tensor summary "$TCGD_OFFLINE_BUNDLE"
+          python -m pip install -r requirements-dev.txt numpy
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TCGD_TEST_INSTALLED=1 python -m pytest -q \
+            tests/memory_debug \
+            tests/tensor_debug/test_actions.py \
+            tests/tensor_debug/test_availability.py \
+            tests/tensor_debug/test_public_api.py \
+            tests/test_agent_assets.py \
+            tests/test_build_config.py \
+            tests/test_build_modes.py \
+            tests/test_examples.py \
+            tests/test_terminology.py
+
+      - name: Verify the offline editable install
+        run: |
+          python -m venv --system-site-packages /tmp/offline-editable-venv
+          . /tmp/offline-editable-venv/bin/activate
+          TCGD_TENSOR_DEBUG_MODE=offline python -m pip install --no-cache-dir --no-deps -e .
+          python -c "import torch_cudagraph_debug as t; assert t.tensor_debug_mode() == 'offline'"
+          python - <<'PY'
+          from torch_cudagraph_debug.tensor_debug import (
+              LiveTensorDebugUnavailableError,
+              TensorRecorder,
+          )
+
+          try:
+              TensorRecorder(execution="eager")
+          except LiveTensorDebugUnavailableError:
+              pass
+          else:
+              raise AssertionError("offline editable install allowed live recording")
+          PY

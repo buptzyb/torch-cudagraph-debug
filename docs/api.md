@@ -12,11 +12,17 @@ from torch_cudagraph_debug import (
     JSONValue,
     NativeExtensionUnavailableError,
     __version__,
+    tensor_debug_mode,
 )
 ```
 
-The package root contains version information, common errors, and shared JSON
-metadata types. Import each debugging domain explicitly.
+The package root contains version information, common errors, shared JSON
+metadata types, and the installed Tensor Debug mode. `tensor_debug_mode()`
+returns `"full"` or `"offline"`; the value is selected during installation
+with `TCGD_TENSOR_DEBUG_MODE` and persisted in distribution metadata. On the
+first package import in each Python process, an offline install writes one
+capability and full-mode reinstall notice to standard error. Import each
+debugging domain explicitly.
 
 ## Public Type Index
 
@@ -41,9 +47,9 @@ Tensor facade:
   `TensorRunGroupSummary`, and `TensorRunGroupComparison`.
 - Functions: `compare_snapshots`, `compare_points`, `compare_runs`,
   `compare_point_series`, and `compare_run_groups`.
-- Errors: `TensorDebugError`, `TensorCheckError`,
-  `TensorComparisonError`, `TensorBundleError`, `TensorOwnershipError`,
-  and `TensorPayloadUnavailableError`.
+- Errors: `TensorDebugError`, `LiveTensorDebugUnavailableError`,
+  `TensorCheckError`, `TensorComparisonError`, `TensorBundleError`,
+  `TensorOwnershipError`, and `TensorPayloadUnavailableError`.
 
 Memory facade:
 
@@ -130,6 +136,14 @@ TensorProbe(
 native probe creation. If every action has `enabled=False`, the probe is a
 pure no-op: it does not load the native extension, initialize CUDA, or allocate
 a replay counter.
+
+Enabled probes require full Tensor Debug mode and the compiled native
+extension. An install made with `TCGD_TENSOR_DEBUG_MODE=offline` rejects an
+enabled probe and either `TensorRecorder` execution mode with
+`LiveTensorDebugUnavailableError`; an all-disabled probe remains a no-op.
+Offline tensor bundle analysis and every Memory Debug surface are unaffected.
+In full mode, a missing or unloadable extension instead raises
+`NativeExtensionUnavailableError`.
 
 Every enabled probe owns a zero-dimensional CUDA `int64` replay counter on
 `device`, or on the current CUDA device when `device=None`. An integer device
